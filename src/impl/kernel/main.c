@@ -1,11 +1,14 @@
 #include "print.h"
 #include "keyboard.h"
 #include "idt.h"
+#include "string.h"
 
 extern void irq1_stub();
 void pic_remap();
 
 void kernel_main() {
+    print_clear();
+
     // Initialize IDT and PIC
     idt_init();
     pic_remap();
@@ -20,9 +23,23 @@ void kernel_main() {
     char line[128];
 
     while (1) {
-        print_str("> ");           // terminal prompt
+        print_str("> ");           // shell prompt
         get_line(line, sizeof(line));
-        kprintf("You typed: %s\n\n", line);
-        __asm__ volatile("hlt");
+
+        if (strcmp(line, "help") == 0) {
+            print_str("Available commands:\n");
+            print_str("help  - show this message\n");
+            print_str("echo  - print text\n");
+            print_str("clear - clear screen\n");
+        } 
+        else if (strncmp(line, "echo ", 5) == 0) {
+            kprintf("%s\n", line + 5);
+        }
+        else if (strcmp(line, "clear") == 0) {
+            print_clear();
+        }
+        else {
+            kprintf("Unknown command: %s\n", line);
+        }
     }
 }
