@@ -1,23 +1,28 @@
 #include "print.h"
+#include "keyboard.h"
+#include "idt.h"
 
-void kernel_main(){
-    print_clear();
+extern void irq1_stub();
+void pic_remap();
 
-    print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLACK);
-    print_str("welcome to our 64 bit kernel! This is statement was printed by kernel\n");
-    
-    print_set_color(PRINT_COLOR_LIGHT_GREEN, PRINT_COLOR_BLACK);
-    print_str("SUCCESS\n");
+void kernel_main() {
+    // Initialize IDT and PIC
+    idt_init();
+    pic_remap();
 
-    // print_set_color(PRINT_COLOR_LIGHT_RED, PRINT_COLOR_BLACK);
-    // print_str("ERROR: Something failed!\n");
+    // Set keyboard IRQ (IRQ1) handler
+    idt_set_entry(0x21, irq1_stub, 0x8E); // present, ring0, interrupt gate
 
-    print_str("Number: ");
-    print_int(12345);
+    // Initialize keyboard and enable interrupts
+    init_keyboard();
+    __asm__ volatile("sti");
 
-    print_str("\nAddress: ");
-    print_hex(0xB8000);
-    print_str("\n");
+    char line[128];
 
-    kprintf("String: %s\n", "Hello Kernel!");
+    while (1) {
+        print_str("> ");           // terminal prompt
+        get_line(line, sizeof(line));
+        kprintf("You typed: %s\n\n", line);
+        __asm__ volatile("hlt");
+    }
 }
