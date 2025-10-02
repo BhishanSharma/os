@@ -1,0 +1,22 @@
+- src\
+    - impl\
+        - kernel\
+            - main.c
+        - x86_64\
+            - boot\
+                - header.asm
+                - main.asm
+                - main64.asm
+            - print.c
+    - inf\
+        - print.h
+        
+- targets\
+    - x86_64\
+        - iso\
+            - boot\
+                - grub\
+                    --grub.cfg
+        - linker.ld
+
+- Makefile
