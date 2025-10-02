@@ -4,8 +4,8 @@ docker build buildenv -t myos-buildenv
 ## myos-buildenv is the name of the docker env
 
 # To run this docker env
-docker run --rm -it -v G:\others\Dream\os\new:/root/env myos-buildenv
-## G:\others\Dream\os\new - folder i which you wnat to run the env
+docker run --rm -it -v ~/os:/root/env myos-buildenv
+## ~/os - folder in which you wnat to run the env
 ## /root/env - workdir you have saved in docker
 ## myos-buildenv - name of the docker env
 

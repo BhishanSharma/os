@@ -24,5 +24,8 @@ enum {
 
 void print_clear();
 void print_char(char character);
-void print_str(char* str);
+void print_str(const char* str);
 void print_set_color(uint8_t foreground , uint8_t background);
+void print_int(int value);
+void print_hex(uint32_t value);
+void kprintf(const char* fmt, ...);
