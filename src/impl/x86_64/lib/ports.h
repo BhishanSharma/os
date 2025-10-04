@@ -13,4 +13,14 @@ static inline uint8_t inb(uint16_t port) {
     return ret;
 }
 
+static inline uint16_t inw(uint16_t port) {
+    uint16_t result;
+    __asm__("in %%dx, %%ax" : "=a" (result) : "d" (port));
+    return result;
+}
+
+static inline void outw(uint16_t port, uint16_t val) {
+    __asm__("out %%ax, %%dx" : : "a" (val), "d" (port));
+}
+
 #endif

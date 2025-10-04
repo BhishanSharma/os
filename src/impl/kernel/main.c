@@ -7,6 +7,8 @@
 #include "string_utils.h"
 #include "paging.h"
 #include "heap.h"
+#include "fat32.h"
+#include "ata.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
@@ -24,8 +26,8 @@ static int test_alloc_count = 0;
 void kernel_main() {
     print_clear();
     
-    print_box("System Info", "MyOS v1.0");
-    print_centered("=== Welcome to MyOS ===");
+    print_box("System Info", "Terminmal OS v1.0");
+    print_centered("=== Welcome to Terminmal OS ===");
     print_line();
     kprintf("Binary: %b\n", 0xFF00AA55);
     kprintf("64-bit: %lu bytes\n", heap_get_total());
@@ -52,6 +54,42 @@ void kernel_main() {
     paging_init(kernel_start, kernel_end, heap_start, heap_size);
     heap_init(heap_start, heap_size);
 
+    if (ata_init() == 0) {
+        print_str("ATA disk detected\n");
+        
+        // Test: Read first sector
+        uint8_t* sector_buffer = kmalloc(512);
+        if (sector_buffer) {
+            print_str("Testing disk read...\n");
+            
+            int result = disk_read_sectors(0, 1, sector_buffer);
+            if (result == 0) {
+                print_str("Disk read successful!\n");
+                
+                // Show first 16 bytes
+                print_str("First 16 bytes: ");
+                for (int i = 0; i < 16; i++) {
+                    kprintf("%x ", sector_buffer[i]);
+                }
+                print_str("\n");
+            } else {
+                print_str("Disk read FAILED\n");
+            }
+            kfree(sector_buffer);
+        }
+    } else {
+        print_str("No ATA disk found\n");
+    }
+    
+    // After the disk read test, add:
+    if (fat32_init(0) == 0) {
+        print_str("FAT32 filesystem mounted\n");
+    } else {
+        print_str("Failed to mount FAT32\n");
+    }
+
+    print_str("Boot complete!\n");
+
     __asm__ volatile("sti");
 
     char line[128];
@@ -73,6 +111,10 @@ void kernel_main() {
             print_str("freeidx - free specific allocation (freeidx <n>)\n");
             print_str("meminfo - show heap memory statistics\n");
             print_str("listptr - list all test allocations\n");
+            print_str("ls       - list files in root directory\n");
+            print_str("cat      - display file contents\n");
+            print_str("hexdump  - show hex dump of file\n");
+            print_str("fileinfo - show file information\n");
         } 
         else if (strncmp(line, "echo ", 5) == 0) {
             kprintf("%s\n", line + 5);
@@ -171,6 +213,220 @@ void kernel_main() {
             uint32_t s = kstr_to_uint32(line + 6);
             sleep(s * 1000);
             print_str("Done sleeping\n");
+        }
+        else if (strcmp(line, "ls") == 0) {
+            fat32_file_info_t files[32];
+            int count = fat32_list_directory("/", files, 32);
+            
+            if (count < 0) {
+                print_str("Failed to read directory\n");
+            } else if (count == 0) {
+                print_str("Empty directory\n");
+            } else {
+                kprintf("Found %d files:\n", count);
+                print_line();
+                
+                for (int i = 0; i < count; i++) {
+                    if (files[i].is_directory) {
+                        kprintf("[DIR]  %s\n", files[i].name);
+                    } else {
+                        kprintf("[FILE] %s %u bytes\n", files[i].name, files[i].size);
+                    }
+                }
+            }
+        }
+        else if (strncmp(line, "cat ", 4) == 0) {
+            const char* filename = line + 4;
+            
+            if (!fat32_file_exists(filename)) {
+                kprintf("File not found: %s\n", filename);
+            } else {
+                uint32_t size = fat32_get_file_size(filename);
+                
+                if (size == 0) {
+                    print_str("Empty file\n");
+                } else if (size > 4096) {
+                    print_str("File too large (max 4KB for display)\n");
+                } else {
+                    uint8_t* buffer = kmalloc(size + 1);
+                    if (!buffer) {
+                        print_str("Out of memory\n");
+                    } else {
+                        int bytes = fat32_read_file(filename, buffer, size);
+                        if (bytes < 0) {
+                            print_str("Failed to read file\n");
+                        } else {
+                            buffer[bytes] = '\0';
+                            print_str("=== File Contents ===\n");
+                            print_str((char*)buffer);
+                            print_str("\n=== End ===\n");
+                        }
+                        kfree(buffer);
+                    }
+                }
+            }
+        }
+        else if (strncmp(line, "hexdump ", 8) == 0) {
+            const char* filename = line + 8;
+            
+            if (!fat32_file_exists(filename)) {
+                kprintf("File not found: %s\n", filename);
+            } else {
+                uint32_t size = fat32_get_file_size(filename);
+                uint32_t display_size = (size > 256) ? 256 : size;
+                
+                uint8_t* buffer = kmalloc(display_size);
+                if (!buffer) {
+                    print_str("Out of memory\n");
+                } else {
+                    int bytes = fat32_read_file(filename, buffer, display_size);
+                    if (bytes < 0) {
+                        print_str("Failed to read file\n");
+                    } else {
+                        kprintf("=== Hex Dump (first %d bytes) ===\n", bytes);
+                        
+                        for (int i = 0; i < bytes; i += 16) {
+                            kprintf("%x: ", i);
+                            
+                            // Hex values
+                            for (int j = 0; j < 16 && i + j < bytes; j++) {
+                                kprintf("%x ", buffer[i + j]);
+                            }
+                            
+                            print_str(" | ");
+                            
+                            // ASCII representation
+                            for (int j = 0; j < 16 && i + j < bytes; j++) {
+                                char c = buffer[i + j];
+                                if (c >= 32 && c <= 126) {
+                                    print_char(c);
+                                } else {
+                                    print_char('.');
+                                }
+                            }
+                            
+                            print_char('\n');
+                        }
+                    }
+                    kfree(buffer);
+                }
+            }
+        }
+        else if (strncmp(line, "fileinfo ", 9) == 0) {
+            const char* filename = line + 9;
+            
+            if (!fat32_file_exists(filename)) {
+                kprintf("File not found: %s\n", filename);
+            } else {
+                uint32_t size = fat32_get_file_size(filename);
+                kprintf("File: %s\n", filename);
+                kprintf("Size: %u bytes (%u KB)\n", size, size / 1024);
+            }
+        }
+        else if (strcmp(line, "diskinfo") == 0) {
+            uint8_t* buffer = kmalloc(512);
+            if (!buffer) {
+                print_str("Out of memory\n");
+            } else {
+                // Read boot sector
+                if (disk_read_sectors(0, 1, buffer) == 0) {
+                    print_str("=== Boot Sector (LBA 0) ===\n");
+                    
+                    // Check for FAT32 signature
+                    if (buffer[510] == 0x55 && buffer[511] == 0xAA) {
+                        print_str("Valid boot signature found!\n");
+                    } else {
+                        kprintf("Invalid signature: %x %x\n", buffer[510], buffer[511]);
+                    }
+                    
+                    // Show OEM name
+                    print_str("OEM: ");
+                    for (int i = 3; i < 11; i++) {
+                        print_char(buffer[i]);
+                    }
+                    print_str("\n");
+                    
+                    // Show bytes per sector
+                    uint16_t bytes_per_sector = *(uint16_t*)(buffer + 11);
+                    kprintf("Bytes/Sector: %d\n", bytes_per_sector);
+                    
+                    // Show sectors per cluster
+                    uint8_t sectors_per_cluster = buffer[13];
+                    kprintf("Sectors/Cluster: %d\n", sectors_per_cluster);
+                    
+                    // Show reserved sectors
+                    uint16_t reserved = *(uint16_t*)(buffer + 14);
+                    kprintf("Reserved sectors: %d\n", reserved);
+                    
+                    // Show number of FATs
+                    uint8_t num_fats = buffer[16];
+                    kprintf("Number of FATs: %d\n", num_fats);
+                    
+                    // Check FS type
+                    print_str("FS Type: ");
+                    for (int i = 82; i < 90; i++) {
+                        print_char(buffer[i]);
+                    }
+                    print_str("\n");
+                    
+                    // Show first 32 bytes in hex
+                    print_str("\nFirst 32 bytes:\n");
+                    for (int i = 0; i < 32; i++) {
+                        kprintf("%x ", buffer[i]);
+                        if ((i + 1) % 16 == 0) print_str("\n");
+                    }
+                } else {
+                    print_str("Failed to read boot sector\n");
+                }
+                kfree(buffer);
+            }
+        }
+        else if (strncmp(line, "readsector ", 11) == 0) {
+            uint32_t lba = kstr_to_uint32(line + 11);
+            uint8_t* buffer = kmalloc(512);
+            
+            if (!buffer) {
+                print_str("Out of memory\n");
+            } else {
+                kprintf("Reading sector %d...\n", lba);
+                
+                if (disk_read_sectors(lba, 1, buffer) == 0) {
+                    print_str("Success! First 64 bytes:\n");
+                    for (int i = 0; i < 64; i++) {
+                        kprintf("%x ", buffer[i]);
+                        if ((i + 1) % 16 == 0) print_str("\n");
+                    }
+                } else {
+                    print_str("Read failed!\n");
+                }
+                kfree(buffer);
+            }
+        }
+        else if (strcmp(line, "fat32info") == 0) {
+            uint8_t* buffer = kmalloc(512);
+            if (!buffer) {
+                print_str("Out of memory\n");
+            } else {
+                if (disk_read_sectors(0, 1, buffer) == 0) {
+                    fat32_boot_sector_t* bs = (fat32_boot_sector_t*)buffer;
+                    
+                    print_str("=== FAT32 Boot Sector ===\n");
+                    kprintf("Bytes/Sector: %d\n", bs->bytes_per_sector);
+                    kprintf("Sectors/Cluster: %d\n", bs->sectors_per_cluster);
+                    kprintf("Reserved: %d\n", bs->reserved_sectors);
+                    kprintf("FATs: %d\n", bs->num_fats);
+                    kprintf("FAT Size: %u\n", bs->fat_size_32);
+                    kprintf("Root Cluster: %u\n", bs->root_cluster);
+                    
+                    uint32_t fat_start = bs->reserved_sectors;
+                    uint32_t data_start = fat_start + (bs->num_fats * bs->fat_size_32);
+                    uint32_t root_lba = data_start + ((bs->root_cluster - 2) * bs->sectors_per_cluster);
+                    
+                    kprintf("Data starts: %u\n", data_start);
+                    kprintf("Root LBA: %u\n", root_lba);
+                }
+                kfree(buffer);
+            }
         }
         else {
             kprintf("Unknown command: %s\n", line);
