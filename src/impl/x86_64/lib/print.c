@@ -47,7 +47,6 @@ void print_newLine() {
         return;
     }
 
-    // Scroll everything up
     for (size_t r = 1; r < NUM_ROWS; r++) {
         for (size_t c = 0; c < NUM_COLS; c++) {
             buffer[c + NUM_COLS * (r - 1)] = buffer[c + NUM_COLS * r];
@@ -125,6 +124,44 @@ void print_int(int value) {
     }
 }
 
+void print_uint(uint32_t value) {
+    char buffer[32];
+    int i = 0;
+
+    if (value == 0) {
+        print_char('0');
+        return;
+    }
+
+    while (value > 0) {
+        buffer[i++] = '0' + (value % 10);
+        value /= 10;
+    }
+
+    for (int j = i - 1; j >= 0; j--) {
+        print_char(buffer[j]);
+    }
+}
+
+void print_uint64(uint64_t value) {
+    char buffer[32];
+    int i = 0;
+
+    if (value == 0) {
+        print_char('0');
+        return;
+    }
+
+    while (value > 0) {
+        buffer[i++] = '0' + (value % 10);
+        value /= 10;
+    }
+
+    for (int j = i - 1; j >= 0; j--) {
+        print_char(buffer[j]);
+    }
+}
+
 void print_hex(uint32_t value) {
     char* hex_digits = "0123456789ABCDEF";
     print_str("0x");
@@ -133,6 +170,115 @@ void print_hex(uint32_t value) {
         uint8_t digit = (value >> i) & 0xF;
         print_char(hex_digits[digit]);
     }
+}
+
+void print_hex64(uint64_t value) {
+    char* hex_digits = "0123456789ABCDEF";
+    print_str("0x");
+
+    for (int i = 60; i >= 0; i -= 4) {
+        uint8_t digit = (value >> i) & 0xF;
+        print_char(hex_digits[digit]);
+    }
+}
+
+void print_bin(uint32_t value) {
+    print_str("0b");
+    for (int i = 31; i >= 0; i--) {
+        print_char((value & (1 << i)) ? '1' : '0');
+        if (i % 8 == 0 && i != 0) print_char('_');
+    }
+}
+
+void print_repeat(char c, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        print_char(c);
+    }
+}
+
+void print_line(void) {
+    print_repeat('-', NUM_COLS);
+}
+
+void print_centered(const char* str) {
+    size_t len = 0;
+    while (str[len] != '\0') len++;
+    
+    if (len >= NUM_COLS) {
+        print_str(str);
+        return;
+    }
+    
+    size_t padding = (NUM_COLS - len) / 2;
+    print_repeat(' ', padding);
+    print_str(str);
+    print_newLine();
+}
+
+size_t print_get_row(void) {
+    return row;
+}
+
+size_t print_get_col(void) {
+    return col;
+}
+
+void print_set_pos(size_t new_col, size_t new_row) {
+    if (new_col < NUM_COLS) col = new_col;
+    if (new_row < NUM_ROWS) row = new_row;
+    move_cursor();
+}
+
+void print_at(size_t at_col, size_t at_row, const char* str) {
+    size_t old_col = col;
+    size_t old_row = row;
+    
+    print_set_pos(at_col, at_row);
+    print_str(str);
+    
+    col = old_col;
+    row = old_row;
+    move_cursor();
+}
+
+void print_box(const char* title, const char* content) {
+    size_t title_len = 0;
+    while (title[title_len] != '\0') title_len++;
+    
+    size_t content_len = 0;
+    while (content[content_len] != '\0') content_len++;
+    
+    size_t box_width = (title_len > content_len ? title_len : content_len) + 4;
+    if (box_width > NUM_COLS - 2) box_width = NUM_COLS - 2;
+    
+    // Top border
+    print_char('+');
+    print_repeat('-', box_width - 2);
+    print_str("+\n");
+    
+    // Title
+    print_str("| ");
+    print_str(title);
+    size_t padding = box_width - title_len - 4;
+    print_repeat(' ', padding);
+    print_str(" |\n");
+    
+    // Middle border
+    print_char('+');
+    print_repeat('-', box_width - 2);
+    print_str("+\n");
+    
+    // Content
+    print_str("| ");
+    print_str(content);
+    padding = box_width - content_len - 4;
+    print_repeat(' ', padding);
+    print_str(" |\n");
+    
+    // Bottom border
+    print_char('+');
+    print_repeat('-', box_width - 2);
+    print_str("+\n");
 }
 
 void kprintf(const char* fmt, ...) {
@@ -148,9 +294,30 @@ void kprintf(const char* fmt, ...) {
                     print_int(val);
                     break;
                 }
+                case 'u': {
+                    uint32_t val = va_arg(args, uint32_t);
+                    print_uint(val);
+                    break;
+                }
+                case 'l': {
+                    fmt++;
+                    if (*fmt == 'u') {
+                        uint64_t val = va_arg(args, uint64_t);
+                        print_uint64(val);
+                    } else if (*fmt == 'x') {
+                        uint64_t val = va_arg(args, uint64_t);
+                        print_hex64(val);
+                    }
+                    break;
+                }
                 case 'x': {
                     uint32_t val = va_arg(args, uint32_t);
                     print_hex(val);
+                    break;
+                }
+                case 'b': {
+                    uint32_t val = va_arg(args, uint32_t);
+                    print_bin(val);
                     break;
                 }
                 case 's': {
