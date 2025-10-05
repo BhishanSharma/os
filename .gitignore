@@ -1,5 +1,20 @@
+# VSCode settings
 .vscode/
-build
-dist
 
+# Build directories
+build/
+dist/
+
+# Disk image
 disk.img
+
+# Object and binary files
+*.o
+*.elf
+*.bin
+*.iso
+
+# Temporary and backup files
+*.log
+*.tmp
+*~
