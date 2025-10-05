@@ -10,6 +10,7 @@
 #include "elf.h"
 #include "ata.h"
 #include "string_utils.h"
+#include "system.h"
 
 #define MAX_TEST_ALLOCS 16
 static void *test_allocs[MAX_TEST_ALLOCS];
@@ -26,6 +27,9 @@ void shell_run(void)
 
     while (1)
     {
+        char cwd[256];
+        fat32_get_current_directory(cwd, sizeof(cwd));
+        kprintf("%s\n", cwd);
         print_prompt("> ");
         get_line(line, sizeof(line));
 
@@ -674,7 +678,7 @@ void shell_run(void)
             print_warning("This is a warning message");
             print_error("This is an error message");
             print_str("\n");
-            print_box_themed("Demo Box", "This is a themed box!");
+            print_box("Demo Box", "This is a themed box!");
         }
         else if (strncmp(line, "edit ", 5) == 0)
         {
@@ -685,6 +689,7 @@ void shell_run(void)
         {
             kprintf("Unknown command: %s\n", line);
         }
+        print_newLine();
     }
 }
 

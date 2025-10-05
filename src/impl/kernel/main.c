@@ -17,7 +17,6 @@ extern void irq0_stub();
 extern void irq1_stub();
 void pic_remap();
 
-extern void reboot();
 extern void memory_init(uint64_t mem_upper);
 
 void kernel_main() {

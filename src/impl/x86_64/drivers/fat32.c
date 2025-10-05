@@ -256,8 +256,6 @@ int fat32_read_file(const char* path, uint8_t* buffer, uint32_t max_size) {
 }
 
 int fat32_list_directory(fat32_file_info_t* files, uint32_t max_files) {
-    char cwd[256];
-    const char* path = fat32_get_current_directory(cwd, sizeof(cwd));    
     uint8_t* cluster_buffer = kmalloc(bytes_per_cluster);
     if (!cluster_buffer) return -1;
     
