@@ -23,13 +23,10 @@ extern void memory_init(uint64_t mem_upper);
 void kernel_main() {
     print_set_theme(THEME_CYBERPUNK);
     print_clear();
-    
-    print_box("System Info", "Terminal OS v1.0");
+
+    print_line();
     print_centered("=== Welcome to Terminmal OS ===");
     print_line();
-    kprintf("Binary: %b\n", 0xFF00AA55);
-    kprintf("64-bit: %lu bytes\n", heap_get_total());
-    kprintf("Hex64: %lx\n", 0x123456789ABCDEF0);
 
     // Initialize IDT and PIC
     idt_init();
@@ -54,27 +51,6 @@ void kernel_main() {
 
     if (ata_init() == 0) {
         print_str("ATA disk detected\n");
-        
-        // Test: Read first sector
-        uint8_t* sector_buffer = kmalloc(512);
-        if (sector_buffer) {
-            print_str("Testing disk read...\n");
-            
-            int result = disk_read_sectors(0, 1, sector_buffer);
-            if (result == 0) {
-                print_str("Disk read successful!\n");
-                
-                // Show first 16 bytes
-                print_str("First 16 bytes: ");
-                for (int i = 0; i < 16; i++) {
-                    kprintf("%x ", sector_buffer[i]);
-                }
-                print_str("\n");
-            } else {
-                print_str("Disk read FAILED\n");
-            }
-            kfree(sector_buffer);
-        }
     } else {
         print_str("No ATA disk found\n");
     }
