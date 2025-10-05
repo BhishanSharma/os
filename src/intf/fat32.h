@@ -81,7 +81,7 @@ typedef struct {
 // Core functions
 int fat32_init(uint32_t partition_lba);
 int fat32_read_file(const char* path, uint8_t* buffer, uint32_t max_size);
-int fat32_list_directory(const char* path, fat32_file_info_t* files, uint32_t max_files);
+int fat32_list_directory(fat32_file_info_t* files, uint32_t max_files);
 int fat32_file_exists(const char* path);
 uint32_t fat32_get_file_size(const char* path);
 
@@ -91,5 +91,6 @@ int fat32_delete_file(const char* path);
 int fat32_change_directory(const char* path);
 int fat32_get_current_directory(char* buffer, uint32_t size);
 int fat32_mkdir(const char* path);
+int fat32_list_directory_ex(const char* path, fat32_file_info_t* files, uint32_t max_files);
 
 #endif

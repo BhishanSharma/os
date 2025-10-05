@@ -9,6 +9,7 @@
 #include "heap.h"
 #include "fat32.h"
 #include "ata.h"
+#include "elf.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
@@ -24,9 +25,10 @@ static uint64_t test_alloc_sizes[MAX_TEST_ALLOCS];
 static int test_alloc_count = 0;
 
 void kernel_main() {
+    print_set_theme(THEME_CYBERPUNK);
     print_clear();
     
-    print_box("System Info", "Terminmal OS v1.0");
+    print_box_themed("System Info", "Terminal OS v1.0");
     print_centered("=== Welcome to Terminmal OS ===");
     print_line();
     kprintf("Binary: %b\n", 0xFF00AA55);
@@ -44,7 +46,7 @@ void kernel_main() {
     // Initialize keyboard and enable interrupts
     init_keyboard();
     timer_init();
-    memory_init(64 * 1024);
+    memory_init(512 * 1024);
 
     uint64_t kernel_start = 0x100000;
     uint64_t kernel_end   = 0x120000;
@@ -87,6 +89,8 @@ void kernel_main() {
     } else {
         print_str("Failed to mount FAT32\n");
     }
+    
+    fat32_change_directory("/");
 
     print_str("Boot complete!\n");
 
@@ -95,27 +99,36 @@ void kernel_main() {
     char line[128];
 
     while (1) {
-        print_str("> ");
+        print_prompt("> ");
         get_line(line, sizeof(line));
 
         if (strcmp(line, "help") == 0) {
-            print_str("Available commands:\n");
-            print_str("help    - show this message\n");
-            print_str("echo    - print text\n");
-            print_str("clear   - clear screen\n");
-            print_str("uptime  - show uptime in seconds\n");
-            print_str("reboot  - reboot the system\n");
-            print_str("alloc   - allocate a frame\n");
-            print_str("malloc  - test heap allocation (malloc <size>)\n");
-            print_str("free    - free last malloc'd block\n");
-            print_str("freeidx - free specific allocation (freeidx <n>)\n");
-            print_str("meminfo - show heap memory statistics\n");
-            print_str("listptr - list all test allocations\n");
-            print_str("ls       - list files in root directory\n");
-            print_str("cat      - display file contents\n");
-            print_str("hexdump  - show hex dump of file\n");
-            print_str("fileinfo - show file information\n");
-        } 
+            print_info("Available commands:\n");
+            print_str("\n=== Appearance ===\n");
+            print_str("theme <name> - change color theme\n");
+            print_str("themes       - list available themes\n");
+            print_str("demo         - show themed message examples\n");
+            print_str("=== File System Commands ===\n");
+            print_str("ls       - list files\n");
+            print_str("cat      - display file\n");
+            print_str("write    - write file (write file.txt content)\n");
+            print_str("touch    - create empty file\n");
+            print_str("rm       - delete file\n");
+            print_str("mkdir    - create directory\n");
+            print_str("cd       - change directory\n");
+            print_str("pwd      - print working directory\n");
+            print_str("tree     - show directory tree\n");
+            print_str("\n=== Program Execution ===\n");
+            print_str("exec     - execute ELF program\n");
+            print_str("load     - load ELF into memory\n");
+            print_str("elfinfo  - show ELF file info\n");
+            print_str("\n=== System Commands ===\n");
+            print_str("help     - show this message\n");
+            print_str("clear    - clear screen\n");
+            print_str("uptime   - show uptime\n");
+            print_str("meminfo  - show memory stats\n");
+            print_str("reboot   - reboot system\n");
+        }
         else if (strncmp(line, "echo ", 5) == 0) {
             kprintf("%s\n", line + 5);
         }
@@ -216,7 +229,7 @@ void kernel_main() {
         }
         else if (strcmp(line, "ls") == 0) {
             fat32_file_info_t files[32];
-            int count = fat32_list_directory("/", files, 32);
+            int count = fat32_list_directory(files, 32);
             
             if (count < 0) {
                 print_str("Failed to read directory\n");
@@ -427,6 +440,236 @@ void kernel_main() {
                 }
                 kfree(buffer);
             }
+        }
+         else if (strncmp(line, "write ", 6) == 0) {
+            // Parse: write filename content
+            char* space = line + 6;
+            while (*space && *space != ' ') space++;
+            if (*space == ' ') {
+                *space = '\0';
+                const char* filename = line + 6;
+                const char* content = space + 1;
+                
+                int result = fat32_write_file(filename, (uint8_t*)content, strlen(content));
+                if (result < 0) {
+                    kprintf("Failed to write file: %d\n", result);
+                } else {
+                    kprintf("Wrote %d bytes to %s\n", result, filename);
+                }
+            } else {
+                print_str("Usage: write <filename> <content>\n");
+            }
+        }
+        else if (strncmp(line, "touch ", 6) == 0) {
+            const char* filename = line + 6;
+
+            if (fat32_create_file(filename) == 0) {
+                kprintf("Created file: %s\n", filename);
+            } else {
+                print_str("Failed to create file\n");
+            }
+        }
+        else if (strncmp(line, "rm ", 3) == 0) {
+            const char* filename = line + 3;
+            if (fat32_delete_file(filename) == 0) {
+                kprintf("Deleted: %s\n", filename);
+            } else {
+                print_str("Failed to delete file\n");
+            }
+        }
+        else if (strncmp(line, "mkdir ", 6) == 0) {
+            const char* dirname = line + 6;
+            if (fat32_mkdir(dirname) == 0) {
+                kprintf("Created directory: %s\n", dirname);
+            } else {
+                print_str("Failed to create directory\n");
+            }
+        }
+        else if (strncmp(line, "cd ", 3) == 0) {
+            const char* path = line + 3;
+            if (fat32_change_directory(path) == 0) {
+                char cwd[256];
+                fat32_get_current_directory(cwd, sizeof(cwd));
+                kprintf("Changed to: %s\n", cwd);
+            } else {
+                print_str("Directory not found\n");
+            }
+        }
+        else if (strcmp(line, "pwd") == 0) {
+            char cwd[256];
+            fat32_get_current_directory(cwd, sizeof(cwd));
+            kprintf("Current directory: %s\n", cwd);
+        }
+        else if (strncmp(line, "exec ", 5) == 0) {
+            const char* program = line + 5;
+            print_str("Loading ELF program...\n");
+            
+            if (elf_exec(program) == 0) {
+                print_str("Program returned\n");
+            } else {
+                print_str("Failed to execute program\n");
+            }
+        }
+        else if (strncmp(line, "load ", 5) == 0) {
+            const char* program = line + 5;
+            print_str("Loading ELF program into memory...\n");
+            
+            if (elf_load(program) == 0) {
+                print_str("Program loaded successfully\n");
+            } else {
+                print_str("Failed to load program\n");
+            }
+        }
+        else if (strncmp(line, "elfinfo ", 8) == 0) {
+            const char* filename = line + 8;
+            
+            uint32_t size = fat32_get_file_size(filename);
+            if (size < sizeof(elf64_ehdr_t)) {
+                print_str("File too small to be ELF\n");
+            } else {
+                uint8_t* buffer = kmalloc(size);
+                if (buffer) {
+                    if (fat32_read_file(filename, buffer, size) > 0) {
+                        elf64_ehdr_t* ehdr = (elf64_ehdr_t*)buffer;
+                        
+                        print_str("=== ELF Info ===\n");
+                        
+                        // Check magic
+                        if (*(uint32_t*)ehdr->e_ident == 0x464C457F) {
+                            print_str("Valid ELF file\n");
+                        } else {
+                            print_str("Invalid ELF magic\n");
+                        }
+                        
+                        kprintf("Class: %s\n", 
+                                ehdr->e_ident[4] == 2 ? "64-bit" : "32-bit");
+                        kprintf("Machine: %s\n", 
+                                ehdr->e_machine == 0x3E ? "x86-64" : "Unknown");
+                        kprintf("Entry point: %lx\n", ehdr->e_entry);
+                        kprintf("Program headers: %d\n", ehdr->e_phnum);
+                        kprintf("Section headers: %d\n", ehdr->e_shnum);
+                        
+                        // Show program headers
+                        if (ehdr->e_phoff > 0 && ehdr->e_phnum > 0) {
+                            elf64_phdr_t* phdr = (elf64_phdr_t*)(buffer + ehdr->e_phoff);
+                            print_str("\nProgram Headers:\n");
+                            for (int i = 0; i < ehdr->e_phnum && i < 10; i++) {
+                                kprintf("  [%d] Type=%d VAddr=%lx Size=%lu\n",
+                                        i, phdr[i].p_type, phdr[i].p_vaddr, 
+                                        phdr[i].p_memsz);
+                            }
+                        }
+                    }
+                    kfree(buffer);
+                }
+            }
+        }
+        else if (strcmp(line, "tree") == 0) {
+            // Show directory tree (simple version)
+            print_str("Directory tree:\n");
+            fat32_file_info_t files[32];
+            int count = fat32_list_directory_ex(NULL, files, 32);
+            
+            for (int i = 0; i < count; i++) {
+                if (files[i].is_directory) {
+                    kprintf("  [DIR]  %s/\n", files[i].name);
+                } else {
+                    kprintf("  [FILE] %s\n", files[i].name);
+                }
+            }
+        }
+        else if (strncmp(line, "theme ", 6) == 0) {
+            const char* theme_name = line + 6;
+            
+            if (strcmp(theme_name, "dracula") == 0) {
+                print_set_theme(THEME_DRACULA);
+                print_success("Theme changed to Dracula");
+            }
+            else if (strcmp(theme_name, "nord") == 0) {
+                print_set_theme(THEME_NORD);
+                print_success("Theme changed to Nord");
+            }
+            else if (strcmp(theme_name, "monokai") == 0) {
+                print_set_theme(THEME_MONOKAI);
+                print_success("Theme changed to Monokai");
+            }
+            else if (strcmp(theme_name, "gruvbox") == 0) {
+                print_set_theme(THEME_GRUVBOX);
+                print_success("Theme changed to Gruvbox");
+            }
+            else if (strcmp(theme_name, "solarized") == 0) {
+                print_set_theme(THEME_SOLARIZED);
+                print_success("Theme changed to Solarized Dark");
+            }
+            else if (strcmp(theme_name, "matrix") == 0) {
+                print_set_theme(THEME_MATRIX);
+                print_success("Theme changed to Matrix");
+            }
+            else if (strcmp(theme_name, "cyberpunk") == 0) {
+                print_set_theme(THEME_CYBERPUNK);
+                print_success("Theme changed to Cyberpunk");
+            }
+            else if (strcmp(theme_name, "default") == 0) {
+                print_set_theme(THEME_DEFAULT);
+                print_success("Theme changed to Default");
+            }
+            else {
+                print_error("Unknown theme");
+                print_info("Available themes:");
+                print_str("  dracula, nord, monokai, gruvbox\n");
+                print_str("  solarized, matrix, cyberpunk, default\n");
+            }
+        }
+        else if (strcmp(line, "themes") == 0) {
+            print_info("Available color themes:");
+            print_str("\n");
+            
+            print_set_color(PRINT_COLOR_MAGENTA, PRINT_COLOR_BLACK);
+            print_str("  dracula    - ");
+            print_set_color(PRINT_COLOR_LIGHT_GRAY, PRINT_COLOR_BLACK);
+            print_str("Purple and cyan on dark background\n");
+            
+            print_set_color(PRINT_COLOR_LIGHT_CYAN, PRINT_COLOR_DARK_GRAY);
+            print_str("  nord       - ");
+            print_set_color(PRINT_COLOR_LIGHT_GRAY, PRINT_COLOR_DARK_GRAY);
+            print_str("Arctic, north-bluish color palette\n");
+            
+            print_set_color(PRINT_COLOR_LIGHT_GREEN, PRINT_COLOR_BLACK);
+            print_str("  monokai    - ");
+            print_set_color(PRINT_COLOR_LIGHT_GRAY, PRINT_COLOR_BLACK);
+            print_str("Vibrant colors on black\n");
+            
+            print_set_color(PRINT_COLOR_BROWN, PRINT_COLOR_BLACK);
+            print_str("  gruvbox    - ");
+            print_set_color(PRINT_COLOR_LIGHT_GRAY, PRINT_COLOR_BLACK);
+            print_str("Retro groove warm colors\n");
+            
+            print_set_color(PRINT_COLOR_CYAN, PRINT_COLOR_DARK_GRAY);
+            print_str("  solarized  - ");
+            print_set_color(PRINT_COLOR_LIGHT_GRAY, PRINT_COLOR_DARK_GRAY);
+            print_str("Precision colors for readability\n");
+            
+            print_set_color(PRINT_COLOR_LIGHT_GREEN, PRINT_COLOR_BLACK);
+            print_str("  matrix     - ");
+            print_set_color(PRINT_COLOR_GREEN, PRINT_COLOR_BLACK);
+            print_str("Classic green terminal\n");
+            
+            print_set_color(PRINT_COLOR_MAGENTA, PRINT_COLOR_BLACK);
+            print_str("  cyberpunk  - ");
+            print_set_color(PRINT_COLOR_CYAN, PRINT_COLOR_BLACK);
+            print_str("Neon cyan and magenta\n");
+            
+            print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLUE);
+            print_str("  default    - ");
+            print_str("Classic blue terminal\n");
+        }
+        else if (strcmp(line, "demo") == 0) {
+            print_info("This is an info message");
+            print_success("This is a success message");
+            print_warning("This is a warning message");
+            print_error("This is an error message");
+            print_str("\n");
+            print_box_themed("Demo Box", "This is a themed box!");
         }
         else {
             kprintf("Unknown command: %s\n", line);

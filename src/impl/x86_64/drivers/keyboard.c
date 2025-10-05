@@ -1,11 +1,21 @@
 #include "keyboard.h"
 #include "print.h"
 #include "../lib/ports.h"
+#include "string.h"
 
 #define KEYBOARD_DATA_PORT 0x60
+#define HISTORY_SIZE 20
+#define MAX_CMD_LEN 256
 
 static char key_buffer[256];
 static int buffer_index = 0;
+static int extended_scancode = 0;
+
+// Command history
+static char command_history[HISTORY_SIZE][MAX_CMD_LEN];
+static int history_count = 0;
+static int history_index = -1;
+static int history_current = 0;
 
 unsigned char kbdus[128] = {
     0,  27, '1','2','3','4','5','6','7','8','9','0','-','=', '\b',
@@ -17,28 +27,53 @@ unsigned char kbdus[128] = {
 void keyboard_handler() {
     uint8_t scancode = inb(KEYBOARD_DATA_PORT);
 
-    if (!(scancode & 0x80)) {
-        char c = kbdus[scancode];
-        if (c == '\b') {
-            key_buffer[buffer_index++] = '\b';
-            key_buffer[buffer_index] = '\0';
+    // Check for extended scancode prefix (0xE0)
+    if (scancode == 0xE0) {
+        extended_scancode = 1;
+        return;
+    }
+
+    if (!(scancode & 0x80)) {  // Key press (not release)
+        if (extended_scancode) {
+            // Handle extended scancodes (arrow keys)
+            switch (scancode) {
+                case 0x48:  // Up arrow
+                    key_buffer[buffer_index++] = KEY_UP_ARROW;
+                    break;
+                case 0x50:  // Down arrow
+                    key_buffer[buffer_index++] = KEY_DOWN_ARROW;
+                    break;
+                case 0x4B:  // Left arrow
+                    key_buffer[buffer_index++] = KEY_LEFT_ARROW;
+                    break;
+                case 0x4D:  // Right arrow
+                    key_buffer[buffer_index++] = KEY_RIGHT_ARROW;
+                    break;
+            }
+            extended_scancode = 0;
         } else {
-            key_buffer[buffer_index++] = c;
-            key_buffer[buffer_index] = '\0';
+            // Normal key
+            char c = kbdus[scancode];
+            if (c == '\b') {
+                key_buffer[buffer_index++] = '\b';
+            } else {
+                key_buffer[buffer_index++] = c;
+            }
         }
+        key_buffer[buffer_index] = '\0';
     }
 }
 
 void enable_irq(uint8_t irq) {
     if (irq < 8)
-        outb(0x21, inb(0x21) & ~(1 << irq));  // master PIC
+        outb(0x21, inb(0x21) & ~(1 << irq));
     else
-        outb(0xA1, inb(0xA1) & ~(1 << (irq - 8))); // slave PIC
+        outb(0xA1, inb(0xA1) & ~(1 << (irq - 8)));
 }
 
 void init_keyboard() {
     print_str("Keyboard initialized\n");
-    enable_irq(1); // unmask IRQ1 (keyboard)
+    enable_irq(1);
 }
 
 char get_char() {
@@ -50,34 +85,145 @@ char get_char() {
     return c;
 }
 
+// Add command to history
+void history_add(const char* cmd) {
+    if (cmd[0] == '\0') return;  // Don't add empty commands
+    
+    // Check if it's the same as the last command
+    if (history_count > 0 && 
+        strcmp(command_history[(history_current - 1 + HISTORY_SIZE) % HISTORY_SIZE], cmd) == 0) {
+        return;  // Don't add duplicates
+    }
+    
+    // Copy command to history
+    int i = 0;
+    while (cmd[i] && i < MAX_CMD_LEN - 1) {
+        command_history[history_current][i] = cmd[i];
+        i++;
+    }
+    command_history[history_current][i] = '\0';
+    
+    // Update history pointers
+    history_current = (history_current + 1) % HISTORY_SIZE;
+    if (history_count < HISTORY_SIZE) {
+        history_count++;
+    }
+    history_index = -1;  // Reset browsing position
+}
+
+// Get previous command from history
+const char* history_prev() {
+    if (history_count == 0) return NULL;
+    
+    if (history_index == -1) {
+        history_index = (history_current - 1 + HISTORY_SIZE) % HISTORY_SIZE;
+    } else {
+        int prev = (history_index - 1 + HISTORY_SIZE) % HISTORY_SIZE;
+        if (prev == history_current) return NULL;  // Reached oldest
+        history_index = prev;
+    }
+    
+    return command_history[history_index];
+}
+
+// Get next command from history
+const char* history_next() {
+    if (history_index == -1) return NULL;
+    
+    int next = (history_index + 1) % HISTORY_SIZE;
+    if (next == history_current) {
+        history_index = -1;
+        return "";  // Return empty to clear line
+    }
+    
+    history_index = next;
+    return command_history[history_index];
+}
+
 void get_line(char* buffer, size_t max_len) {
     size_t index = 0;
+    buffer[0] = '\0';
 
     while (1) {
-        char c = get_char();  // get next char from keyboard buffer
+        char c = get_char();
         if (!c) {
-            __asm__ volatile("hlt"); // halt CPU until next key
+            __asm__ volatile("hlt");
             continue;
         }
 
-        if (c == '\b') { // backspace
+        // Handle arrow keys FIRST - before any other processing
+        if (c == KEY_UP_ARROW) {
+            const char* prev_cmd = history_prev();
+            if (prev_cmd) {
+                // Clear current line
+                while (index > 0) {
+                    print_str("\b \b");
+                    index--;
+                }
+                
+                // Display previous command
+                index = 0;
+                while (prev_cmd[index] && index < max_len - 1) {
+                    buffer[index] = prev_cmd[index];
+                    print_char(prev_cmd[index]);
+                    index++;
+                }
+                buffer[index] = '\0';
+            }
+            continue;  // CRITICAL: Skip rest of loop
+        }
+        
+        if (c == KEY_DOWN_ARROW) {
+            const char* next_cmd = history_next();
+            if (next_cmd != NULL) {
+                // Clear current line
+                while (index > 0) {
+                    print_str("\b \b");
+                    index--;
+                }
+                
+                // Display next command
+                index = 0;
+                while (next_cmd[index] && index < max_len - 1) {
+                    buffer[index] = next_cmd[index];
+                    print_char(next_cmd[index]);
+                    index++;
+                }
+                buffer[index] = '\0';
+            }
+            continue;  // Skip rest of loop
+        }
+        
+        // Filter out ALL other special keys (left/right arrows, etc.)
+        if (c >= 0x80) {
+            continue;  // Silently ignore
+        }
+
+        // Handle backspace
+        if (c == '\b') {
             if (index > 0) {
                 index--;
-                print_str("\b \b"); // erase char from screen
+                print_str("\b \b");
             }
             continue;
         }
 
-        if (c == '\n' || c == '\r') { // enter key
-            buffer[index] = '\0';    // null-terminate string
-            print_str("\n");          // move to next line
+        // Handle enter
+        if (c == '\n' || c == '\r') {
+            buffer[index] = '\0';
+            print_str("\n");
+            
+            // Add to history if not empty
+            if (index > 0) {
+                history_add(buffer);
+            }
             break;
         }
 
-        // normal character
+        // Normal character
         if (index < max_len - 1) {
             buffer[index++] = c;
-            print_char(c); // echo typed char
+            print_char(c);
         }
     }
 }

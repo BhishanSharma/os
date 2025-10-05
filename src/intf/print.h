@@ -1,10 +1,10 @@
-// print.h additions
 #ifndef PRINT_H
 #define PRINT_H
 
 #include <stdint.h>
 #include <stddef.h>
 
+// VGA colors
 enum {
     PRINT_COLOR_BLACK = 0,
     PRINT_COLOR_BLUE = 1,
@@ -24,6 +24,18 @@ enum {
     PRINT_COLOR_WHITE = 15,
 };
 
+// Modern dark theme presets
+typedef enum {
+    THEME_DEFAULT,      // White on blue (classic)
+    THEME_DRACULA,      // Purple/cyan on dark
+    THEME_NORD,         // Blue/cyan on dark gray
+    THEME_MONOKAI,      // Green/yellow on black
+    THEME_GRUVBOX,      // Orange/green on dark
+    THEME_SOLARIZED,    // Cyan/green on dark gray
+    THEME_MATRIX,       // Green on black
+    THEME_CYBERPUNK,    // Cyan/magenta on black
+} color_theme_t;
+
 void print_clear(void);
 void print_char(char character);
 void print_str(const char* str);
@@ -33,7 +45,6 @@ void print_hex(uint32_t value);
 void print_newLine(void);
 void kprintf(const char* fmt, ...);
 
-// New functions
 void print_uint(uint32_t value);
 void print_uint64(uint64_t value);
 void print_hex64(uint64_t value);
@@ -46,5 +57,15 @@ void print_box(const char* title, const char* content);
 size_t print_get_row(void);
 size_t print_get_col(void);
 void print_set_pos(size_t col, size_t row);
+
+// New theme functions
+void print_set_theme(color_theme_t theme);
+void print_status_bar(const char* text);
+void print_error(const char* text);
+void print_success(const char* text);
+void print_warning(const char* text);
+void print_info(const char* text);
+void print_prompt(const char* text);
+color_theme_t print_get_current_theme(void);
 
 #endif
