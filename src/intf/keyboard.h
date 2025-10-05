@@ -10,6 +10,11 @@
 #define KEY_DOWN_ARROW  0x50
 #define KEY_LEFT_ARROW  0x4B
 #define KEY_RIGHT_ARROW 0x4D
+#define KEY_CTRL_Q  17
+#define KEY_CTRL_S  19
+#define KEY_CTRL_N  14
+#define KEY_CTRL_D  4
+#define KEY_CTRL_E  5
 
 void keyboard_handler(void);
 void init_keyboard(void);

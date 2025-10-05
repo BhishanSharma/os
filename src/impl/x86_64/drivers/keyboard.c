@@ -7,6 +7,10 @@
 #define HISTORY_SIZE 20
 #define MAX_CMD_LEN 256
 
+static int ctrl_pressed = 0;
+static int shift_pressed = 0;
+static int caps_lock = 0;
+
 static char key_buffer[256];
 static int buffer_index = 0;
 static int extended_scancode = 0;
@@ -17,11 +21,20 @@ static int history_count = 0;
 static int history_index = -1;
 static int history_current = 0;
 
+// Normal characters (unshifted)
 unsigned char kbdus[128] = {
     0,  27, '1','2','3','4','5','6','7','8','9','0','-','=', '\b',
     '\t', 'q','w','e','r','t','y','u','i','o','p','[',']','\n', 0,
     'a','s','d','f','g','h','j','k','l',';','\'','`',  0,'\\','z',
     'x','c','v','b','n','m',',','.','/', 0, '*', 0, ' ',
+};
+
+// Shifted characters
+unsigned char kbdus_shift[128] = {
+    0,  27, '!','@','#','$','%','^','&','*','(',')','_','+', '\b',
+    '\t', 'Q','W','E','R','T','Y','U','I','O','P','{','}','\n', 0,
+    'A','S','D','F','G','H','J','K','L',':','"','~',  0,'|','Z',
+    'X','C','V','B','N','M','<','>','?', 0, '*', 0, ' ',
 };
 
 void keyboard_handler() {
@@ -33,35 +46,67 @@ void keyboard_handler() {
         return;
     }
 
-    if (!(scancode & 0x80)) {  // Key press (not release)
-        if (extended_scancode) {
-            // Handle extended scancodes (arrow keys)
-            switch (scancode) {
-                case 0x48:  // Up arrow
-                    key_buffer[buffer_index++] = KEY_UP_ARROW;
-                    break;
-                case 0x50:  // Down arrow
-                    key_buffer[buffer_index++] = KEY_DOWN_ARROW;
-                    break;
-                case 0x4B:  // Left arrow
-                    key_buffer[buffer_index++] = KEY_LEFT_ARROW;
-                    break;
-                case 0x4D:  // Right arrow
-                    key_buffer[buffer_index++] = KEY_RIGHT_ARROW;
-                    break;
-            }
-            extended_scancode = 0;
-        } else {
-            // Normal key
-            char c = kbdus[scancode];
-            if (c == '\b') {
-                key_buffer[buffer_index++] = '\b';
-            } else {
-                key_buffer[buffer_index++] = c;
-            }
-        }
-        key_buffer[buffer_index] = '\0';
+    // Handle key releases
+    if (scancode & 0x80) {
+        scancode &= 0x7F;  // Remove release bit
+        
+        // Track modifier key releases
+        if (scancode == 0x1D) ctrl_pressed = 0;   // Left Ctrl
+        if (scancode == 0x2A || scancode == 0x36) shift_pressed = 0;  // Shift
+        return;
     }
+
+    // Handle key presses
+    if (extended_scancode) {
+        // Arrow keys
+        switch (scancode) {
+            case 0x48: key_buffer[buffer_index++] = KEY_UP_ARROW; break;
+            case 0x50: key_buffer[buffer_index++] = KEY_DOWN_ARROW; break;
+            case 0x4B: key_buffer[buffer_index++] = KEY_LEFT_ARROW; break;
+            case 0x4D: key_buffer[buffer_index++] = KEY_RIGHT_ARROW; break;
+        }
+        extended_scancode = 0;
+    } else {
+        // Track modifier keys
+        if (scancode == 0x1D) {  // Left Ctrl
+            ctrl_pressed = 1;
+            return;
+        }
+        if (scancode == 0x2A || scancode == 0x36) {  // Shift
+            shift_pressed = 1;
+            return;
+        }
+        if (scancode == 0x3A) {  // Caps Lock
+            caps_lock = !caps_lock;
+            return;
+        }
+        
+        // Handle Ctrl combinations
+        if (ctrl_pressed) {
+            switch (scancode) {
+                case 0x10: key_buffer[buffer_index++] = KEY_CTRL_Q; break;  // Q
+                case 0x1F: key_buffer[buffer_index++] = KEY_CTRL_S; break;  // S
+                case 0x31: key_buffer[buffer_index++] = KEY_CTRL_N; break;  // N
+                case 0x20: key_buffer[buffer_index++] = KEY_CTRL_D; break;  // D
+                case 0x12: key_buffer[buffer_index++] = KEY_CTRL_E; break;  // E
+                default: return;
+            }
+        } else {
+            // Normal key - apply shift or caps lock
+            char c;
+            if (shift_pressed) {
+                c = kbdus_shift[scancode];
+            } else {
+                c = kbdus[scancode];
+                // Apply caps lock to letters only
+                if (caps_lock && c >= 'a' && c <= 'z') {
+                    c = c - 32;  // Convert to uppercase
+                }
+            }
+            if (c) key_buffer[buffer_index++] = c;
+        }
+    }
+    key_buffer[buffer_index] = '\0';
 }
 
 void enable_irq(uint8_t irq) {

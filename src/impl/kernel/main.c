@@ -10,6 +10,7 @@
 #include "fat32.h"
 #include "ata.h"
 #include "elf.h"
+#include "editor.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
@@ -670,6 +671,10 @@ void kernel_main() {
             print_error("This is an error message");
             print_str("\n");
             print_box_themed("Demo Box", "This is a themed box!");
+        }
+        else if (strncmp(line, "edit ", 5) == 0) {
+            const char* filename = line + 5;
+            editor_open(filename);
         }
         else {
             kprintf("Unknown command: %s\n", line);
