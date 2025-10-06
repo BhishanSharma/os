@@ -1,4 +1,4 @@
-#include "idt.h"
+#include "core/idt.h"
 #include <stddef.h>
 
 #define IDT_MAX 256

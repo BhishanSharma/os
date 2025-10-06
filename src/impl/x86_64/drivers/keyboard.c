@@ -1,7 +1,7 @@
-#include "keyboard.h"
-#include "print.h"
+#include "drivers/keyboard.h"
+#include "lib/print.h"
 #include "../lib/ports.h"
-#include "string.h"
+#include "lib/string.h"
 
 #define KEYBOARD_DATA_PORT 0x60
 #define HISTORY_SIZE 20

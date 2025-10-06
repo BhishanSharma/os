@@ -1,5 +1,5 @@
 #include "../lib/ports.h"
-#include "system.h"
+#include "sys/system.h"
 
 // Keyboard controller ports
 #define KB_DATA_PORT    0x60

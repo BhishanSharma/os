@@ -1,9 +1,9 @@
-#include "script.h"
-#include "print.h"
-#include "fat32.h"
-#include "heap.h"
-#include "string.h"
-#include "shell.h"
+#include "sys/script.h"
+#include "lib/print.h"
+#include "drivers/fat32.h"
+#include "drivers/heap.h"
+#include "lib/string.h"
+#include "sys/shell.h"
 
 #define MAX_SCRIPT_SIZE 4096
 #define MAX_LINE_LENGTH 256

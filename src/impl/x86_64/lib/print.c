@@ -1,7 +1,7 @@
-#include "print.h"
+#include "lib/print.h"
 #include "ports.h"
 #include <stdarg.h>
-#include "string.h"
+#include "lib/string.h"
 
 #define VGA_CTRL_REGISTER 0x3D4
 #define VGA_DATA_REGISTER 0x3D5

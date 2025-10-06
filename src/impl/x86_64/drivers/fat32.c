@@ -1,6 +1,6 @@
 // fat32.c
-#include "fat32.h"
-#include "string.h"
+#include "drivers/fat32.h"
+#include "lib/string.h"
 #include <stdint.h>
 
 extern void* kmalloc(uint64_t size);

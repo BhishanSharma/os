@@ -1,5 +1,5 @@
 // ata.c - Simple ATA PIO driver
-#include "ata.h"
+#include "drivers/ata.h"
 #include "../lib/ports.h"
 
 #define ATA_PRIMARY_IO      0x1F0

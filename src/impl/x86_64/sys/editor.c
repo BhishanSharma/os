@@ -1,9 +1,9 @@
-#include "editor.h"
-#include "print.h"
-#include "keyboard.h"
-#include "string.h"
-#include "fat32.h"
-#include "heap.h"
+#include "sys/editor.h"
+#include "lib/print.h"
+#include "drivers/keyboard.h"
+#include "lib/string.h"
+#include "drivers/fat32.h"
+#include "drivers/heap.h"
 
 #define MAX_LINES 100
 #define MAX_LINE_LENGTH 80

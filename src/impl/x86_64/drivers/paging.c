@@ -1,5 +1,5 @@
-#include "paging.h"
-#include "memory.h"
+#include "drivers/paging.h"
+#include "drivers/memory.h"
 #include <stdint.h>
 
 typedef uint64_t page_entry_t;

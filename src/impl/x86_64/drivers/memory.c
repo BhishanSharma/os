@@ -1,5 +1,4 @@
-// src/impl/x86_64/drivers/memory.c
-#include "memory.h"
+#include "drivers/memory.h"
 
 #define MAX_PHYS_PAGES 65536 // Example: 256 MB RAM (adjust later)
 

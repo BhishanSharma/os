@@ -1,9 +1,9 @@
-#include "elf.h"
-#include "fat32.h"
-#include "heap.h"
-#include "print.h"
-#include "paging.h"
-#include "string.h"
+#include "drivers/elf.h"
+#include "drivers/fat32.h"
+#include "drivers/heap.h"
+#include "lib/print.h"
+#include "drivers/paging.h"
+#include "lib/string.h"
 
 // Validate ELF header
 static int elf_validate(elf64_ehdr_t* header) {

@@ -1,4 +1,4 @@
-#include "keyboard.h"
+#include "drivers/keyboard.h"
 
 extern void irq1_stub();
 extern void keyboard_handler();

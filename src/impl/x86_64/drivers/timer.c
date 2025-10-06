@@ -1,7 +1,7 @@
-#include "timer.h"
-#include "print.h"
+#include "drivers/timer.h"
+#include "lib/print.h"
 #include "../lib/ports.h"
-#include "idt.h"
+#include "core/idt.h"
 #include <stdint.h>
 
 extern void enable_irq(uint8_t irq);

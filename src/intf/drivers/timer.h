@@ -2,7 +2,7 @@
 #define TIMER_H
 
 #include <stdint.h>
-#include "isr.h"
+#include "core/isr.h"
 
 // Frequency of PIT interrupts (100 Hz = 10ms per tick)
 #define TIMER_FREQ 100

@@ -1,5 +1,5 @@
 // src/impl/lib/string_utils.c
-#include "string_utils.h"
+#include "lib/string_utils.h"
 
 uint32_t kstr_to_uint32(const char* str) {
     uint32_t res = 0;

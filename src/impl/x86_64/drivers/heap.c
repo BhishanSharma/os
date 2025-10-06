@@ -1,6 +1,6 @@
 // heap.c
-#include "heap.h"
-#include "memory.h"
+#include "drivers/heap.h"
+#include "drivers/memory.h"
 #include <stdint.h>
 
 typedef struct block_header {
