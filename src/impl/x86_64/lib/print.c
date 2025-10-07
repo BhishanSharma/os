@@ -5,9 +5,17 @@
 
 #define VGA_CTRL_REGISTER 0x3D4
 #define VGA_DATA_REGISTER 0x3D5
+#define VIDEO_MEMORY 0xB8000
+
+// Scrollback buffer configuration
+#define EARLY_SCROLLBACK_LINES 50   // Small buffer for early boot
+#define MAX_SCROLLBACK_LINES 2000   // After heap initialization
+#define VISIBLE_ROWS 25
+#define VISIBLE_COLS 80
 
 extern void outb(uint16_t port, uint8_t val);
 static void move_cursor(void);
+static void refresh_display(void);
 
 static color_theme_t current_theme = THEME_DEFAULT;
 static uint8_t theme_fg = PRINT_COLOR_WHITE;
@@ -17,13 +25,24 @@ static uint8_t theme_error = PRINT_COLOR_LIGHT_RED;
 static uint8_t theme_success = PRINT_COLOR_LIGHT_GREEN;
 static uint8_t theme_warning = PRINT_COLOR_YELLOW;
 
-const static size_t NUM_COLS = 80;
-const static size_t NUM_ROWS = 25;
+const static size_t NUM_COLS = VISIBLE_COLS;
+const static size_t NUM_ROWS = VISIBLE_ROWS;
 
 struct Char {
     uint8_t character;
     uint8_t color;
 };
+
+// Small static buffer for early boot
+static struct Char early_buffer[EARLY_SCROLLBACK_LINES][VISIBLE_COLS];
+
+// Pointer to current scrollback buffer (starts with early_buffer)
+static struct Char (*scrollback_buffer)[VISIBLE_COLS] = early_buffer;
+static int scrollback_capacity = EARLY_SCROLLBACK_LINES;
+static int scrollback_write_line = 0;
+static int scrollback_view_offset = 0;
+static int scrollback_total_lines = 0;
+static int scrollback_expanded = 0;
 
 struct Char* buffer = (struct Char*) 0xb8000;
 size_t col = 0;
@@ -40,7 +59,87 @@ void clear_row(int row) {
     }
 }
 
+// Initialize scrollback buffer
+void init_scrollback(void) {
+    for (int i = 0; i < scrollback_capacity; i++) {
+        for (int j = 0; j < VISIBLE_COLS; j++) {
+            scrollback_buffer[i][j].character = ' ';
+            scrollback_buffer[i][j].color = color;
+        }
+    }
+    scrollback_write_line = 0;
+    scrollback_view_offset = 0;
+    scrollback_total_lines = 0;
+}
+
+// Expand scrollback buffer after heap is ready
+// Declare kmalloc if not already declared
+extern void* kmalloc(size_t size);
+
+void expand_scrollback(void) {
+    if (scrollback_expanded) {
+        return;  // Already expanded
+    }
+    
+    // Allocate larger buffer from heap
+    size_t total_size = MAX_SCROLLBACK_LINES * VISIBLE_COLS * sizeof(struct Char);
+    struct Char (*new_buffer)[VISIBLE_COLS] = (struct Char (*)[VISIBLE_COLS])kmalloc(total_size);
+    
+    if (new_buffer == NULL) {
+        print_warning("Failed to expand scrollback buffer - kmalloc returned NULL");
+        return;
+    }
+    
+    // Copy existing data from early buffer
+    int lines_to_copy = (scrollback_total_lines < EARLY_SCROLLBACK_LINES) ? 
+                        scrollback_total_lines : EARLY_SCROLLBACK_LINES;
+    
+    for (int i = 0; i < lines_to_copy; i++) {
+        for (int j = 0; j < VISIBLE_COLS; j++) {
+            new_buffer[i][j] = scrollback_buffer[i][j];
+        }
+    }
+    
+    // Initialize rest of new buffer
+    for (int i = lines_to_copy; i < MAX_SCROLLBACK_LINES; i++) {
+        for (int j = 0; j < VISIBLE_COLS; j++) {
+            new_buffer[i][j].character = ' ';
+            new_buffer[i][j].color = color;
+        }
+    }
+    
+    // Switch to new buffer
+    scrollback_buffer = new_buffer;
+    scrollback_capacity = MAX_SCROLLBACK_LINES;
+    scrollback_expanded = 1;
+    
+    print_success("Scrollback expanded to 2000 lines");
+}
+
+// Refresh the visible display from scrollback buffer
+static void refresh_display(void) {
+    int start_line;
+    
+    if (scrollback_total_lines < VISIBLE_ROWS) {
+        start_line = 0;
+    } else {
+        start_line = scrollback_total_lines - VISIBLE_ROWS - scrollback_view_offset;
+        if (start_line < 0) start_line = 0;
+    }
+    
+    // Copy from scrollback to video memory
+    for (int display_row = 0; display_row < VISIBLE_ROWS; display_row++) {
+        int buffer_line = (start_line + display_row) % scrollback_capacity;
+        for (int c = 0; c < VISIBLE_COLS; c++) {
+            buffer[c + VISIBLE_COLS * display_row] = scrollback_buffer[buffer_line][c];
+        }
+    }
+    
+    move_cursor();
+}
+
 void print_clear() {
+    init_scrollback();
     for (int i = 0; i < NUM_ROWS; i++) {
         clear_row(i);
     }
@@ -50,19 +149,34 @@ void print_clear() {
 }
 
 void print_newLine() {
-    col = 0;
-    if (row < (NUM_ROWS - 1)) {
-        row++;
-        return;
+    // Save current line to scrollback
+    for (size_t c = 0; c < NUM_COLS; c++) {
+        scrollback_buffer[scrollback_write_line][c] = buffer[c + NUM_COLS * row];
     }
-
-    for (size_t r = 1; r < NUM_ROWS; r++) {
-        for (size_t c = 0; c < NUM_COLS; c++) {
-            buffer[c + NUM_COLS * (r - 1)] = buffer[c + NUM_COLS * r];
+    
+    // Move to next line in scrollback
+    scrollback_write_line = (scrollback_write_line + 1) % scrollback_capacity;
+    scrollback_total_lines++;
+    if (scrollback_total_lines > scrollback_capacity) {
+        scrollback_total_lines = scrollback_capacity;
+    }
+    
+    col = 0;
+    
+    // If viewing live content, follow the new content
+    if (scrollback_view_offset == 0) {
+        if (row < (NUM_ROWS - 1)) {
+            row++;
+        } else {
+            // Scroll up the display
+            for (size_t r = 1; r < NUM_ROWS; r++) {
+                for (size_t c = 0; c < NUM_COLS; c++) {
+                    buffer[c + NUM_COLS * (r - 1)] = buffer[c + NUM_COLS * r];
+                }
+            }
+            clear_row(NUM_ROWS - 1);
         }
     }
-
-    clear_row(NUM_ROWS - 1);
 }
 
 void print_char(char character) {
@@ -260,31 +374,26 @@ void print_box(const char* title, const char* content) {
     size_t box_width = (title_len > content_len ? title_len : content_len) + 4;
     if (box_width > NUM_COLS - 2) box_width = NUM_COLS - 2;
     
-    // Top border
     print_char('+');
     print_repeat('-', box_width - 2);
     print_str("+\n");
     
-    // Title
     print_str("| ");
     print_str(title);
     size_t padding = box_width - title_len - 4;
     print_repeat(' ', padding);
     print_str(" |\n");
     
-    // Middle border
     print_char('+');
     print_repeat('-', box_width - 2);
     print_str("+\n");
     
-    // Content
     print_str("| ");
     print_str(content);
     padding = box_width - content_len - 4;
     print_repeat(' ', padding);
     print_str(" |\n");
     
-    // Bottom border
     print_char('+');
     print_repeat('-', box_width - 2);
     print_str("+\n");
@@ -449,11 +558,8 @@ void print_set_theme(color_theme_t theme) {
             break;
     }
     
-    // Apply theme globally
     print_set_color(theme_fg, theme_bg);
     color = theme_fg | (theme_bg << 4);
-    
-    // Clear and redraw screen with new theme
     print_clear();
 }
 
@@ -517,7 +623,6 @@ void print_prompt(const char* text) {
     color = old_color;
 }
 
-// Enhanced print_box with theme colors
 void print_box_themed(const char* title, const char* content) {
     size_t title_len = strlen(title);
     size_t content_len = strlen(content);
@@ -527,12 +632,10 @@ void print_box_themed(const char* title, const char* content) {
     uint8_t old_color = color;
     print_set_color(theme_accent, theme_bg);
     
-    // Top border
     print_char('+');
     print_repeat('-', box_width - 2);
     print_str("+\n");
     
-    // Title
     print_str("| ");
     print_set_color(theme_fg, theme_bg);
     print_str(title);
@@ -541,12 +644,10 @@ void print_box_themed(const char* title, const char* content) {
     print_repeat(' ', padding);
     print_str(" |\n");
     
-    // Middle border
     print_char('+');
     print_repeat('-', box_width - 2);
     print_str("+\n");
     
-    // Content
     print_str("| ");
     print_set_color(theme_fg, theme_bg);
     print_str(content);
@@ -555,10 +656,58 @@ void print_box_themed(const char* title, const char* content) {
     print_repeat(' ', padding);
     print_str(" |\n");
     
-    // Bottom border
     print_char('+');
     print_repeat('-', box_width - 2);
     print_str("+\n");
     
     color = old_color;
+}
+
+// Scroll up in history (Shift+Up or Mouse Wheel Up)
+void scroll_up_lines(int lines) {
+    int max_scroll = scrollback_total_lines - VISIBLE_ROWS;
+    if (max_scroll < 0) max_scroll = 0;
+    
+    scrollback_view_offset += lines;
+    if (scrollback_view_offset > max_scroll) {
+        scrollback_view_offset = max_scroll;
+    }
+    
+    refresh_display();
+}
+
+// Scroll down in history (Shift+Down or Mouse Wheel Down)
+void scroll_down_lines(int lines) {
+    scrollback_view_offset -= lines;
+    if (scrollback_view_offset < 0) {
+        scrollback_view_offset = 0;
+    }
+    
+    refresh_display();
+}
+
+// Check if we're viewing live content
+int is_at_bottom(void) {
+    return (scrollback_view_offset == 0);
+}
+
+// Jump to bottom (end of scrollback)
+void scroll_to_bottom(void) {
+    scrollback_view_offset = 0;
+    refresh_display();
+}
+
+// Jump to top of scrollback
+void scroll_to_top(void) {
+    int max_scroll = scrollback_total_lines - VISIBLE_ROWS;
+    if (max_scroll < 0) max_scroll = 0;
+    scrollback_view_offset = max_scroll;
+    refresh_display();
+}
+
+// Get scrollback info for debugging
+void get_scrollback_info(int* capacity, int* total_lines, int* view_offset) {
+    if (capacity) *capacity = scrollback_capacity;
+    if (total_lines) *total_lines = scrollback_total_lines;
+    if (view_offset) *view_offset = scrollback_view_offset;
 }

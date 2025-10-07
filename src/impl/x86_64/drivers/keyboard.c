@@ -7,11 +7,14 @@
 #define HISTORY_SIZE 20
 #define MAX_CMD_LEN 256
 
+#define SHIFT_UP_COMBO   1001
+#define SHIFT_DOWN_COMBO 1002
+
 static int ctrl_pressed = 0;
 static int shift_pressed = 0;
 static int caps_lock = 0;
 
-static char key_buffer[256];
+static int key_buffer[256];
 static int buffer_index = 0;
 static int extended_scancode = 0;
 
@@ -60,8 +63,18 @@ void keyboard_handler() {
     if (extended_scancode) {
         // Arrow keys
         switch (scancode) {
-            case 0x48: key_buffer[buffer_index++] = KEY_UP_ARROW; break;
-            case 0x50: key_buffer[buffer_index++] = KEY_DOWN_ARROW; break;
+            case 0x48:
+                if (shift_pressed)
+                    key_buffer[buffer_index++] = SHIFT_UP_COMBO;
+                else
+                    key_buffer[buffer_index++] = KEY_UP_ARROW;
+                break;
+            case 0x50:
+                if (shift_pressed)
+                    key_buffer[buffer_index++] = SHIFT_DOWN_COMBO;
+                else
+                    key_buffer[buffer_index++] = KEY_DOWN_ARROW;
+                break;
             case 0x4B: key_buffer[buffer_index++] = KEY_LEFT_ARROW; break;
             case 0x4D: key_buffer[buffer_index++] = KEY_RIGHT_ARROW; break;
         }
@@ -121,9 +134,9 @@ void init_keyboard() {
     enable_irq(1);
 }
 
-char get_char() {
+int get_char() {
     if (buffer_index == 0) return 0;
-    char c = key_buffer[0];
+    int c = key_buffer[0];
     for (int i = 0; i < buffer_index - 1; i++)
         key_buffer[i] = key_buffer[i+1];
     buffer_index--;
@@ -190,7 +203,7 @@ void get_line(char* buffer, size_t max_len) {
     buffer[0] = '\0';
 
     while (1) {
-        char c = get_char();
+        int c = get_char();
         if (!c) {
             __asm__ volatile("hlt");
             continue;
@@ -237,6 +250,16 @@ void get_line(char* buffer, size_t max_len) {
                 buffer[index] = '\0';
             }
             continue;  // Skip rest of loop
+        }
+
+        if (c == SHIFT_UP_COMBO) {
+            scroll_up_lines(1);
+            continue;
+        }
+
+        if (c == SHIFT_DOWN_COMBO) {
+            scroll_down_lines(1);
+            continue;
         }
         
         // Filter out ALL other special keys (left/right arrows, etc.)

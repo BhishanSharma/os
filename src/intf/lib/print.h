@@ -68,4 +68,12 @@ void print_info(const char* text);
 void print_prompt(const char* text);
 color_theme_t print_get_current_theme(void);
 
+void expand_scrollback(void);
+void scroll_up_lines(int lines);
+void scroll_down_lines(int lines);
+void scroll_to_bottom(void);
+void scroll_to_top(void);
+int is_at_bottom(void);
+void get_scrollback_info(int* capacity, int* total_lines, int* view_offset);
+
 #endif

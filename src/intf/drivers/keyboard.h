@@ -18,7 +18,7 @@
 
 void keyboard_handler(void);
 void init_keyboard(void);
-char get_char(void);
+int get_char(void);
 void get_line(char* buffer, size_t max_len);
 
 // History functions

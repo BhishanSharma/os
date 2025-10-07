@@ -48,6 +48,8 @@ void kernel_main() {
     paging_init(kernel_start, kernel_end, heap_start, heap_size);
     heap_init(heap_start, heap_size);
 
+    expand_scrollback();
+    
     if (ata_init() == 0) {
         print_str("ATA disk detected\n");
     } else {
