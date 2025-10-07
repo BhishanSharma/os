@@ -1,5 +1,3 @@
-![header](https://photos.app.goo.gl/GZKCa3fuZyGyHY119)
-
 # 🚀 Welcome to the World of Idiots 👋
 
 Hey there! If you're reading this, congratulations — either you're really into computers, or you just stumbled here wandering through the vast universe of GitHub projects. Either way, you’re welcome! 😎
