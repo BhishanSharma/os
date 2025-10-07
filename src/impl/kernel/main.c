@@ -17,6 +17,7 @@ extern void irq1_stub();
 void pic_remap();
 
 extern void memory_init(uint64_t mem_upper);
+extern void irq_nic_stub();
 
 void kernel_main() {
     print_set_theme(THEME_CYBERPUNK);
@@ -49,6 +50,11 @@ void kernel_main() {
 
     expand_scrollback();
     
+    if (rtl8139_probe_init() == 0) {
+        idt_set_entry(0x20 + 0xFF, irq_nic_stub, 0x8E);
+        print_str("[NET] NIC driver installed\n");
+    }
+
     if (ata_init() == 0) {
         print_str("ATA disk detected\n");
     } else {
