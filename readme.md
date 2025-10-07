@@ -1,6 +1,6 @@
-# 🚀 Welcome to the World of Idiots 👋
+![header](https://photos.app.goo.gl/GZKCa3fuZyGyHY119)
 
-![header](https://i.imgur.com/3Z8tGzU.png)
+# 🚀 Welcome to the World of Idiots 👋
 
 Hey there! If you're reading this, congratulations — either you're really into computers, or you just stumbled here wandering through the vast universe of GitHub projects. Either way, you’re welcome! 😎
 
@@ -13,8 +13,6 @@ Honestly, there’s nothing earth-shattering here. Just another “idiot” tryi
 I’ve always dreamed of building my own OS, and after countless hours exploring the depths of the internet and debugging my own mistakes, I’m finally **close to achieving it**.
 
 > Thanks to the internet, sheer patience, and too much caffeine ☕
-
-![idea](https://i.imgur.com/WZedJxH.png)
 
 ---
 
@@ -30,8 +28,6 @@ This OS is:
 
 **Future Goals:** More features, more fancy stuff, and maybe competing with real OSes one day… or at least impressing ourselves.
 
-![kernel](https://i.imgur.com/VVPRTFS.png)
-
 ---
 
 ## ⚙️ Compatibility
@@ -42,8 +38,6 @@ This OS is:
 | 🗄️ Storage    | Minimum 8 GB               |
 | 🖥️ CPU        | x86_64 (Intel recommended) |
 | ⌨️ Peripherals | Keyboard & VGA monitor     |
-
-![compatibility](https://i.imgur.com/7Z0TzQx.png)
 
 ---
 
@@ -69,8 +63,6 @@ This OS is:
 git clone https://github.com/BhishanSharma/os.git
 ```
 
-![clone](https://i.imgur.com/5C8mD4X.png)
-
 ---
 
 ### **Stage 2: Build Docker Container**
@@ -83,8 +75,6 @@ docker build buildenv -t myos-buildenv
 
 * `buildenv` → folder containing the Dockerfile
 * `myos-buildenv` → name of the Docker environment (you can rename it!)
-
-![docker](https://i.imgur.com/mcJcHph.png)
 
 ---
 
@@ -100,8 +90,6 @@ make build-x86_64
 ```
 dist/x86_64/kernel.iso
 ```
-
-![iso](https://i.imgur.com/KGv1VvE.png)
 
 ---
 
@@ -119,8 +107,6 @@ echo "Readme file content" | sudo tee /tmp/disk_mount/readme.txt
 sudo umount /tmp/disk_mount
 echo "disk.img created successfully!"
 ```
-
-![fat32\_disk](https://i.imgur.com/jpFsh7J.png)
 
 > Creates a 32 MB FAT32 disk image to test file operations. 🗄️
 
@@ -140,12 +126,8 @@ qemu-system-x86_64 \
 * Boot your OS in a virtual environment safely 🖥️
 * Test networking, shell commands, and more
 
-![qemu](https://i.imgur.com/ykl3JdX.gif)
-
 ---
 
 ## 🎨 Footer
 
 Made with ☕ + 💻 + 🧠 by an **idiot**.
-
-![footer](https://i.imgur.com/8F9kJqY.png)
