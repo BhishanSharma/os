@@ -41,13 +41,13 @@ This OS is:
 
 ## ✨ Features
 
-| Feature          | Description              | Icon                                        |
-| ---------------- | ------------------------ | ------------------------------------------- |
-| FAT32 Filesystem | Read & write files       | ![fat32](https://i.imgur.com/VXxYzZf.png)   |
-| Shell Scripting  | Command-line interface   | ![shell](https://i.imgur.com/3POC4Tb.png)   |
-| C File Support   | Compile & run C programs | ![c](https://i.imgur.com/E0Vv4aA.png)       |
-| Networking       | Basic network stack      | ![network](https://i.imgur.com/XZfD2mY.png) |
-| Text Editor      | Minimal editor inside OS | ![editor](https://i.imgur.com/8RmIt3p.png)  |
+| Feature          | Description              |
+| ---------------- | ------------------------ |
+| FAT32 Filesystem | Read & write files       |
+| Shell Scripting  | Command-line interface   |
+| C File Support   | Compile & run C programs |
+| Networking       | Basic network stack      |
+| Text Editor      | Minimal editor inside OS |
 
 > Think of it as a tiny but mighty OS lab in your hands.
 
