@@ -7,7 +7,6 @@
 #include "drivers/timer.h"
 #include "drivers/heap.h"
 #include "sys/editor.h"
-#include "drivers/elf.h"
 #include "drivers/ata.h"
 #include "lib/string_utils.h"
 #include "sys/system.h"
@@ -584,89 +583,6 @@ int shell_execute_command(const char* line) {
         char cwd[256];
         fat32_get_current_directory(cwd, sizeof(cwd));
         kprintf("Current directory: %s\n", cwd);
-    }
-    else if (strncmp(line, "exec ", 5) == 0)
-    {
-        const char *program = line + 5;
-        print_str("Loading ELF program...\n");
-
-        if (elf_exec(program) == 0)
-        {
-            print_str("Program returned\n");
-        }
-        else
-        {
-            print_str("Failed to execute program\n");
-        }
-    }
-    else if (strncmp(line, "load ", 5) == 0)
-    {
-        const char *program = line + 5;
-        print_str("Loading ELF program into memory...\n");
-
-        if (elf_load(program) == 0)
-        {
-            print_str("Program loaded successfully\n");
-        }
-        else
-        {
-            print_str("Failed to load program\n");
-        }
-    }
-    else if (strncmp(line, "elfinfo ", 8) == 0)
-    {
-        const char *filename = line + 8;
-
-        uint32_t size = fat32_get_file_size(filename);
-        if (size < sizeof(elf64_ehdr_t))
-        {
-            print_str("File too small to be ELF\n");
-        }
-        else
-        {
-            uint8_t *buffer = kmalloc(size);
-            if (buffer)
-            {
-                if (fat32_read_file(filename, buffer, size) > 0)
-                {
-                    elf64_ehdr_t *ehdr = (elf64_ehdr_t *)buffer;
-
-                    print_str("=== ELF Info ===\n");
-
-                    // Check magic
-                    if (*(uint32_t *)ehdr->e_ident == 0x464C457F)
-                    {
-                        print_str("Valid ELF file\n");
-                    }
-                    else
-                    {
-                        print_str("Invalid ELF magic\n");
-                    }
-
-                    kprintf("Class: %s\n",
-                            ehdr->e_ident[4] == 2 ? "64-bit" : "32-bit");
-                    kprintf("Machine: %s\n",
-                            ehdr->e_machine == 0x3E ? "x86-64" : "Unknown");
-                    kprintf("Entry point: %lx\n", ehdr->e_entry);
-                    kprintf("Program headers: %d\n", ehdr->e_phnum);
-                    kprintf("Section headers: %d\n", ehdr->e_shnum);
-
-                    // Show program headers
-                    if (ehdr->e_phoff > 0 && ehdr->e_phnum > 0)
-                    {
-                        elf64_phdr_t *phdr = (elf64_phdr_t *)(buffer + ehdr->e_phoff);
-                        print_str("\nProgram Headers:\n");
-                        for (int i = 0; i < ehdr->e_phnum && i < 10; i++)
-                        {
-                            kprintf("  [%d] Type=%d VAddr=%lx Size=%lu\n",
-                                    i, phdr[i].p_type, phdr[i].p_vaddr,
-                                    phdr[i].p_memsz);
-                        }
-                    }
-                }
-                kfree(buffer);
-            }
-        }
     }
     else if (strcmp(line, "tree") == 0)
     {

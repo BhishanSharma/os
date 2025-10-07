@@ -9,7 +9,6 @@
 #include "drivers/heap.h"
 #include "drivers/fat32.h"
 #include "drivers/ata.h"
-#include "drivers/elf.h"
 #include "sys/editor.h"
 #include "sys/shell.h"
 
