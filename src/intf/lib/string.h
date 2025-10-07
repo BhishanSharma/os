@@ -7,5 +7,6 @@ size_t strlen(const char* str);
 int k_snprintf(char* buffer, size_t size, const char* fmt, ...);
 void kstrncpy(char* dest, const char* src, size_t n);
 char* kstrtok(char* str, const char* delim, char** saveptr);
+int kstr_contains(const char *haystack, const char *needle);
 
 #endif

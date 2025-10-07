@@ -131,3 +131,23 @@ char* kstrtok(char* str, const char* delim, char** saveptr) {
     }
     return token;
 }
+
+int kstr_contains(const char *haystack, const char *needle) {
+    if (!*needle) return 1; // empty needle always "found"
+
+    for (; *haystack; haystack++) {
+        const char *h = haystack;
+        const char *n = needle;
+
+        while (*h && *n && (*h == *n)) {
+            h++;
+            n++;
+        }
+
+        if (*n == '\0') {
+            return 1; // found substring
+        }
+    }
+
+    return 0; // not found
+}

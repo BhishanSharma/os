@@ -298,13 +298,11 @@ int fat32_list_directory(fat32_file_info_t* files, uint32_t max_files) {
     return file_count;
 }
 
-// Check if file exists
 int fat32_file_exists(const char* path) {
     uint32_t dir_cluster = current_directory_cluster ? current_directory_cluster : boot_sector.root_cluster;
     return fat32_find_file(dir_cluster, path, 0) > 0;  
 }
 
-// Get file size
 uint32_t fat32_get_file_size(const char* path) {
     fat32_dir_entry_t entry;
     uint32_t dir_cluster = current_directory_cluster ? current_directory_cluster : boot_sector.root_cluster;
@@ -319,7 +317,6 @@ uint32_t fat32_get_file_size(const char* path) {
     return entry.file_size;
 }
 
-// Helper: Set FAT entry
 static int fat32_set_fat_entry(uint32_t cluster, uint32_t value) {
     uint32_t fat_offset = cluster * 4;
     uint32_t fat_sector = fat_start_sector + (fat_offset / FAT32_SECTOR_SIZE);
@@ -348,7 +345,6 @@ static int fat32_set_fat_entry(uint32_t cluster, uint32_t value) {
     return result;
 }
 
-// Helper: Allocate a free cluster
 static uint32_t fat32_alloc_cluster(void) {
     static uint32_t last_alloc = 2;
     
@@ -369,7 +365,6 @@ static uint32_t fat32_alloc_cluster(void) {
     return 0;
 }
 
-// Helper: Write cluster
 static int fat32_write_cluster(uint32_t cluster, const uint8_t* buffer) {
     if (cluster < 2 || cluster >= 0x0FFFFFF8) {
         return -1;
@@ -595,7 +590,6 @@ int fat32_delete_file(const char* path) {
     return 0;
 }
 
-// Helper: Parse path into components
 static int parse_path(const char* path, path_component_t* components, uint32_t* count) {
     *count = 0;
     
@@ -644,7 +638,6 @@ static int parse_path(const char* path, path_component_t* components, uint32_t* 
     return 0;
 }
 
-// Helper: Find directory entry
 static uint32_t find_directory(uint32_t parent_cluster, const char* name) {
     uint8_t* cluster_buffer = kmalloc(bytes_per_cluster);
     if (!cluster_buffer) return 0;
@@ -760,7 +753,6 @@ int fat32_create_file(const char* path) {
     return -3;  // No empty slots
 }
 
-// Navigate path and return final cluster
 static uint32_t navigate_path(const char* path, uint32_t* final_cluster) {
     path_component_t components[MAX_PATH_DEPTH];
     uint32_t count = 0;
@@ -791,7 +783,6 @@ static uint32_t navigate_path(const char* path, uint32_t* final_cluster) {
     return 0;
 }
 
-// Change directory with better path handling
 int fat32_change_directory(const char* path) {
     // Handle ".." specially
     if (strcmp(path, "..") == 0) {
@@ -876,7 +867,6 @@ int fat32_change_directory(const char* path) {
     return 0;
 }
 
-// Get current directory
 int fat32_get_current_directory(char* buffer, uint32_t size) {
     int len = 0;
     while (current_path[len] && len < size - 1) {
@@ -887,7 +877,6 @@ int fat32_get_current_directory(char* buffer, uint32_t size) {
     return len;
 }
 
-// Create directory
 int fat32_mkdir(const char* path) {
     char upper_path[256];
     int idx = 0;
@@ -970,7 +959,6 @@ int fat32_mkdir(const char* path) {
     return 0;
 }
 
-// Enhanced list directory with path support
 int fat32_list_directory_ex(const char* path, fat32_file_info_t* files, uint32_t max_files) {
     uint32_t target_cluster;
     

@@ -11,6 +11,7 @@
 #include "lib/string_utils.h"
 #include "sys/system.h"
 #include "sys/script.h"
+#include "lib/compiler.h"
 
 #define MAX_TEST_ALLOCS 16
 static void *test_allocs[MAX_TEST_ALLOCS];
@@ -716,6 +717,9 @@ int shell_execute_command(const char* line) {
     else if (strncmp(line, "sh ", 3) == 0) {
         const char* filename = line + 3;
         script_run(filename);
+    }
+    else if (strncmp(line, "compile ", 8) == 0) {
+        cmd_compile(line+8);
     }
     else
     {
