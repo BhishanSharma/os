@@ -11,8 +11,8 @@ is offered too. No root or host setup is needed.
 | ---- | ---- | ---- |
 | 1 | **Done.** NIC transmit, MAC address, fixed receive ring, `net.c` skeleton | `ifconfig`, `nettest` |
 | 2 | **Done.** Ethernet + ARP (cache, replies to requests), IPv4 header + checksum, ICMP echo | `ping 10.0.2.2` |
-| 3 | UDP, DNS A-record lookup (optionally DHCP) | `nslookup example.com` |
-| 4 | TCP client (handshake, seq/ack, retransmit, FIN), HTTP/1.0 GET, write body to FAT32 | `download http://...` |
+| 3 | **Done.** UDP DNS A-record lookup | internal to `download` |
+| 4 | **Done (minimal).** TCP client handshake/ACK/FIN, HTTP/1.0 GET, write response body to FAT32 | `download http://...` |
 
 ## Step 1: what exists
 

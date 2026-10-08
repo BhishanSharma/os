@@ -23,6 +23,7 @@ static int test_alloc_count = 0;
 static void cmd_help(void);
 static void cmd_crash(const char *what);
 static void cmd_ping(const char *args);
+static void cmd_download(const char *args);
 static void cmd_ls(void);
 static void cmd_cat(const char *filename);
 int shell_execute_command(const char* line);
@@ -86,6 +87,7 @@ static void cmd_help(void)
     print_str("ifconfig           - show MAC, IP settings and packet counters\n");
     print_str("nettest            - send an ARP request to the gateway, wait for the reply\n");
     print_str("ping <ip> [count]  - send ICMP echo requests (default 4), e.g. ping 10.0.2.2\n");
+    print_str("download <url> [file] - download a plain HTTP URL to FAT32\n");
     print_str("netdebug <on|off>  - print a line for every received frame\n");
     print_str("\n=== Appearance ===\n");
     print_str("theme <name>       - change color theme\n");
@@ -831,6 +833,10 @@ int shell_execute_command(const char* line) {
     {
         cmd_ping(line + 4);
     }
+    else if (strcmp(line, "download") == 0 || strncmp(line, "download ", 9) == 0)
+    {
+        cmd_download(line + 8);
+    }
     else if (strncmp(line, "netdebug ", 9) == 0)
     {
         const char *arg = line + 9;
@@ -891,4 +897,40 @@ static void cmd_ping(const char *args)
     }
 
     net_ping(ip, count);
+}
+
+
+/* download <url> [file] */
+static void cmd_download(const char *args)
+{
+    while (*args == ' ') args++;
+    if (!*args) {
+        print_str("Usage: download <url> [file]\n");
+        print_str("Only plain http:// URLs are supported; HTTPS is not supported yet.\n");
+        return;
+    }
+
+    char url[192];
+    size_t n = 0;
+    while (args[n] && args[n] != ' ' && n < sizeof(url) - 1) {
+        url[n] = args[n];
+        n++;
+    }
+    url[n] = '\0';
+    args += n;
+    while (*args == ' ') args++;
+
+    char filename[32];
+    const char *out = 0;
+    if (*args) {
+        size_t m = 0;
+        while (args[m] && args[m] != ' ' && m < sizeof(filename) - 1) {
+            filename[m] = args[m];
+            m++;
+        }
+        filename[m] = '\0';
+        out = filename;
+    }
+
+    net_download_http(url, out);
 }

@@ -4,6 +4,8 @@
 #include "lib/print.h"
 #include "lib/string.h"
 #include "drivers/keyboard.h"
+#include "drivers/fat32.h"
+#include "drivers/heap.h"
 #include <stdint.h>
 
 /* CPU primitives. NET_HOST_TEST swaps them for mocks so the protocol code can be
@@ -54,6 +56,7 @@ static uint8_t selftest_reply_mac[6];
 /* ---- helpers ---------------------------------------------------------- */
 
 static inline uint16_t rd16be(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
+static inline void wr32be(uint8_t *p, uint32_t v) { p[0]=(uint8_t)(v>>24); p[1]=(uint8_t)(v>>16); p[2]=(uint8_t)(v>>8); p[3]=(uint8_t)v; }
 static inline void wr16be(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
 
 void net_fmt_mac(char *out, const uint8_t mac[6]) {
@@ -171,6 +174,7 @@ static uint8_t           ping_err_src[4];
 
 static uint16_t ip_ident = 1;
 static uint8_t  echo_reply_buf[RTL8139_MAX_FRAME];
+static void net_rx_download_hook(const uint8_t *frame, uint16_t len);
 
 /* Build Ethernet + IPv4 headers (20 bytes, no options) at f. `payload_len` is
  * the length of what follows the IP header. */
@@ -316,7 +320,7 @@ void net_init(void) {
     memcpy(cfg.gateway, gateway, 4);
     memcpy(cfg.dns, dns, 4);
 
-    rtl8139_set_rx_handler(net_rx);
+    rtl8139_set_rx_handler(net_rx_download_hook);
     net_up = 1;
 
     char m[18];
@@ -616,4 +620,289 @@ int net_ping(const uint8_t ip[4], uint32_t count) {
         kprintf("rtt min/avg/max = %s/%s/%s ms\n", a, b, c);
     }
     return received ? PING_OK : PING_NO_REPLY;
+}
+
+
+/* ---- tiny DNS + TCP + HTTP client ------------------------------------
+ *
+ * This is deliberately a small client rather than a general socket stack:
+ * one DNS A lookup, one TCP connection, HTTP/1.0 GET, and connection close.
+ * It is enough for `download http://...` in QEMU user networking.
+ */
+
+#define IP_PROTO_TCP 6
+#define IP_PROTO_UDP 17
+#define DNS_PORT 53
+#define TCP_MSS 1460
+#define DOWNLOAD_MAX (512u * 1024u)
+#define TCP_SYN_SENT 1
+#define TCP_ESTABLISHED 2
+#define TCP_FIN_WAIT 3
+#define TCP_CLOSED 4
+
+static volatile int dns_done;
+static volatile int dns_failed;
+static uint16_t dns_id;
+static uint16_t dns_port;
+static uint8_t dns_answer[4];
+
+static volatile int tcp_state;
+static uint8_t tcp_peer[4];
+static uint16_t tcp_peer_port;
+static uint16_t tcp_local_port;
+static uint32_t tcp_local_seq;
+static volatile uint32_t tcp_recv_next;
+static volatile uint32_t tcp_send_next;
+static volatile int tcp_peer_fin;
+static uint8_t *tcp_body;
+static volatile uint32_t tcp_body_len;
+static volatile int tcp_body_overflow;
+static volatile int tcp_http_status;
+static char tcp_header[4096];
+static volatile uint32_t tcp_header_len;
+static volatile int tcp_headers_done;
+static volatile int tcp_http_bad;
+
+static uint16_t pseudo_checksum(const uint8_t src[4], const uint8_t dst[4],
+                                uint8_t proto, const uint8_t *data, uint16_t len) {
+    uint32_t sum = 0;
+    for (int i = 0; i < 4; i += 2) sum += (src[i] << 8) | src[i + 1];
+    for (int i = 0; i < 4; i += 2) sum += (dst[i] << 8) | dst[i + 1];
+    sum += proto;
+    sum += len;
+    const uint8_t *p = data;
+    while (len > 1) { sum += (p[0] << 8) | p[1]; p += 2; len -= 2; }
+    if (len) sum += p[0] << 8;
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    return (uint16_t)~sum;
+}
+
+static void udp_build(uint8_t *f, const uint8_t dst_mac[6], const uint8_t dst_ip[4],
+                      uint16_t sport, uint16_t dport, const uint8_t *payload, uint16_t plen) {
+    ip_build(f, dst_mac, dst_ip, IP_PROTO_UDP, (uint16_t)(8 + plen));
+    uint8_t *u = f + 34;
+    wr16be(u, sport); wr16be(u + 2, dport); wr16be(u + 4, (uint16_t)(8 + plen));
+    wr16be(u + 6, 0); /* UDP checksum 0 is legal for IPv4. */
+    memcpy(u + 8, payload, plen);
+}
+
+static void dns_rx(const uint8_t *udp, uint16_t len) {
+    if (len < 12 || rd16be(udp) != dns_id || rd16be(udp + 6) == 0) return;
+    uint16_t qd = rd16be(udp + 4), an = rd16be(udp + 6);
+    if (qd != 1 || an == 0) { dns_failed = 1; return; }
+    uint32_t p = 12;
+    while (p < len && udp[p] != 0) {
+        if ((udp[p] & 0xC0) == 0xC0) { p += 2; break; }
+        p += (uint32_t)udp[p] + 1;
+    }
+    if (p + 5 > len) return;
+    p += 5; /* NUL + QTYPE + QCLASS */
+    for (uint16_t i = 0; i < an && p + 12 <= len; i++) {
+        if ((udp[p] & 0xC0) == 0xC0) p += 2;
+        else {
+            while (p < len && udp[p]) p += (uint32_t)udp[p] + 1;
+            p++;
+        }
+        if (p + 10 > len) return;
+        uint16_t type = rd16be(udp + p), cls = rd16be(udp + p + 2);
+        uint16_t rdlen = rd16be(udp + p + 8);
+        p += 10;
+        if (p + rdlen > len) return;
+        if (type == 1 && cls == 1 && rdlen == 4) {
+            memcpy(dns_answer, udp + p, 4);
+            dns_done = 1;
+            return;
+        }
+        p += rdlen;
+    }
+    dns_failed = 1;
+}
+
+static void tcp_send_segment(const uint8_t dst_mac[6], uint8_t flags,
+                             uint32_t seq, uint32_t ack,
+                             const uint8_t *payload, uint16_t plen) {
+    uint8_t f[14 + 20 + 20 + TCP_MSS];
+    if (plen > TCP_MSS) plen = TCP_MSS;
+    ip_build(f, dst_mac, tcp_peer, IP_PROTO_TCP, (uint16_t)(20 + plen));
+    uint8_t *t = f + 34;
+    wr16be(t, tcp_local_port); wr16be(t + 2, tcp_peer_port);
+    wr32be(t + 4, seq); wr32be(t + 8, ack);
+    t[12] = 0x50; t[13] = flags;
+    wr16be(t + 14, 4096); wr16be(t + 16, 0); wr16be(t + 18, 0);
+    if (plen) memcpy(t + 20, payload, plen);
+    wr16be(t + 16, pseudo_checksum(cfg.ip, tcp_peer, IP_PROTO_TCP, t, (uint16_t)(20 + plen)));
+    rtl8139_send(f, (uint16_t)(54 + plen));
+}
+
+static void tcp_rx(const uint8_t *frame, const uint8_t *ip, uint16_t total) {
+    const uint8_t *src_mac = frame + 6;
+    uint16_t ihl = (uint16_t)((ip[0] & 0x0F) * 4);
+    if (total < ihl + 20) return;
+    const uint8_t *t = ip + ihl;
+    uint16_t tlen = (uint16_t)(total - ihl);
+    uint16_t sport = rd16be(t), dport = rd16be(t + 2);
+    uint32_t seq = ((uint32_t)rd16be(t + 4) << 16) | rd16be(t + 6);
+    uint32_t ack = ((uint32_t)rd16be(t + 8) << 16) | rd16be(t + 10);
+    uint8_t off = (uint8_t)((t[12] >> 4) * 4), flags = t[13];
+    if (off < 20 || off > tlen || sport != tcp_peer_port || dport != tcp_local_port || !ip_eq(ip + 12, tcp_peer)) return;
+    uint16_t plen = (uint16_t)(tlen - off);
+    const uint8_t *payload = t + off;
+
+    if (tcp_state == TCP_SYN_SENT && (flags & 0x12) == 0x12 && ack == tcp_send_next) {
+        tcp_recv_next = seq + 1;
+        /* tcp_send_next already points past our SYN. */
+        tcp_state = TCP_ESTABLISHED;
+        tcp_send_segment(src_mac, 0x10, tcp_send_next, tcp_recv_next, 0, 0);
+        return;
+    }
+    if (tcp_state != TCP_ESTABLISHED && tcp_state != TCP_FIN_WAIT) return;
+
+    if (plen && seq == tcp_recv_next) {
+        if (!tcp_headers_done) {
+            uint32_t old_header_len = tcp_header_len;
+            uint32_t copy = plen;
+            if (tcp_header_len + copy > sizeof(tcp_header) - 1) copy = sizeof(tcp_header) - 1 - tcp_header_len;
+            memcpy(tcp_header + tcp_header_len, payload, copy);
+            tcp_header_len += copy;
+            tcp_header[tcp_header_len] = 0;
+            char *sep = 0;
+            for (uint32_t i = 3; i < tcp_header_len; i++)
+                if (tcp_header[i-3]=='\r' && tcp_header[i-2]=='\n' && tcp_header[i-1]=='\r' && tcp_header[i]=='\n') { sep = tcp_header + i + 1; break; }
+            if (sep) {
+                tcp_headers_done = 1;
+                if (tcp_header_len >= 12 && tcp_header[0]=='H' && tcp_header[1]=='T' && tcp_header[2]=='T' && tcp_header[3]=='P' && tcp_header[4]=='/')
+                    tcp_http_status = (tcp_header[9]>='0'&&tcp_header[9]<='9'&&tcp_header[10]>='0'&&tcp_header[10]<='9'&&tcp_header[11]>='0'&&tcp_header[11]<='9') ? (tcp_header[9]-'0')*100+(tcp_header[10]-'0')*10+(tcp_header[11]-'0') : 0;
+                uint32_t body_off = (uint32_t)(sep - tcp_header);
+                uint32_t body_n = tcp_header_len > body_off ? tcp_header_len - body_off : 0;
+                if (tcp_body && body_n) {
+                    if (body_n > DOWNLOAD_MAX) body_n = DOWNLOAD_MAX;
+                    memcpy(tcp_body, sep, body_n); tcp_body_len = body_n;
+                }
+                /* The first receive packet may contain more body bytes than the header buffer captured. */
+                uint32_t body_offset = (uint32_t)(sep - tcp_header);
+                if (body_offset > old_header_len && body_offset - old_header_len <= plen) {
+                    uint32_t in_packet = body_offset - old_header_len;
+                    uint32_t extra = plen - in_packet;
+                    if (tcp_body_len + extra > DOWNLOAD_MAX) { extra = DOWNLOAD_MAX - tcp_body_len; tcp_body_overflow = 1; }
+                    memcpy(tcp_body + tcp_body_len, payload + in_packet, extra); tcp_body_len += extra;
+                }
+            }
+        } else if (tcp_body) {
+            uint32_t n = plen;
+            if (tcp_body_len + n > DOWNLOAD_MAX) { n = DOWNLOAD_MAX - tcp_body_len; tcp_body_overflow = 1; }
+            memcpy(tcp_body + tcp_body_len, payload, n); tcp_body_len += n;
+        }
+        tcp_recv_next += plen;
+        tcp_send_segment(src_mac, 0x10, tcp_send_next, tcp_recv_next, 0, 0);
+    }
+    if (flags & 0x01) {
+        if (seq + plen == tcp_recv_next) tcp_recv_next++;
+        tcp_send_segment(src_mac, 0x10, tcp_send_next, tcp_recv_next, 0, 0);
+        tcp_peer_fin = 1;
+        tcp_state = TCP_CLOSED;
+    }
+    (void)ack;
+}
+
+static void handle_udp(const uint8_t *ip, uint16_t ihl, uint16_t total) {
+    const uint8_t *u = ip + ihl;
+    uint16_t len = (uint16_t)(total - ihl);
+    if (len < 8) return;
+    uint16_t sport = rd16be(u), dport = rd16be(u + 2), ulen = rd16be(u + 4);
+    if (ulen < 8 || ulen > len) return;
+    if (dport == dns_port && sport == DNS_PORT && ip_eq(ip + 12, cfg.dns)) dns_rx(u + 8, (uint16_t)(ulen - 8));
+}
+
+static void handle_ipv4_extended(const uint8_t *frame, const uint8_t *ip, uint16_t ihl, uint16_t total) {
+    if (ip[9] == IP_PROTO_UDP) handle_udp(ip, ihl, total);
+    else if (ip[9] == IP_PROTO_TCP) tcp_rx(frame, ip, total);
+}
+
+/* Keep the original receive handler's ICMP behavior, then dispatch TCP/UDP. */
+static void net_rx_download_hook(const uint8_t *frame, uint16_t len) {
+    if (len < 14) return;
+    uint16_t type = rd16be(frame + 12);
+    if (type == ETHERTYPE_ARP) { handle_arp(frame, len); return; }
+    if (type != ETHERTYPE_IPV4 || len < 34) return;
+    const uint8_t *ip = frame + 14;
+    uint16_t ihl = (uint16_t)((ip[0] & 0x0F) * 4), total = rd16be(ip + 2);
+    if ((ip[0] >> 4) != 4 || ihl < 20 || total < ihl || total > len - 14 || inet_checksum(ip, ihl) != 0 || !ip_eq(ip + 16, cfg.ip)) return;
+    if (ip[9] == IP_PROTO_ICMP) handle_icmp(frame, ip, ihl, total);
+    else handle_ipv4_extended(frame, ip, ihl, total);
+}
+
+static int parse_http_url(const char *url, char *host, uint32_t hostsz, uint16_t *port, char *path, uint32_t pathsz) {
+    if (!url || strncmp(url, "http://", 7) != 0) return -1;
+    const char *p = url + 7, *slash = 0;
+    uint32_t i = 0;
+    while (p[i] && p[i] != '/' && p[i] != ':' && i < hostsz - 1) i++;
+    if (i == 0) return -1;
+    memcpy(host, p, i); host[i] = 0; p += i; *port = 80;
+    if (*p == ':') {
+        p++; uint32_t v = 0; int digits = 0;
+        while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; digits++; if (v > 65535) return -1; }
+        if (!digits || v == 0 || *p != '/') return -1;
+        *port = (uint16_t)v;
+    }
+    slash = p;
+    if (!*slash) { path[0]='/'; path[1]=0; return 0; }
+    if (*slash != '/') return -1;
+    uint32_t n = 0; while (slash[n] && n < pathsz - 1) n++;
+    if (slash[n]) return -1;
+    memcpy(path, slash, n); path[n]=0; return 0;
+}
+
+static int dns_lookup(const char *host, uint8_t out[4]) {
+    if (net_parse_ip(host, out) == 0) return 0;
+    uint8_t mac[6];
+    if (resolve_next_hop(cfg.dns, mac) != 0) return -1;
+    uint8_t q[256]; uint32_t n=0;
+    dns_id = (uint16_t)(0x4D53 ^ get_tick());
+    dns_port = (uint16_t)(40000 + (get_tick() % 20000));
+    wr16be(q+n,dns_id); n+=2; wr16be(q+n,0x0100); n+=2; wr16be(q+n,1); n+=2; wr16be(q+n,0); n+=2; wr16be(q+n,0); n+=2; wr16be(q+n,0); n+=2;
+    const char *p=host;
+    while (*p) { const char *dot=p; while (*dot && *dot!='.') dot++; uint8_t l=(uint8_t)(dot-p); if (!l || l>63 || n+l+1+4>sizeof(q)) return -1; q[n++]=l; memcpy(q+n,p,l); n+=l; p=*dot?dot+1:dot; }
+    q[n++]=0; wr16be(q+n,1); n+=2; wr16be(q+n,1); n+=2;
+    dns_done=0; dns_failed=0;
+    uint8_t f[14+20+8+256]; udp_build(f,mac,cfg.dns,dns_port,DNS_PORT,q,(uint16_t)n);
+    if (rtl8139_send(f,(uint16_t)(42+n))!=0) return -1;
+    uint32_t start=get_tick(); while (!dns_done && !dns_failed && (uint32_t)(get_tick()-start)<300) CPU_WAIT();
+    if (!dns_done) return -1;
+    memcpy(out,dns_answer,4);
+    return 0;
+}
+
+int net_download_http(const char *url, const char *filename) {
+    char host[128], path[256], derived[32]; uint16_t port;
+    if (!net_up) { print_str("No network interface\n"); return -1; }
+    if (parse_http_url(url,host,sizeof(host),&port,path,sizeof(path)) != 0) { print_str("Usage: download http://host[:port]/path [file]\n"); return -1; }
+    uint8_t ip[4]; if (dns_lookup(host,ip)!=0) { kprintf("download: DNS lookup failed for %s\n",host); return -1; }
+    net_fmt_ip(derived,ip); kprintf("Connecting to %s (%s):%u\n",host,derived,(uint32_t)port);
+
+    const char *outname=filename;
+    if (!outname) {
+        const char *b=path; for (const char *q=path; *q; q++) if (*q=='/') b=q+1;
+        if (!*b) b="index.htm";
+        uint32_t n=0; while (b[n] && b[n]!='?' && n<sizeof(derived)-1) n++;
+        memcpy(derived,b,n); derived[n]=0; outname=derived;
+    }
+    if (fat32_file_exists(outname)) fat32_delete_file(outname);
+    if (fat32_create_file(outname)!=0) { kprintf("download: cannot create %s\n",outname); return -1; }
+    tcp_body=kmalloc(DOWNLOAD_MAX); if (!tcp_body) { print_str("download: out of memory\n"); return -1; }
+    tcp_body_len=0; tcp_body_overflow=0; tcp_headers_done=0; tcp_header_len=0; tcp_http_status=0; tcp_peer_fin=0; tcp_http_bad=0;
+    memcpy(tcp_peer,ip,4); tcp_peer_port=port; tcp_local_port=(uint16_t)(40000+(get_tick()%20000)); tcp_local_seq=0x10000000u+get_tick(); tcp_send_next=tcp_local_seq; tcp_recv_next=0; tcp_state=TCP_SYN_SENT;
+    uint8_t mac[6]; if (resolve_next_hop(ip,mac)!=0) { kfree(tcp_body); return -1; }
+    tcp_send_segment(mac,0x02,tcp_send_next,0,0,0); tcp_send_next++;
+    uint32_t start=get_tick(); while (tcp_state==TCP_SYN_SENT && (uint32_t)(get_tick()-start)<500) CPU_WAIT();
+    if (tcp_state!=TCP_ESTABLISHED) { print_str("download: TCP connection timeout\n"); kfree(tcp_body); return -1; }
+    char req[512]; uint32_t rn=0;
+    const char *parts[] = {"GET ", path, " HTTP/1.0\r\nHost: ", host, "\r\nConnection: close\r\nUser-Agent: TerminalOS/1.0\r\n\r\n"};
+    for (int pi=0; pi<5; pi++) { const char *z=parts[pi]; while (*z && rn<sizeof(req)-1) req[rn++]=*z++; }
+    req[rn]=0;
+    tcp_send_segment(mac,0x18,tcp_send_next,tcp_recv_next,(const uint8_t*)req,(uint16_t)rn); tcp_send_next += (uint32_t)rn; tcp_state=TCP_FIN_WAIT;
+    start=get_tick(); while (tcp_state!=TCP_CLOSED && (uint32_t)(get_tick()-start)<1000) CPU_WAIT();
+    if (!tcp_headers_done || tcp_http_status != 200 || tcp_body_overflow) { kprintf("download: HTTP status %d%s\n",tcp_http_status,tcp_body_overflow?" or file too large":""); kfree(tcp_body); return -1; }
+    int write_result = fat32_write_file(outname,tcp_body,tcp_body_len);
+    if (write_result < 0) { kprintf("download: FAT32 write failed (%d)\n", write_result); kfree(tcp_body); return -1; }
+    kprintf("Downloaded %u bytes -> %s\n",tcp_body_len,outname); kfree(tcp_body); return 0;
 }

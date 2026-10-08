@@ -51,7 +51,8 @@ Up/Down arrows browse command history; Shift+Up/Down scroll the screen.
 | -------------------------- | -------------------------------------------------------- |
 | `ifconfig`                 | MAC address, IP settings, RX/TX packet counters          |
 | `nettest`                  | Send an ARP request to the gateway and wait for the reply (proves TX + RX work) |
-| `ping <ip> [count]`        | ICMP echo to a dotted IPv4 address (default 4, max 1000), one per second; any key stops it. Prints per-reply RTT and a loss/min/avg/max summary. No DNS yet, so no host names. |
+| `ping <ip> [count]`        | ICMP echo to a dotted IPv4 address (default 4, max 1000), one per second; any key stops it. Prints per-reply RTT and a loss/min/avg/max summary. |
+| `download <url> [file]`    | Download a plain `http://` URL (DNS + TCP + HTTP/1.0) and save it to FAT32; HTTPS is not supported. |
 | `netdebug <on\|off>`       | Print one line per received frame                        |
 
 ### Appearance
