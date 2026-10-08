@@ -29,7 +29,7 @@ Up/Down arrows browse command history; Shift+Up/Down scroll the screen.
 ### System and debugging
 | Command                    | Description                                              |
 | -------------------------- | -------------------------------------------------------- |
-| `help`                     | Short command list (partly out of date, see KNOWN-ISSUES) |
+| `help`                     | List every command                                       |
 | `clear`                    | Clear the screen                                         |
 | `echo <text>`              | Print text                                               |
 | `uptime`                   | Seconds since boot                                       |

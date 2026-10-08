@@ -5,17 +5,18 @@ move to the "Fixed" section below so you can see what changed and where.
 
 ## Open problems
 
-1. **`help` is out of date.** It lists `exec`, `load` and `elfinfo` (not implemented)
-   and omits 16 real commands (`edit`, `sh`, `compile`, `hexdump`, `diskinfo`, ...).
-   The authoritative list is in SHELL.md.
-2. **The "C compiler" is a stub.** It only understands `main` with `printf("...")` and
+1. **The "C compiler" is a stub.** It only understands `main` with `printf("...")` and
    `return N`. Tokenizing handles more than the code generator does.
-3. **No networking stack.** The RTL8139 driver initialises the card and logs received
+2. **No networking stack.** The RTL8139 driver initialises the card and logs received
    packets (`[NET] RX pkt len=N`). There is no transmit path, ARP, IP or UDP/TCP.
-4. **FAT32:** short (8.3) names only, long-file-name entries are skipped; `ls`/`tree`
+3. **FAT32:** short (8.3) names only, long-file-name entries are skipped; `ls`/`tree`
    show at most 32 entries; `cat` refuses files over 4 KB.
 
 ## Fixed
+
+### Outdated `help` (fixed)
+
+`help` listed `exec`, `load` and `elfinfo` (not implemented) and omitted 16 real commands. It now lists all 37 commands the shell dispatches, grouped as in SHELL.md.
 
 ### Kernel image almost out of mapped memory (fixed)
 

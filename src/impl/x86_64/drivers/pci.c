@@ -41,7 +41,7 @@ void pci_config_write_word(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offs
 }
 
 int pci_find_device(uint16_t vendor_id, uint16_t device_id, uint8_t *bus_out, uint8_t *slot_out, uint8_t *func_out) {
-    for (uint8_t bus = 0; bus < 256; bus++) {
+    for (int bus = 0; bus < 256; bus++) {
         for (uint8_t slot = 0; slot < 32; slot++) {
             uint32_t d = pci_config_read_dword(bus, slot, 0, 0x00);
             uint16_t vid = d & 0xFFFF;
