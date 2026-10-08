@@ -780,8 +780,6 @@ static void tcp_rx(const uint8_t *frame, const uint8_t *ip, uint16_t total) {
                     tcp_tls_rx_head += plen;
                 }
             }
-            tcp_recv_next += plen;
-            tcp_send_segment(src_mac, 0x10, tcp_send_next, tcp_recv_next, 0, 0);
         } else if (!tcp_headers_done) {
             uint32_t old_header_len = tcp_header_len;
             uint32_t copy = plen;
@@ -990,10 +988,18 @@ int net_download_https(const char *url, const char *filename) {
     if (fat32_file_exists(outname)) fat32_delete_file(outname);
     if (fat32_create_file(outname) != 0) { kprintf("download: cannot create %s\n", outname); return -1; }
 
+    tcp_tls_rx = 0;
     tcp_tls_rx_size = 32768;
     tcp_tls_rx = (uint8_t*)kmalloc(tcp_tls_rx_size);
     uint8_t *body = (uint8_t*)kmalloc(DOWNLOAD_MAX);
-    if (!tcp_tls_rx || !body) { kfree(tcp_tls_rx); kfree(body); print_str("download: out of memory\n"); return -1; }
+    if (!tcp_tls_rx || !body) {
+        if (tcp_tls_rx) kfree(tcp_tls_rx);
+        tcp_tls_rx = 0;
+        tcp_tls_rx_size = 0;
+        if (body) kfree(body);
+        print_str("download: out of memory\n");
+        return -1;
+    }
     tcp_tls_rx_head = tcp_tls_rx_tail = 0;
     tcp_tls_overflow = 0;
 

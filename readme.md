@@ -83,4 +83,4 @@ Made with coffee and stubbornness.
 
 ### HTTPS downloads
 
-The shell `download` command supports HTTPS using BearSSL TLS 1.2 with SNI and X.509 validation. The Docker build environment fetches BearSSL automatically.
+The shell `download` command supports HTTPS using BearSSL TLS 1.2 with SNI and X.509 validation. The Docker build environment fetches upstream BearSSL and cross-builds its static library.

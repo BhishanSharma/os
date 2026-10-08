@@ -1,4 +1,5 @@
 #include <stddef.h> // for size_t
+#include <stdint.h>
 #include <stdarg.h>
 
 int strcmp(const char* s1, const char* s2) {
@@ -160,6 +161,21 @@ void* memcpy(void* dest, const void* src, size_t n) {
     const unsigned char* s = (const unsigned char*)src;
     while (n--) {
         *d++ = *s++;
+    }
+    return dest;
+}
+
+__attribute__((optimize("no-tree-loop-distribute-patterns")))
+void* memmove(void* dest, const void* src, size_t n) {
+    unsigned char* d = (unsigned char*)dest;
+    const unsigned char* s = (const unsigned char*)src;
+    if ((uintptr_t)d <= (uintptr_t)s) {
+        for (size_t i = 0; i < n; ++i) d[i] = s[i];
+    } else {
+        while (n) {
+            --n;
+            d[n] = s[n];
+        }
     }
     return dest;
 }

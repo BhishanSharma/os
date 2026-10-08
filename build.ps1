@@ -66,6 +66,7 @@ if (-not (Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue)) {
 }
 
 $qemuArgs = @(
+    "-cpu", "max",
     "-cdrom", "dist\x86_64\kernel.iso",
     "-drive", "file=disk.img,format=raw,index=0,media=disk",
     "-boot", "d",

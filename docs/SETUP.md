@@ -1,8 +1,8 @@
 # Setting up a development environment
 
 The kernel is built by a cross-compiler (`x86_64-elf-gcc`/`x86_64-elf-g++`), `nasm` and
-`grub-mkrescue`. The Docker build image also fetches the header-only BearSSL
-TLS implementation used by `download https://...`. Instead of installing those on your machine, they live in a
+`grub-mkrescue`. The Docker build image also fetches upstream BearSSL and builds
+its TLS library for `download https://...`. Instead of installing those on your machine, they live in a
 Docker image defined in `buildenv/Dockerfile`. You build **inside Docker** and
 run **on your machine with QEMU**.
 
@@ -62,7 +62,7 @@ docker run --rm -v ${PWD}:/root/env myos-buildenv make build-x86_64
 # once: create the FAT32 test disk (no mount/root needed)
 docker run --rm -v ${PWD}:/w debian:stable-slim sh -c "apt-get update -qq && apt-get install -y -qq dosfstools mtools && cd /w && sh scripts/mkdisk.sh disk.img"
 
-qemu-system-x86_64 -cdrom dist\x86_64\kernel.iso `
+qemu-system-x86_64 -cpu max -cdrom dist\x86_64\kernel.iso `
   -drive file=disk.img,format=raw,index=0,media=disk -boot d `
   -device rtl8139,netdev=n0 -netdev user,id=n0
 ```

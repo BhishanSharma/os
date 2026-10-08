@@ -1,11 +1,17 @@
 #include "tls/bearssl_client.h"
 #include <stdint.h>
 #include <stddef.h>
-#include "lib/string.h"
-#include <bearssl/bearssl.hpp>
+#include <string.h>
+#include <bearssl.h>
 
-extern "C" int net_tls_read(unsigned char *buf, size_t len);
-extern "C" int net_tls_write(const unsigned char *buf, size_t len);
+#ifdef __cplusplus
+extern "C" {
+#endif
+int net_tls_read(unsigned char *buf, size_t len);
+int net_tls_write(const unsigned char *buf, size_t len);
+#ifdef __cplusplus
+}
+#endif
 
 static int low_read(void *, unsigned char *buf, size_t len) {
     return net_tls_read(buf, len);
@@ -56,26 +62,35 @@ static unsigned char x2_q[] = {
     0x5b,0x77,0xdf,0xf0,0xfa,0x41,0xec,0x39,0xdc,0x75,0xca,0x68,0x07,0x0c,0x1f,0xea
 };
 
-static const br_x509_trust_anchor x2_ta = {
-    { x2_dn, sizeof(x2_dn) }, BR_X509_TA_CA,
-    { BR_KEYTYPE_EC, { { BR_EC_secp384r1, x2_q, sizeof(x2_q) } } }
-};
+static br_x509_trust_anchor x2_ta;
+
+static void init_trust_anchor(void) {
+    x2_ta.dn.data = x2_dn;
+    x2_ta.dn.len = sizeof(x2_dn);
+    x2_ta.flags = BR_X509_TA_CA;
+    x2_ta.pkey.key_type = BR_KEYTYPE_EC;
+    x2_ta.pkey.key.ec.curve = BR_EC_secp384r1;
+    x2_ta.pkey.key.ec.q = x2_q;
+    x2_ta.pkey.key.ec.qlen = sizeof(x2_q);
+}
 
 static int fill_entropy(unsigned char out[64]) {
+    unsigned eax = 1, ecx;
+    __asm__ volatile("cpuid"
+                     : "+a"(eax), "=c"(ecx)
+                     :
+                     : "ebx", "edx");
+    if ((ecx & (1u << 30)) == 0) return 0;
+
     for (unsigned i = 0; i < 16; ++i) {
         unsigned long long v;
-        unsigned char ok;
-        __asm__ volatile("rdrand %0; setc %1" : "=r"(v), "=qm"(ok));
-        if (!ok) {
-            unsigned lo, hi;
-            __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-            v = ((unsigned long long)hi << 32) | lo;
-            v ^= (unsigned long long)(uintptr_t)out;
-            v ^= (unsigned long long)i * 0x9E3779B97F4A7C15ULL;
-        }
+        unsigned char ok = 0;
+        for (unsigned attempt = 0; attempt < 10 && !ok; ++attempt)
+            __asm__ volatile("rdrand %0; setc %1" : "=r"(v), "=qm"(ok));
+        if (!ok) return 0;
         for (unsigned j = 0; j < 8; ++j) out[i * 8 + j] = (unsigned char)(v >> (j * 8));
     }
-    return 0;
+    return 1;
 }
 
 static int find_header_end(const unsigned char *p, uint32_t n) {
@@ -128,9 +143,10 @@ extern "C" int tls_https_download(const char *host, const char *path,
     unsigned y, m, d;
     build_date(&y, &m, &d);
 
+    init_trust_anchor();
     br_ssl_client_init_full(&sc, &xc, &x2_ta, 1);
     br_ssl_engine_set_buffer(&sc.eng, iobuf, sizeof(iobuf), 0);
-    fill_entropy(entropy);
+    if (!fill_entropy(entropy)) return -7;
     br_ssl_engine_inject_entropy(&sc.eng, entropy, sizeof(entropy));
     br_x509_minimal_set_time(&xc, days_from_year_month_day(y, m, d), 12 * 3600);
     br_ssl_engine_add_flags(&sc.eng, BR_OPT_NO_RENEGOTIATION);
@@ -140,7 +156,7 @@ extern "C" int tls_https_download(const char *host, const char *path,
 
     char req[1024];
     uint32_t rn = 0;
-    const char *parts[] = {"GET ", path, " HTTP/1.1\r\nHost: ", host,
+    const char *parts[] = {"GET ", path, " HTTP/1.0\r\nHost: ", host,
                            "\r\nConnection: close\r\nUser-Agent: TerminalOS/1.0\r\n\r\n"};
     for (unsigned i = 0; i < sizeof(parts)/sizeof(parts[0]); ++i) {
         const char *p = parts[i];
@@ -156,13 +172,13 @@ extern "C" int tls_https_download(const char *host, const char *path,
     for (;;) {
         int n = br_sslio_read(&io, buf, sizeof(buf));
         if (n < 0) {
-            /* Many HTTP/1.1 servers close the TCP connection without a TLS
-             * close_notify after sending the complete response. We accept the
-             * transport EOF once a complete HTTP header and 200 status exist. */
             if (headers_done && status == 200) break;
             return -3;
         }
-        if (n == 0) continue;
+        if (n == 0) {
+            if (headers_done && status == 200) break;
+            return -3;
+        }
         if (append_http_bytes(buf, (uint32_t)n, body, body_max, &total,
                               hdr, &hdr_len, &headers_done, &status) < 0) return -4;
     }

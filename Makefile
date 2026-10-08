@@ -24,6 +24,8 @@ SRC_X86    := src/impl/x86_64
 INCLUDES   := src/intf src/intf/lib
 
 BEARSSL_DIR ?= /root/bearssl
+BEARSSL_BUILD = $(BUILD)/bearssl
+BEARSSL_LIB = $(BEARSSL_BUILD)/libbearssl.a
 
 LINKER_LD  := targets/x86_64/linker.ld
 ISO_SRC    := targets/x86_64/iso
@@ -49,7 +51,7 @@ DISK_IMG   ?= disk.img
 #   Allows the linker to discard unused code with --gc-sections.
 #
 
-INCLUDE_FLAGS := $(addprefix -I ,$(INCLUDES)) -I $(BEARSSL_DIR)/include
+INCLUDE_FLAGS := $(addprefix -I ,$(INCLUDES)) -I $(BEARSSL_DIR)/inc
 
 CFLAGS := -c $(INCLUDE_FLAGS) \
           -ffreestanding \
@@ -62,7 +64,7 @@ CFLAGS := -c $(INCLUDE_FLAGS) \
           -ffunction-sections \
           -fdata-sections
 
-CXXFLAGS := -c $(INCLUDE_FLAGS) \
+CXXFLAGS := -c -I buildenv/freestanding/include $(INCLUDE_FLAGS) \
             -ffreestanding \
             -fno-stack-protector \
             -fno-pie \
@@ -165,9 +167,18 @@ $(BUILD)/x86_64/%.o: $(SRC_X86)/%.asm
 
 # ---- Link -----------------------------------------------------------------
 
-$(KERNEL_BIN): $(objects) $(LINKER_LD)
+$(BEARSSL_LIB):
+	$(MAKE) -C $(BEARSSL_DIR) \
+	    BUILD=$(abspath $(BEARSSL_BUILD)) \
+	    CC=$(CC) AR=$(CROSS)ar \
+	    CFLAGS="-ffreestanding -fno-builtin -fno-stack-protector -fno-pie -mno-red-zone -Os -ffunction-sections -fdata-sections" \
+	    INCFLAGS="-Isrc -Iinc -I$(abspath buildenv/freestanding/include)" \
+	    STATICLIB=lib DLL=no TOOLS=no TESTS=no
+
+
+$(KERNEL_BIN): $(objects) $(BEARSSL_LIB) $(LINKER_LD)
 	@mkdir -p $(DIST)
-	$(LD) $(LDFLAGS) -o $@ $(objects)
+	$(LD) $(LDFLAGS) -o $@ $(objects) $(BEARSSL_LIB)
 
 
 # ---- ISO ------------------------------------------------------------------
@@ -203,7 +214,7 @@ run: ## Boot the ISO in QEMU with disk + NIC (host-side; build first)
 		echo "No $(KERNEL_ISO): run 'make build-x86_64' (in Docker) first"; \
 		exit 1; \
 	}
-	$(QEMU) -cdrom $(KERNEL_ISO) \
+	$(QEMU) -cpu max -cdrom $(KERNEL_ISO) \
 	    -drive file=$(DISK_IMG),format=raw,index=0,media=disk -boot d \
 	    -device rtl8139,netdev=n0 -netdev user,id=n0 -serial stdio
 
@@ -213,7 +224,7 @@ run-nodisk: ## Boot the ISO in QEMU without a disk (host-side)
 		echo "No $(KERNEL_ISO): run 'make build-x86_64' (in Docker) first"; \
 		exit 1; \
 	}
-	$(QEMU) -cdrom $(KERNEL_ISO) -boot d -serial stdio
+	$(QEMU) -cpu max -cdrom $(KERNEL_ISO) -boot d -serial stdio
 
 
 debug: ## Boot paused with a gdb server on :1234
@@ -221,7 +232,7 @@ debug: ## Boot paused with a gdb server on :1234
 		echo "No $(KERNEL_ISO): run 'make DEBUG=1 build-x86_64' (in Docker) first"; \
 		exit 1; \
 	}
-	$(QEMU) -cdrom $(KERNEL_ISO) \
+	$(QEMU) -cpu max -cdrom $(KERNEL_ISO) \
 	    -drive file=$(DISK_IMG),format=raw,index=0,media=disk -boot d \
 	    -device rtl8139,netdev=n0 -netdev user,id=n0 \
 	    -serial stdio -s -S

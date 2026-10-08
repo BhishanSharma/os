@@ -13,6 +13,7 @@ is offered too. No root or host setup is needed.
 | 2 | **Done.** Ethernet + ARP (cache, replies to requests), IPv4 header + checksum, ICMP echo | `ping 10.0.2.2` |
 | 3 | **Done.** UDP DNS A-record lookup | internal to `download` |
 | 4 | **Done (minimal).** TCP client handshake/ACK/FIN, HTTP/1.0 GET, write response body to FAT32 | `download http://...` |
+| 5 | **Done (minimal).** TLS 1.2 HTTPS client with BearSSL and certificate/name validation | `download https://...` |
 
 ## Step 1: what exists
 
@@ -47,9 +48,8 @@ In QEMU user networking, `ping 10.0.2.2` and `ping 10.0.2.3` always work. Pingin
 
 ## Limits to plan for
 
-* **HTTP only.** HTTPS needs TLS, which is out of scope. Test against `python3 -m http.server`
-  on the host (reachable from the guest as `10.0.2.2:8000`).
-* Redirects (301/302) must be followed, because many `http://` URLs bounce to HTTPS.
+* Downloads buffer the response in memory (up to `DOWNLOAD_MAX`) before writing to disk.
+* Redirects (301/302) are not followed automatically.
 * The heap is 1 MiB: stream the body to disk in chunks, never buffer the whole file.
 * FAT32 names are 8.3, so downloaded names get truncated.
 * Received frames are handled in interrupt context, so protocol handlers must stay short and
@@ -57,9 +57,9 @@ In QEMU user networking, `ping 10.0.2.2` and `ping 10.0.2.3` always work. Pingin
 
 ## HTTPS download
 
-`download` now accepts both `http://` and `https://` URLs. HTTPS uses the BearSSL TLS 1.2 client through the existing TCP transport. The build Docker image fetches the header-only BearSSL dependency into `/root/bearssl`.
+`download` accepts both `http://` and `https://` URLs. HTTPS uses the BearSSL TLS 1.2 client through the existing TCP transport. The build Docker image fetches the upstream BearSSL source into `/root/bearssl` and builds its static library for the kernel.
 
-The initial trust store contains ISRG Root X2, so current Let's Encrypt ECDSA chains rooted at X2 can be verified. The OS currently has no RTC; certificate validity is checked against the build date embedded by the compiler. A broader CA store and a hardware/firmware-backed wall clock are future work.
+The initial trust store contains ISRG Root X2, so current Let's Encrypt ECDSA chains rooted at X2 can be verified. Secure entropy requires a CPU with RDRAND; QEMU is launched with `-cpu max` to expose that instruction. The OS currently has no RTC; certificate validity is checked against the build date embedded by the compiler. A broader CA store and a hardware/firmware-backed wall clock are future work.
 
 Example:
 

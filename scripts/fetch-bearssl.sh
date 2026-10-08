@@ -6,5 +6,5 @@ if [ -d "$DEST/.git" ]; then
     exit 0
 fi
 mkdir -p "$(dirname "$DEST")"
-git clone --depth 1 --branch headeronly https://github.com/header-only/bearssl.git "$DEST"
+git clone --depth 1 https://www.bearssl.org/git/BearSSL "$DEST"
 echo "BearSSL fetched to $DEST"
