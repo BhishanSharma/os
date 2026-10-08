@@ -22,6 +22,7 @@ static int test_alloc_count = 0;
 
 static void cmd_help(void);
 static void cmd_crash(const char *what);
+static void cmd_ping(const char *args);
 static void cmd_ls(void);
 static void cmd_cat(const char *filename);
 int shell_execute_command(const char* line);
@@ -84,6 +85,7 @@ static void cmd_help(void)
     print_str("\n=== Network ===\n");
     print_str("ifconfig           - show MAC, IP settings and packet counters\n");
     print_str("nettest            - send an ARP request to the gateway, wait for the reply\n");
+    print_str("ping <ip> [count]  - send ICMP echo requests (default 4), e.g. ping 10.0.2.2\n");
     print_str("netdebug <on|off>  - print a line for every received frame\n");
     print_str("\n=== Appearance ===\n");
     print_str("theme <name>       - change color theme\n");
@@ -825,6 +827,10 @@ int shell_execute_command(const char* line) {
     {
         net_selftest();
     }
+    else if (strcmp(line, "ping") == 0 || strncmp(line, "ping ", 5) == 0)
+    {
+        cmd_ping(line + 4);
+    }
     else if (strncmp(line, "netdebug ", 9) == 0)
     {
         const char *arg = line + 9;
@@ -848,4 +854,41 @@ int shell_execute_command(const char* line) {
         kprintf("Unknown command: %s\n", line);
     }
     return 0;
+}
+
+
+/* ping <ip> [count] */
+static void cmd_ping(const char *args)
+{
+    while (*args == ' ') args++;
+
+    char host[20];
+    size_t n = 0;
+    while (args[n] && args[n] != ' ' && n < sizeof(host) - 1) { host[n] = args[n]; n++; }
+    host[n] = '\0';
+    args += n;
+    while (*args == ' ') args++;
+
+    uint8_t ip[4];
+    if (n == 0 || net_parse_ip(host, ip) != 0)
+    {
+        print_str("Usage: ping <ip> [count]   (dotted IPv4 address, e.g. ping 10.0.2.2)\n");
+        print_str("There is no DNS client yet, so host names are not supported.\n");
+        return;
+    }
+
+    uint32_t count = 4;
+    if (*args)
+    {
+        if (*args < '0' || *args > '9')
+        {
+            print_str("Usage: ping <ip> [count]\n");
+            return;
+        }
+        count = kstr_to_uint32(args);
+        if (count == 0) count = 4;
+        if (count > 1000) count = 1000;
+    }
+
+    net_ping(ip, count);
 }

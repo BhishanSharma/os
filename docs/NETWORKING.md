@@ -10,7 +10,7 @@ is offered too. No root or host setup is needed.
 | Step | What | Test |
 | ---- | ---- | ---- |
 | 1 | **Done.** NIC transmit, MAC address, fixed receive ring, `net.c` skeleton | `ifconfig`, `nettest` |
-| 2 | Ethernet + ARP (cache, replies to requests), IPv4 header + checksum, ICMP echo | `ping 10.0.2.2` |
+| 2 | **Done.** Ethernet + ARP (cache, replies to requests), IPv4 header + checksum, ICMP echo | `ping 10.0.2.2` |
 | 3 | UDP, DNS A-record lookup (optionally DHCP) | `nslookup example.com` |
 | 4 | TCP client (handshake, seq/ack, retransmit, FIN), HTTP/1.0 GET, write body to FAT32 | `download http://...` |
 
@@ -24,6 +24,26 @@ is offered too. No root or host setup is needed.
 
 `nettest` broadcasts an ARP "who has 10.0.2.2?" and waits one second for the reply. Success
 prints the gateway's MAC (QEMU's is `52:55:0a:00:02:02`) and proves frames go out and come back.
+
+## Step 2: what exists
+
+All in `net/net.c`:
+
+* **ARP:** 8-entry cache, filled from replies and from requests aimed at us; we answer requests
+  for `10.0.2.15`. Resolution retries 3 times, 1 s each.
+* **IPv4:** 20-byte headers, header checksum verified on receive, DF set on send, unicast-to-us
+  only, fragments dropped. Next hop is the host itself when on our subnet, else the gateway.
+* **ICMP:** answers echo requests (so the host can ping the guest), matches echo replies by
+  id + sequence, reports destination-unreachable and TTL-exceeded errors for the active ping.
+* **`ping <ip> [count]`:** round-trip time uses the CPU's TSC (calibrated once against the PIT,
+  about 50 ms on first use), so it shows sub-millisecond times instead of 10 ms steps. Pinging
+  your own IP or 127.x.x.x is answered locally without touching the NIC.
+* **Tests:** `make test-net` builds `net.c` on the host with mocked hardware and a simulated
+  gateway (ARP, replies, timeouts, unreachable, corrupt checksums, random garbage frames).
+
+In QEMU user networking, `ping 10.0.2.2` and `ping 10.0.2.3` always work. Pinging the internet
+(e.g. `ping 8.8.8.8`) only works if the host lets QEMU send unprivileged ICMP echo
+(Linux: `net.ipv4.ping_group_range`); otherwise those pings time out even though the stack is fine.
 
 ## Limits to plan for
 

@@ -43,7 +43,7 @@ The ISO ends up at `dist/x86_64/kernel.iso`.
 | Editor         | Line-based text editor (`edit <file>`)                                           |
 | Scripts        | Shell scripts with variables (`sh <file>`)                                       |
 | C subset       | `compile <file.c>` runs a tiny C subset on a stack VM (`printf` of a literal, `return N`) |
-| Networking     | RTL8139 driver: PCI detect, init, MAC, **send and receive raw frames**, `ifconfig`, `nettest`. No IP/TCP stack yet, see [docs/NETWORKING.md](docs/NETWORKING.md). |
+| Networking     | RTL8139 driver, ARP, IPv4, ICMP: **`ping <ip>`** works, plus `ifconfig`, `nettest`. No UDP/TCP/DNS yet, see [docs/NETWORKING.md](docs/NETWORKING.md). |
 
 See [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) for the honest list of rough edges.
 
@@ -68,6 +68,7 @@ make disk            create disk.img          (host: needs dosfstools + mtools)
 make run             boot in QEMU             (host)
 make debug           boot paused for gdb      (host)
 make clean
+make test-net        host-side unit test of the ARP/IP/ICMP code (no QEMU needed)
 ```
 
 ## Hardware (real or virtual)

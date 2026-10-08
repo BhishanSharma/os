@@ -65,7 +65,7 @@ KERNEL_BASE  := 1048576
 KERNEL_LIMIT := 2097152
 
 # ---- Targets --------------------------------------------------------------
-.PHONY: all build-x86_64 iso run run-nodisk debug disk size clean help
+.PHONY: all build-x86_64 iso run run-nodisk debug disk size clean help test-net
 .DEFAULT_GOAL := help
 
 help: ## Show this help
@@ -136,6 +136,12 @@ debug: ## Boot paused with a gdb server on :1234 (build with DEBUG=1 first)
 	$(QEMU) -cdrom $(KERNEL_ISO) \
 	    -drive file=$(DISK_IMG),format=raw,index=0,media=disk -boot d \
 	    -device rtl8139,netdev=n0 -netdev user,id=n0 -serial stdio -s -S
+
+test-net: ## Unit-test the IP/ICMP/ARP code on the host with a simulated gateway (host gcc)
+	mkdir -p $(BUILD)/test
+	gcc -g -O1 -Wall -Wextra -Wno-unused-parameter -fsanitize=address,undefined -DNET_HOST_TEST -I $(INCLUDES) \
+	    tests/net_host_test.c $(SRC_X86)/net/net.c -o $(BUILD)/test/net_host_test
+	$(BUILD)/test/net_host_test
 
 clean: ## Remove build/ and dist/
 	rm -rf $(BUILD) dist
