@@ -54,3 +54,17 @@ In QEMU user networking, `ping 10.0.2.2` and `ping 10.0.2.3` always work. Pingin
 * FAT32 names are 8.3, so downloaded names get truncated.
 * Received frames are handled in interrupt context, so protocol handlers must stay short and
   must not call `kprintf` unless `netdebug` is on.
+
+## HTTPS download
+
+`download` now accepts both `http://` and `https://` URLs. HTTPS uses the BearSSL TLS 1.2 client through the existing TCP transport. The build Docker image fetches the header-only BearSSL dependency into `/root/bearssl`.
+
+The initial trust store contains ISRG Root X2, so current Let's Encrypt ECDSA chains rooted at X2 can be verified. The OS currently has no RTC; certificate validity is checked against the build date embedded by the compiler. A broader CA store and a hardware/firmware-backed wall clock are future work.
+
+Example:
+
+```text
+download https://valid-isrgrootx2.letsencrypt.org/index.html test.html
+```
+
+HTTPS is TLS-encrypted and performs certificate/name validation; it is not a plaintext HTTPS compatibility shim.

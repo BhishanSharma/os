@@ -6,7 +6,9 @@
 #include "drivers/keyboard.h"
 #include "drivers/fat32.h"
 #include "drivers/heap.h"
+#include "tls/bearssl_client.h"
 #include <stdint.h>
+#include <stddef.h>
 
 /* CPU primitives. NET_HOST_TEST swaps them for mocks so the protocol code can be
  * unit-tested on the host (see tests/net_host_test.c). */
@@ -663,6 +665,15 @@ static volatile uint32_t tcp_header_len;
 static volatile int tcp_headers_done;
 static volatile int tcp_http_bad;
 
+/* Raw TCP transport used by the TLS adapter. */
+static volatile int tcp_tls_mode;
+static uint8_t *tcp_tls_rx;
+static uint32_t tcp_tls_rx_size;
+static volatile uint32_t tcp_tls_rx_head;
+static volatile uint32_t tcp_tls_rx_tail;
+static volatile int tcp_tls_overflow;
+static uint8_t tcp_tls_mac[6];
+
 static uint16_t pseudo_checksum(const uint8_t src[4], const uint8_t dst[4],
                                 uint8_t proto, const uint8_t *data, uint16_t len) {
     uint32_t sum = 0;
@@ -758,7 +769,20 @@ static void tcp_rx(const uint8_t *frame, const uint8_t *ip, uint16_t total) {
     if (tcp_state != TCP_ESTABLISHED && tcp_state != TCP_FIN_WAIT) return;
 
     if (plen && seq == tcp_recv_next) {
-        if (!tcp_headers_done) {
+        if (tcp_tls_mode) {
+            if (tcp_tls_rx && tcp_tls_rx_size) {
+                uint32_t used = tcp_tls_rx_head - tcp_tls_rx_tail;
+                if (plen > tcp_tls_rx_size - used) {
+                    tcp_tls_overflow = 1;
+                } else {
+                    for (uint32_t i = 0; i < plen; ++i)
+                        tcp_tls_rx[(tcp_tls_rx_head + i) % tcp_tls_rx_size] = payload[i];
+                    tcp_tls_rx_head += plen;
+                }
+            }
+            tcp_recv_next += plen;
+            tcp_send_segment(src_mac, 0x10, tcp_send_next, tcp_recv_next, 0, 0);
+        } else if (!tcp_headers_done) {
             uint32_t old_header_len = tcp_header_len;
             uint32_t copy = plen;
             if (tcp_header_len + copy > sizeof(tcp_header) - 1) copy = sizeof(tcp_header) - 1 - tcp_header_len;
@@ -778,13 +802,13 @@ static void tcp_rx(const uint8_t *frame, const uint8_t *ip, uint16_t total) {
                     if (body_n > DOWNLOAD_MAX) body_n = DOWNLOAD_MAX;
                     memcpy(tcp_body, sep, body_n); tcp_body_len = body_n;
                 }
-                /* The first receive packet may contain more body bytes than the header buffer captured. */
-                uint32_t body_offset = (uint32_t)(sep - tcp_header);
-                if (body_offset > old_header_len && body_offset - old_header_len <= plen) {
-                    uint32_t in_packet = body_offset - old_header_len;
-                    uint32_t extra = plen - in_packet;
+                /* If the header terminator was found in this packet, body_n already
+                 * contains every body byte that fit in tcp_header. Only append bytes
+                 * that were beyond the portion copied into tcp_header. */
+                if (copy < plen) {
+                    uint32_t extra = plen - copy;
                     if (tcp_body_len + extra > DOWNLOAD_MAX) { extra = DOWNLOAD_MAX - tcp_body_len; tcp_body_overflow = 1; }
-                    memcpy(tcp_body + tcp_body_len, payload + in_packet, extra); tcp_body_len += extra;
+                    memcpy(tcp_body + tcp_body_len, payload + copy, extra); tcp_body_len += extra;
                 }
             }
         } else if (tcp_body) {
@@ -872,6 +896,120 @@ static int dns_lookup(const char *host, uint8_t out[4]) {
     return 0;
 }
 
+
+int net_tls_read(unsigned char *buf, size_t len) {
+    if (!tcp_tls_mode || !tcp_tls_rx || tcp_tls_rx_size == 0 || len == 0 || tcp_tls_overflow) return -1;
+    uint32_t start = get_tick();
+    for (;;) {
+        uint32_t avail = tcp_tls_rx_head - tcp_tls_rx_tail;
+        if (avail) {
+            if (len > avail) len = avail;
+            for (size_t i = 0; i < len; ++i)
+                buf[i] = tcp_tls_rx[(tcp_tls_rx_tail + (uint32_t)i) % tcp_tls_rx_size];
+            tcp_tls_rx_tail += (uint32_t)len;
+            return (int)len;
+        }
+        if (tcp_state == TCP_CLOSED || (uint32_t)(get_tick() - start) > 1000) return -1;
+        CPU_WAIT();
+    }
+}
+
+int net_tls_write(const unsigned char *buf, size_t len) {
+    if (!tcp_tls_mode || !buf || len == 0) return -1;
+    size_t done = 0;
+    while (done < len) {
+        uint16_t n = (uint16_t)((len - done > TCP_MSS) ? TCP_MSS : (len - done));
+        tcp_send_segment(tcp_tls_mac, 0x18, tcp_send_next, tcp_recv_next, buf + done, n);
+        tcp_send_next += n;
+        done += n;
+    }
+    return (int)done;
+}
+
+static int net_tcp_connect(const uint8_t ip[4], uint16_t port, uint8_t mac_out[6], int tls_mode) {
+    memcpy(tcp_peer, ip, 4);
+    tcp_peer_port = port;
+    tcp_local_port = (uint16_t)(40000 + (get_tick() % 20000));
+    tcp_local_seq = 0x10000000u + get_tick();
+    tcp_send_next = tcp_local_seq;
+    tcp_recv_next = 0;
+    tcp_state = TCP_SYN_SENT;
+    tcp_tls_mode = tls_mode;
+    tcp_peer_fin = 0;
+    if (resolve_next_hop(ip, mac_out) != 0) return -1;
+    memcpy(tcp_tls_mac, mac_out, 6);
+    tcp_send_segment(mac_out, 0x02, tcp_send_next, 0, 0, 0);
+    tcp_send_next++;
+    uint32_t start = get_tick();
+    while (tcp_state == TCP_SYN_SENT && (uint32_t)(get_tick() - start) < 1000) CPU_WAIT();
+    return tcp_state == TCP_ESTABLISHED ? 0 : -1;
+}
+
+static void net_tcp_disconnect(void) {
+    tcp_tls_mode = 0;
+    tcp_state = TCP_CLOSED;
+    if (tcp_tls_rx) { kfree(tcp_tls_rx); tcp_tls_rx = 0; }
+    tcp_tls_rx_size = tcp_tls_rx_head = tcp_tls_rx_tail = 0;
+    tcp_tls_overflow = 0;
+}
+
+int net_download_https(const char *url, const char *filename) {
+    char host[128], path[256], derived[64];
+    if (!net_up) { print_str("No network interface\n"); return -1; }
+    if (!url || strncmp(url, "https://", 8) != 0) return -1;
+    const char *p = url + 8;
+    uint32_t hn = 0;
+    while (p[hn] && p[hn] != '/' && p[hn] != ':' && hn < sizeof(host)-1) hn++;
+    if (hn == 0) return -1;
+    memcpy(host, p, hn); host[hn] = 0; p += hn;
+    uint16_t port = 443;
+    if (*p == ':') {
+        p++; uint32_t v = 0; int digits = 0;
+        while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; digits++; if (v > 65535) return -1; }
+        if (!digits || v == 0 || *p != '/') return -1;
+        port = (uint16_t)v;
+    }
+    if (!*p) { path[0] = '/'; path[1] = 0; } else {
+        uint32_t n = 0; while (p[n] && n < sizeof(path)-1) n++;
+        if (p[n]) return -1; memcpy(path, p, n); path[n] = 0;
+    }
+
+    uint8_t ip[4];
+    if (dns_lookup(host, ip) != 0) { kprintf("download: DNS lookup failed for %s\n", host); return -1; }
+    char iptxt[16]; net_fmt_ip(iptxt, ip);
+    kprintf("Connecting securely to %s (%s):%u\n", host, iptxt, (uint32_t)port);
+
+    const char *outname = filename;
+    if (!outname) {
+        const char *b = path;
+        for (const char *q = path; *q; q++) if (*q == '/') b = q + 1;
+        if (!*b) b = "index.htm";
+        uint32_t n = 0; while (b[n] && b[n] != '?' && n < sizeof(derived)-1) n++;
+        memcpy(derived, b, n); derived[n] = 0; outname = derived;
+    }
+    if (fat32_file_exists(outname)) fat32_delete_file(outname);
+    if (fat32_create_file(outname) != 0) { kprintf("download: cannot create %s\n", outname); return -1; }
+
+    tcp_tls_rx_size = 32768;
+    tcp_tls_rx = (uint8_t*)kmalloc(tcp_tls_rx_size);
+    uint8_t *body = (uint8_t*)kmalloc(DOWNLOAD_MAX);
+    if (!tcp_tls_rx || !body) { kfree(tcp_tls_rx); kfree(body); print_str("download: out of memory\n"); return -1; }
+    tcp_tls_rx_head = tcp_tls_rx_tail = 0;
+    tcp_tls_overflow = 0;
+
+    uint8_t mac[6];
+    if (net_tcp_connect(ip, port, mac, 1) != 0) { net_tcp_disconnect(); kfree(body); print_str("download: TCP connection timeout\n"); return -1; }
+    uint32_t body_len = 0;
+    int rc = tls_https_download(host, path, body, DOWNLOAD_MAX, &body_len);
+    net_tcp_disconnect();
+    if (rc != 0) { kprintf("download: TLS/HTTPS failed (%d)\n", rc); kfree(body); return -1; }
+    int wr = fat32_write_file(outname, body, body_len);
+    kfree(body);
+    if (wr < 0) { kprintf("download: FAT32 write failed (%d)\n", wr); return -1; }
+    kprintf("Downloaded %u bytes -> %s\n", body_len, outname);
+    return 0;
+}
+
 int net_download_http(const char *url, const char *filename) {
     char host[128], path[256], derived[32]; uint16_t port;
     if (!net_up) { print_str("No network interface\n"); return -1; }
@@ -890,17 +1028,14 @@ int net_download_http(const char *url, const char *filename) {
     if (fat32_create_file(outname)!=0) { kprintf("download: cannot create %s\n",outname); return -1; }
     tcp_body=kmalloc(DOWNLOAD_MAX); if (!tcp_body) { print_str("download: out of memory\n"); return -1; }
     tcp_body_len=0; tcp_body_overflow=0; tcp_headers_done=0; tcp_header_len=0; tcp_http_status=0; tcp_peer_fin=0; tcp_http_bad=0;
-    memcpy(tcp_peer,ip,4); tcp_peer_port=port; tcp_local_port=(uint16_t)(40000+(get_tick()%20000)); tcp_local_seq=0x10000000u+get_tick(); tcp_send_next=tcp_local_seq; tcp_recv_next=0; tcp_state=TCP_SYN_SENT;
-    uint8_t mac[6]; if (resolve_next_hop(ip,mac)!=0) { kfree(tcp_body); return -1; }
-    tcp_send_segment(mac,0x02,tcp_send_next,0,0,0); tcp_send_next++;
-    uint32_t start=get_tick(); while (tcp_state==TCP_SYN_SENT && (uint32_t)(get_tick()-start)<500) CPU_WAIT();
-    if (tcp_state!=TCP_ESTABLISHED) { print_str("download: TCP connection timeout\n"); kfree(tcp_body); return -1; }
+    uint8_t mac[6]; if (net_tcp_connect(ip, port, mac, 0) != 0) { print_str("download: TCP connection timeout\n"); kfree(tcp_body); return -1; }
     char req[512]; uint32_t rn=0;
     const char *parts[] = {"GET ", path, " HTTP/1.0\r\nHost: ", host, "\r\nConnection: close\r\nUser-Agent: TerminalOS/1.0\r\n\r\n"};
     for (int pi=0; pi<5; pi++) { const char *z=parts[pi]; while (*z && rn<sizeof(req)-1) req[rn++]=*z++; }
     req[rn]=0;
     tcp_send_segment(mac,0x18,tcp_send_next,tcp_recv_next,(const uint8_t*)req,(uint16_t)rn); tcp_send_next += (uint32_t)rn; tcp_state=TCP_FIN_WAIT;
-    start=get_tick(); while (tcp_state!=TCP_CLOSED && (uint32_t)(get_tick()-start)<1000) CPU_WAIT();
+    uint32_t start=get_tick(); while (tcp_state!=TCP_CLOSED && (uint32_t)(get_tick()-start)<1000) CPU_WAIT();
+    tcp_tls_mode = 0;
     if (!tcp_headers_done || tcp_http_status != 200 || tcp_body_overflow) { kprintf("download: HTTP status %d%s\n",tcp_http_status,tcp_body_overflow?" or file too large":""); kfree(tcp_body); return -1; }
     int write_result = fat32_write_file(outname,tcp_body,tcp_body_len);
     if (write_result < 0) { kprintf("download: FAT32 write failed (%d)\n", write_result); kfree(tcp_body); return -1; }

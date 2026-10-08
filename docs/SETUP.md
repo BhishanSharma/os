@@ -1,7 +1,8 @@
 # Setting up a development environment
 
-The kernel is built by a cross-compiler (`x86_64-elf-gcc`), `nasm` and
-`grub-mkrescue`. Instead of installing those on your machine, they live in a
+The kernel is built by a cross-compiler (`x86_64-elf-gcc`/`x86_64-elf-g++`), `nasm` and
+`grub-mkrescue`. The Docker build image also fetches the header-only BearSSL
+TLS implementation used by `download https://...`. Instead of installing those on your machine, they live in a
 Docker image defined in `buildenv/Dockerfile`. You build **inside Docker** and
 run **on your machine with QEMU**.
 

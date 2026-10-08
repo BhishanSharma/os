@@ -40,8 +40,9 @@ int  net_parse_ip(const char *s, uint8_t out[4]);
 int  net_ping(const uint8_t ip[4], uint32_t count);
 
 /* Fetch a plain HTTP URL and save the response body to the current FAT32 directory.
- * HTTPS is intentionally unsupported. `filename` may be NULL to derive one from the URL. */
+ * `filename` may be NULL to derive one from the URL. */
 int  net_download_http(const char *url, const char *filename);
+int  net_download_https(const char *url, const char *filename);
 
 /* Formatting helpers (buffers: mac >= 18 bytes, ip >= 16 bytes) */
 void net_fmt_mac(char *out, const uint8_t mac[6]);

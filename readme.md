@@ -79,3 +79,8 @@ x86_64 CPU, BIOS boot (not UEFI), VGA text-mode display, PS/2 keyboard
 ---
 
 Made with coffee and stubbornness.
+
+
+### HTTPS downloads
+
+The shell `download` command supports HTTPS using BearSSL TLS 1.2 with SNI and X.509 validation. The Docker build environment fetches BearSSL automatically.

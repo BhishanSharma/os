@@ -11,6 +11,7 @@ THIS_MAKEFILE := $(firstword $(MAKEFILE_LIST))
 # ---- Toolchain (override on the command line, e.g. `make CROSS=`) ---------
 CROSS ?= x86_64-elf-
 CC    := $(CROSS)gcc
+CXX   := $(CROSS)g++
 LD    := $(CROSS)ld
 NASM  ?= nasm
 QEMU  ?= qemu-system-x86_64
@@ -19,6 +20,7 @@ QEMU  ?= qemu-system-x86_64
 SRC_KERNEL := src/impl/kernel
 SRC_X86    := src/impl/x86_64
 INCLUDES   := src/intf
+BEARSSL_DIR ?= /root/bearssl
 LINKER_LD  := targets/x86_64/linker.ld
 ISO_SRC    := targets/x86_64/iso
 BUILD      := build
@@ -32,10 +34,11 @@ DISK_IMG   ?= disk.img
 # -mno-red-zone: required for kernel code that takes interrupts (the CPU
 #                pushes onto the stack below rsp, which the red zone assumes
 #                is private to the function).
-CFLAGS := -c -I $(INCLUDES) -ffreestanding -fno-stack-protector -fno-pie \
-          -mno-red-zone -Wall -Wextra -Wno-unused-parameter
+CFLAGS := -c -I $(INCLUDES) -I $(BEARSSL_DIR)/include -ffreestanding -fno-stack-protector -fno-pie \
+          -mno-red-zone -Wall -Wextra -Wno-unused-parameter -ffunction-sections -fdata-sections
+CXXFLAGS := -c -I $(INCLUDES) -I $(BEARSSL_DIR)/include -ffreestanding -fno-stack-protector -fno-pie -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-unwind-tables -fno-asynchronous-unwind-tables -mno-red-zone -Os -Wall -Wextra -Wno-unused-parameter -ffunction-sections -fdata-sections
 ASFLAGS := -f elf64
-LDFLAGS := -n -T $(LINKER_LD)
+LDFLAGS := -n -T $(LINKER_LD) --gc-sections
 
 # `make DEBUG=1` -> debug symbols, no optimisation (needed for gdb).
 ifeq ($(DEBUG),1)
@@ -52,11 +55,13 @@ endif
 kernel_c   := $(shell find $(SRC_KERNEL) -name '*.c')
 x86_c      := $(shell find $(SRC_X86) -name '*.c')
 x86_asm    := $(shell find $(SRC_X86) -name '*.asm')
+x86_cpp    := $(shell find $(SRC_X86) -name '*.cpp')
 
 kernel_obj := $(patsubst $(SRC_KERNEL)/%.c,$(BUILD)/kernel/%.o,$(kernel_c))
 x86_c_obj  := $(patsubst $(SRC_X86)/%.c,$(BUILD)/x86_64/%.o,$(x86_c))
 x86_asm_obj:= $(patsubst $(SRC_X86)/%.asm,$(BUILD)/x86_64/%.o,$(x86_asm))
-objects    := $(kernel_obj) $(x86_c_obj) $(x86_asm_obj)
+x86_cpp_obj:= $(patsubst $(SRC_X86)/%.cpp,$(BUILD)/x86_64/%.o,$(x86_cpp))
+objects    := $(kernel_obj) $(x86_c_obj) $(x86_cpp_obj) $(x86_asm_obj)
 
 # The kernel image starts at 1 MiB and must end before the heap at 2 MiB.
 # linker.ld exports kernel_end and ASSERTs this limit, so an oversized kernel

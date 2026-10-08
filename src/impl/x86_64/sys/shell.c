@@ -87,7 +87,7 @@ static void cmd_help(void)
     print_str("ifconfig           - show MAC, IP settings and packet counters\n");
     print_str("nettest            - send an ARP request to the gateway, wait for the reply\n");
     print_str("ping <ip> [count]  - send ICMP echo requests (default 4), e.g. ping 10.0.2.2\n");
-    print_str("download <url> [file] - download a plain HTTP URL to FAT32\n");
+    print_str("download <url> [file] - download HTTP/HTTPS URL to FAT32\n");
     print_str("netdebug <on|off>  - print a line for every received frame\n");
     print_str("\n=== Appearance ===\n");
     print_str("theme <name>       - change color theme\n");
@@ -906,7 +906,6 @@ static void cmd_download(const char *args)
     while (*args == ' ') args++;
     if (!*args) {
         print_str("Usage: download <url> [file]\n");
-        print_str("Only plain http:// URLs are supported; HTTPS is not supported yet.\n");
         return;
     }
 
@@ -932,5 +931,6 @@ static void cmd_download(const char *args)
         out = filename;
     }
 
-    net_download_http(url, out);
+    if (strncmp(url, "https://", 8) == 0) net_download_https(url, out);
+    else net_download_http(url, out);
 }
