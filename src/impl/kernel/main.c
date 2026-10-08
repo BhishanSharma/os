@@ -13,6 +13,8 @@
 #include "sys/shell.h"
 #include "drivers/pic.h"
 #include "drivers/rtl8139.h"
+#include "core/gdt.h"
+#include "lib/serial.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
@@ -31,6 +33,9 @@ extern char kernel_end[];
 #define HEAP_SIZE  (1024 * 1024)
 
 void kernel_main() {
+    serial_init();      // mirror all output to COM1 from the very first line
+    gdt_init();         // GDT + TSS (own stack for double faults)
+
     print_set_theme(THEME_CYBERPUNK);
     print_clear();
 
@@ -38,7 +43,7 @@ void kernel_main() {
     print_centered("=== Welcome to Terminmal OS ===");
     print_line();
 
-    // Initialize IDT and PIC
+    // Initialize IDT (installs the CPU exception handlers) and PIC
     idt_init();
     pic_remap();
 

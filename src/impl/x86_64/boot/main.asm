@@ -119,8 +119,14 @@ page_table_l3:
     resb 4096
 page_table_l2:
     resb 4096
+; One page that paging_init() leaves unmapped: running off the bottom of the
+; stack then raises a page fault (-> double fault -> panic screen) instead of
+; silently overwriting whatever lies below.
+global stack_guard
+stack_guard:
+    resb 4096
 stack_bottom:
-    resb 4096 * 4
+    resb 4096 * 8               ; 32 KiB boot stack
 stack_top:
 
 section .rodata

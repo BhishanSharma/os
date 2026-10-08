@@ -125,17 +125,17 @@ run: ## Boot the ISO in QEMU with disk + NIC (host-side; build first)
 	@test -f $(KERNEL_ISO) || { echo "No $(KERNEL_ISO): run 'make build-x86_64' (in Docker) first"; exit 1; }
 	$(QEMU) -cdrom $(KERNEL_ISO) \
 	    -drive file=$(DISK_IMG),format=raw,index=0,media=disk -boot d \
-	    -device rtl8139,netdev=n0 -netdev user,id=n0
+	    -device rtl8139,netdev=n0 -netdev user,id=n0 -serial stdio
 
 run-nodisk: ## Boot the ISO in QEMU without a disk (host-side)
 	@test -f $(KERNEL_ISO) || { echo "No $(KERNEL_ISO): run 'make build-x86_64' (in Docker) first"; exit 1; }
-	$(QEMU) -cdrom $(KERNEL_ISO) -boot d
+	$(QEMU) -cdrom $(KERNEL_ISO) -boot d -serial stdio
 
 debug: ## Boot paused with a gdb server on :1234 (build with DEBUG=1 first)
 	@test -f $(KERNEL_ISO) || { echo "No $(KERNEL_ISO): run 'make DEBUG=1 build-x86_64' (in Docker) first"; exit 1; }
 	$(QEMU) -cdrom $(KERNEL_ISO) \
 	    -drive file=$(DISK_IMG),format=raw,index=0,media=disk -boot d \
-	    -device rtl8139,netdev=n0 -netdev user,id=n0 -s -S
+	    -device rtl8139,netdev=n0 -netdev user,id=n0 -serial stdio -s -S
 
 clean: ## Remove build/ and dist/
 	rm -rf $(BUILD) dist

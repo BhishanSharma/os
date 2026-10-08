@@ -2,6 +2,7 @@
 #include "ports.h"
 #include <stdarg.h>
 #include "lib/string.h"
+#include "lib/serial.h"
 
 #define VGA_CTRL_REGISTER 0x3D4
 #define VGA_DATA_REGISTER 0x3D5
@@ -180,6 +181,8 @@ void print_newLine() {
 }
 
 void print_char(char character) {
+    serial_putc(character);   // mirror everything to COM1 (survives crashes)
+
     if (character == '\n') {
         print_newLine();
         move_cursor();

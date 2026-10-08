@@ -17,9 +17,10 @@ src/
     kernel/main.c              kernel_main(): initialises everything, starts the shell
     x86_64/
       boot/                    header.asm (Multiboot2), main.asm (32->64 bit), main64.asm
-      core/                    idt.c, isr.c, idt_load.asm, irq.asm (interrupt stubs)
+      core/                    gdt.c (GDT+TSS), idt.c, exceptions.c (panic screen), isr.c,
+                               exc_stubs.asm (vectors 0-31), irq.asm (IRQ stubs), gdt_load.asm, idt_load.asm
       drivers/                 ata, fat32, heap, keyboard, memory, paging, pci, pic, rtl8139, timer
-      lib/                     print (VGA + kprintf), string, string_utils, compiler, ports.h
+      lib/                     print (VGA + kprintf), serial (COM1), string, string_utils, compiler, ports.h
       sys/                     shell, editor, script, system (reboot)
 ```
 
@@ -43,8 +44,9 @@ BIOS -> GRUB -> loads /boot/kernel.bin at 1 MiB (Multiboot2, header.asm)
 
 `kernel_main` then, in order:
 
+0. `serial_init()` (all output is mirrored to COM1 from here on) and `gdt_init()` (GDT + TSS).
 1. Sets the colour theme, clears the screen, prints the banner.
-2. `idt_init()`, `pic_remap()`; installs the IRQ0 (timer) and IRQ1 (keyboard) stubs.
+2. `idt_init()` (which also installs the CPU exception handlers), `pic_remap()`; installs the IRQ0 (timer) and IRQ1 (keyboard) stubs.
 3. `init_keyboard()`, `timer_init()` (PIT at 100 Hz), `memory_init()`.
 4. `paging_init()` builds a **new** set of page tables (identity map of the kernel image `kernel_start`..`kernel_end`, heap, page tables and VGA memory) and switches to them; then `heap_init()`.
 5. `expand_scrollback()`: grows the scrollback buffer to 2000 lines.
@@ -57,7 +59,7 @@ BIOS -> GRUB -> loads /boot/kernel.bin at 1 MiB (Multiboot2, header.asm)
 | Address                  | What                                                        |
 | ------------------------ | ----------------------------------------------------------- |
 | `0x000B8000`             | VGA text buffer                                             |
-| `0x00100000`-`kernel_end` | Kernel image (text/rodata/data/bss + boot stack); `kernel_end` comes from `linker.ld`, currently about `0x11d000` |
+| `0x00100000`-`kernel_end` | Kernel image (text/rodata/data/bss, 32 KiB boot stack with a guard page below it); `kernel_end` comes from `linker.ld`, currently about `0x126000` |
 | `0x00200000`-`0x00300000`| Kernel heap, 1 MiB (`kmalloc`)                              |
 | `0x00300000`-            | Page tables built by `paging_init()`                        |
 
@@ -83,14 +85,30 @@ and raise `KERNEL_LIMIT` in `linker.ld`.
   | `0x21` (IRQ1) | `irq1_stub`     | `isr_keyboard`       |
   | `0x20 + NIC IRQ` | `irq_nic_stub` | `rtl8139_handle_irq` |
 
-* **There are no CPU exception handlers yet**: a page fault or general-protection
-  fault becomes a triple fault and QEMU resets. See DEVELOPING.md for how to debug this.
+### CPU exceptions
+
+`idt_init()` installs a gate for every vector 0-31 (`core/exc_stubs.asm`). Each stub pushes a
+fake error code when the CPU doesn't supply one, saves all registers and calls
+`exception_handler()` in `core/exceptions.c` with a `struct exc_frame*`. `#DB` and `#BP` report
+and return; everything else draws the panic screen (vector, decoded cause, registers, `CR0-CR4`,
+stack words) on VGA and COM1, then halts. The panic code uses its own tiny writer, not
+`kprintf`, so it still works if the print/heap code is what crashed.
+
+`gdt_init()` builds a GDT (`0x08` code, `0x10` data, `0x18` TSS). The TSS has one IST stack
+(8 KiB, `IST_FATAL`) used by NMI, `#DF` and `#MC`, so a corrupted kernel stack still produces a
+readable report. The boot stack has an unmapped guard page below it (`stack_guard` in
+`main.asm`, skipped by `paging_init()`): overflowing the stack raises `#PF`, then `#DF`, and the
+panic screen says "KERNEL STACK OVERFLOW".
+
+Faults before `idt_init()` (early `kernel_main`, the 32-bit boot code) are still triple faults;
+use `build.ps1 -Log` for those.
 
 ## Drivers
 
 | Driver     | File                       | Notes                                                           |
 | ---------- | -------------------------- | --------------------------------------------------------------- |
-| Display    | `lib/print.c`              | VGA text mode, themes, scrollback, `kprintf`                    |
+| Display    | `lib/print.c`              | VGA text mode, themes, scrollback, `kprintf` (mirrors to serial) |
+| Serial     | `lib/serial.c`             | COM1 115200 8N1, polled; mirrors all kernel output              |
 | Keyboard   | `drivers/keyboard.c`       | Scancode set 1, line input with history, shift/ctrl             |
 | Timer      | `drivers/timer.c`          | PIT channel 0 at 100 Hz, `get_tick`, `sleep(ms)`                |
 | PIC        | `drivers/pic.c`            | 8259 remap; `enable_irq()` lives in `keyboard.c` for historical reasons |

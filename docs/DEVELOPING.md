@@ -31,29 +31,37 @@ make CROSS= build-x86_64     use the host gcc instead of x86_64-elf-gcc (syntax 
 
 ## Debugging
 
-### 1. It reboots / flickers / hangs with no message
+### 1. A red "KERNEL PANIC" screen
 
-That's almost always a triple fault (there are no exception handlers yet).
-Ask QEMU to say what happened:
+A CPU exception (page fault, divide error, invalid opcode, ...) stops the machine on a panic
+screen with the cause and all registers. Find the code with the `RIP` it prints:
+
+```bash
+x86_64-elf-addr2line -e dist/x86_64/kernel.bin 0x<RIP>   # needs a DEBUG=1 build; run in Docker
+```
+
+`CR2` is the faulting address for page faults. "KERNEL STACK OVERFLOW" means recursion or big
+local arrays: move large buffers to `kmalloc`. Call `kpanic("why")` yourself for impossible
+conditions. To see the panic screen on purpose, run `crash pf`, `crash div0`, `crash stack`, etc.
+
+### 2. It still reboots / flickers with no message
+
+That's a fault before `idt_init()` runs (very early boot) or a failure inside the panic code
+itself. Ask QEMU to say what happened:
 
 ```powershell
 qemu-system-x86_64 -cdrom dist\x86_64\kernel.iso -drive file=disk.img,format=raw,index=0,media=disk -boot d `
   -no-reboot -d int,cpu_reset -D qemu.log
 ```
 
-`-no-reboot` freezes at the fault instead of resetting. `qemu.log` lists every
-exception with its vector, error code and `RIP`. Look up `RIP` in the build:
+(or `.\build.ps1 -Log`). `-no-reboot` freezes at the fault instead of resetting; `qemu.log`
+lists every exception with its vector, error code and `RIP`.
 
-```bash
-x86_64-elf-addr2line -e dist/x86_64/kernel.bin 0x<RIP>   # needs a DEBUG=1 build
-```
+### 2b. Serial console
 
-(Run it in the Docker container.)
-
-### 2. Print to the host terminal
-
-Add `-serial stdio` to the QEMU command and write bytes to port `0x3F8` from the
-kernel. Serial output survives crashes that wipe the VGA screen.
+All kernel output (boot log, shell, panic reports) is mirrored to COM1. Add `-serial stdio`
+to the QEMU command (`make run` and `.\build.ps1 -Serial` do) and it appears in your terminal,
+where it survives a wiped screen and can be copied or logged.
 
 ### 3. gdb
 
@@ -108,7 +116,8 @@ in `src/intf/<same area>/`.
 
 * Include project headers relative to `src/intf` (`"drivers/fat32.h"`).
 * Freestanding C: no libc. Use `kprintf`, `kmalloc`/`kfree` and the helpers in `lib/string.h`.
-* Be careful with large locals in interrupt context; there is one small boot stack.
+* There is one 32 KiB boot stack (with an unmapped guard page below it, so overflow panics
+  instead of corrupting memory). Keep big buffers off the stack: use `kmalloc`.
 * Line endings are LF (`.gitattributes`, `.editorconfig`). If you edit on Windows and see
   `^M` or odd `nasm`/`make` errors, run `git add --renormalize .`.
 * Keep `make` warnings from growing; fix any you introduce.

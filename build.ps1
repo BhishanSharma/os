@@ -6,6 +6,7 @@
 #   .\build.ps1 -Clean      make clean first, then build + run
 #   .\build.ps1 -NewDisk    recreate disk.img (wipes it)
 #   .\build.ps1 -Gdb        debug symbols; QEMU waits for gdb on localhost:1234
+#   .\build.ps1 -Serial     mirror kernel output (boot log, panic reports) to this console
 #   .\build.ps1 -Log        run QEMU with -no-reboot -d int,cpu_reset -D qemu.log
 #
 # First run only: if PowerShell blocks the script, run
@@ -15,6 +16,7 @@ param(
     [switch]$Clean,
     [switch]$NewDisk,
     [switch]$Gdb,
+    [switch]$Serial,
     [switch]$Log
 )
 
@@ -71,6 +73,7 @@ $qemuArgs = @(
     "-netdev", "user,id=n0"
 )
 if ($Gdb) { $qemuArgs += @("-s", "-S"); Step "QEMU is waiting for gdb on localhost:1234" }
+if ($Serial) { $qemuArgs += @("-serial", "stdio") }
 if ($Log)   { $qemuArgs += @("-no-reboot", "-d", "int,cpu_reset", "-D", "qemu.log"); Step "Logging to qemu.log" }
 
 Step "Starting QEMU..."

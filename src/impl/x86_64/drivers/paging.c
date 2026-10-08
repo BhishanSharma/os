@@ -4,6 +4,8 @@
 
 typedef uint64_t page_entry_t;
 
+extern char stack_guard[];   // boot stack guard page (main.asm): must stay unmapped
+
 static page_entry_t* pml4;
 
 #define PAGE_TABLE_AREA 0x300000
@@ -38,6 +40,7 @@ void paging_init(uint64_t phys_base, uint64_t phys_end,
     // NOW identity map everything BEFORE enabling paging
     // Identity map kernel
     for (uint64_t addr = phys_base; addr < phys_end; addr += PAGE_SIZE) {
+        if (addr == (uint64_t)stack_guard) continue;   // guard page stays unmapped
         map_page(addr, addr, PAGE_PRESENT | PAGE_RW);
     }
 

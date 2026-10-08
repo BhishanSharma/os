@@ -43,6 +43,7 @@ Up/Down arrows browse command history; Shift+Up/Down scroll the screen.
 | `diskinfo`                 | ATA disk information                                     |
 | `readsector <lba>`         | Dump a raw sector                                        |
 | `fat32info`                | FAT32 volume parameters                                  |
+| `crash <kind>`             | Trigger a CPU exception on purpose: `div0 ud gp pf null stack int3 irq panic` |
 | `reboot`                   | Reset the machine                                        |
 
 ### Appearance

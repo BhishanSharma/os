@@ -34,7 +34,8 @@ The ISO ends up at `dist/x86_64/kernel.iso`.
 | Area           | Status                                                                           |
 | -------------- | -------------------------------------------------------------------------------- |
 | Boot           | GRUB (Multiboot2) -> 32-bit stub -> long mode -> `kernel_main`                   |
-| Display        | VGA text mode, 8 colour themes, 2000-line scrollback                             |
+| Display        | VGA text mode, 8 colour themes, 2000-line scrollback; output mirrored to COM1    |
+| Exceptions     | Handlers for CPU vectors 0-31, panic screen with register dump, stack guard page  |
 | Input          | PS/2 keyboard, command history, arrow keys                                       |
 | Memory         | Paging (identity mapped), first-fit heap allocator (`kmalloc`/`kfree`)           |
 | Storage        | ATA PIO driver (primary master), FAT32 read/write, directories, 8.3 names        |

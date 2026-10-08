@@ -12,6 +12,7 @@
 #include "sys/system.h"
 #include "sys/script.h"
 #include "lib/compiler.h"
+#include "core/exceptions.h"
 
 #define MAX_TEST_ALLOCS 16
 static void *test_allocs[MAX_TEST_ALLOCS];
@@ -19,6 +20,7 @@ static uint64_t test_alloc_sizes[MAX_TEST_ALLOCS];
 static int test_alloc_count = 0;
 
 static void cmd_help(void);
+static void cmd_crash(const char *what);
 static void cmd_ls(void);
 static void cmd_cat(const char *filename);
 int shell_execute_command(const char* line);
@@ -70,7 +72,13 @@ static void cmd_help(void)
 
 static void cmd_ls(void)
 {
-    fat32_file_info_t files[32];
+    // fat32_file_info_t is 268 bytes: 32 of them must not live on the boot stack.
+    fat32_file_info_t *files = kmalloc(32 * sizeof(fat32_file_info_t));
+    if (!files)
+    {
+        print_str("Out of memory\n");
+        return;
+    }
     int count = fat32_list_directory(files, 32);
 
     if (count < 0)
@@ -98,6 +106,7 @@ static void cmd_ls(void)
             }
         }
     }
+    kfree(files);
 }
 
 static void cmd_cat(const char *filename)
@@ -142,6 +151,60 @@ static void cmd_cat(const char *filename)
                 kfree(buffer);
             }
         }
+    }
+}
+
+// Deliberately trigger a CPU exception, to see the panic screen / test handlers.
+static void stack_overflow(int depth)
+{
+    volatile char pad[512];
+    pad[0] = (char)depth;
+    stack_overflow(depth + 1);
+    pad[1] = 0; // keeps the recursion from being turned into a loop
+}
+
+static void cmd_crash(const char *what)
+{
+    if (strcmp(what, "div0") == 0)
+    {
+        __asm__ volatile("xor %%edx, %%edx; mov $1, %%eax; xor %%ecx, %%ecx; div %%ecx" ::: "eax", "ecx", "edx");
+    }
+    else if (strcmp(what, "ud") == 0)
+    {
+        __asm__ volatile("ud2");
+    }
+    else if (strcmp(what, "gp") == 0)
+    {
+        *(volatile uint64_t *)0x8000000000000000ULL = 1; // non-canonical address
+    }
+    else if (strcmp(what, "pf") == 0)
+    {
+        *(volatile uint32_t *)0x5000000 = 1; // unmapped page
+    }
+    else if (strcmp(what, "null") == 0)
+    {
+        *(volatile uint32_t *)0 = 1;
+    }
+    else if (strcmp(what, "stack") == 0)
+    {
+        stack_overflow(0);
+    }
+    else if (strcmp(what, "int3") == 0)
+    {
+        __asm__ volatile("int3"); // non-fatal: reports and continues
+        print_str("Returned from breakpoint\n");
+    }
+    else if (strcmp(what, "irq") == 0)
+    {
+        __asm__ volatile("int $0x2f"); // vector with no handler installed
+    }
+    else if (strcmp(what, "panic") == 0)
+    {
+        kpanic("manual panic from the shell");
+    }
+    else
+    {
+        print_str("Usage: crash <div0|ud|gp|pf|null|stack|int3|irq|panic>\n");
     }
 }
 
@@ -589,19 +652,27 @@ int shell_execute_command(const char* line) {
     {
         // Show directory tree (simple version)
         print_str("Directory tree:\n");
-        fat32_file_info_t files[32];
-        int count = fat32_list_directory_ex(NULL, files, 32);
-
-        for (int i = 0; i < count; i++)
+        fat32_file_info_t *files = kmalloc(32 * sizeof(fat32_file_info_t));
+        if (!files)
         {
-            if (files[i].is_directory)
+            print_str("Out of memory\n");
+        }
+        else
+        {
+            int count = fat32_list_directory_ex(NULL, files, 32);
+
+            for (int i = 0; i < count; i++)
             {
-                kprintf("  [DIR]  %s/\n", files[i].name);
+                if (files[i].is_directory)
+                {
+                    kprintf("  [DIR]  %s/\n", files[i].name);
+                }
+                else
+                {
+                    kprintf("  [FILE] %s\n", files[i].name);
+                }
             }
-            else
-            {
-                kprintf("  [FILE] %s\n", files[i].name);
-            }
+            kfree(files);
         }
     }
     else if (strncmp(line, "theme ", 6) == 0)
@@ -720,6 +791,10 @@ int shell_execute_command(const char* line) {
     }
     else if (strncmp(line, "compile ", 8) == 0) {
         cmd_compile(line+8);
+    }
+    else if (strncmp(line, "crash ", 6) == 0)
+    {
+        cmd_crash(line + 6);
     }
     else
     {

@@ -5,18 +5,14 @@ move to the "Fixed" section below so you can see what changed and where.
 
 ## Open problems
 
-1. **No CPU exception handlers.** Only IRQ0, IRQ1 and the NIC have IDT entries.
-   Any page fault, general-protection fault or divide error triple-faults and
-   QEMU resets. Install handlers for vectors 0-31 that print the vector, error
-   code and `rip`; it will save hours.
-2. **`help` is out of date.** It lists `exec`, `load` and `elfinfo` (not implemented)
+1. **`help` is out of date.** It lists `exec`, `load` and `elfinfo` (not implemented)
    and omits 16 real commands (`edit`, `sh`, `compile`, `hexdump`, `diskinfo`, ...).
    The authoritative list is in SHELL.md.
-3. **The "C compiler" is a stub.** It only understands `main` with `printf("...")` and
+2. **The "C compiler" is a stub.** It only understands `main` with `printf("...")` and
    `return N`. Tokenizing handles more than the code generator does.
-4. **No networking stack.** The RTL8139 driver initialises the card and logs received
+3. **No networking stack.** The RTL8139 driver initialises the card and logs received
    packets (`[NET] RX pkt len=N`). There is no transmit path, ARP, IP or UDP/TCP.
-5. **FAT32:** short (8.3) names only, long-file-name entries are skipped; `ls`/`tree`
+4. **FAT32:** short (8.3) names only, long-file-name entries are skipped; `ls`/`tree`
    show at most 32 entries; `cat` refuses files over 4 KB.
 
 ## Fixed
@@ -31,6 +27,30 @@ range (triple fault, no message). Now `linker.ld` places every section explicitl
 instead of a boot loop, and `make size` reports the remaining headroom (about 900 KiB).
 Verified by padding the kernel with 800 KB of data/bss: it boots, while the old code
 triple-faulted.
+
+### No CPU exception handlers (fixed)
+
+Any fault used to be a triple fault: QEMU reset with no message. Now:
+
+* `core/exc_stubs.asm` has stubs for vectors 0-31 (normalising the error code), and
+  `core/exceptions.c` prints a red **panic screen**: vector, mnemonic, decoded cause (page
+  fault flags and `CR2`, GP selector / "IDT vector N has no handler"), `RIP`/`RSP`/`RFLAGS`, all
+  general registers, `CR0/CR3/CR4`, the top of the stack and the `addr2line` command to find
+  the code. `#DB`/`#BP` just report and resume. `kpanic("msg")` gives the same screen for
+  "can't happen" bugs in kernel code.
+* The panic code writes straight to VGA and COM1 and uses neither `kprintf` nor the heap, so it
+  works even when those are what crashed. All kernel output is now mirrored to COM1 (see
+  `-Serial` / `make run`).
+* A real GDT with a TSS (`core/gdt.c`) gives `#DF`, NMI and `#MC` their own IST stack.
+* The boot stack now has an unmapped **guard page** below it, so a stack overflow faults
+  (reported as "KERNEL STACK OVERFLOW") instead of silently corrupting memory. The guard page
+  immediately exposed a real bug: `ls` and `tree` kept a `fat32_file_info_t files[32]` (8.6 KB)
+  on the old 16 KB stack and had been overflowing it unnoticed. Those arrays now come from
+  `kmalloc`, and the boot stack is 32 KB.
+* `crash <div0|ud|gp|pf|null|stack|int3|irq|panic>` triggers each case on purpose. All were
+  verified in QEMU. Not covered: a fault *before* `idt_init()` runs (first lines of
+  `kernel_main`, and the 32-bit boot code, which prints its own `ERR:` codes) still resets;
+  `build.ps1 -Log` remains the tool for those.
 
 ### Fixed in `0001-source-fixes.patch`
 
@@ -69,10 +89,8 @@ triple-faulted.
 
 ## Ideas, roughly in order of payoff
 
-1. Exception handlers with register dump (#1) and a panic screen.
-2. Read the memory size from the Multiboot2 info instead of hard-coding it.
-3. Table-driven shell commands (`{name, help, handler}`), so `help` can never drift.
-4. `printf`-style `-d` logging to the QEMU serial port (`-serial stdio`) so output survives a crash.
-5. NIC transmit + ARP, then UDP, then a tiny TCP.
-6. Make the compiler real: expressions, locals, `if`/`while`, functions.
-7. Userspace: GDT with ring 3, a syscall gate, ELF loader (the `exec` placeholder in `help`).
+1. Read the memory size from the Multiboot2 info instead of hard-coding it.
+2. Table-driven shell commands (`{name, help, handler}`), so `help` can never drift.
+3. NIC transmit + ARP, then UDP, then a tiny TCP.
+4. Make the compiler real: expressions, locals, `if`/`while`, functions.
+5. Userspace: ring 3 segments in the GDT, a syscall gate, ELF loader (the `exec` placeholder in `help`).
