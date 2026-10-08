@@ -1,0 +1,20 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  iso:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the build-environment image
+        run: docker build buildenv -t myos-buildenv
+      - name: Build the ISO
+        run: docker run --rm -v "$PWD:/root/env" myos-buildenv make build-x86_64
+      - name: Upload ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-iso
+          path: dist/x86_64/kernel.iso

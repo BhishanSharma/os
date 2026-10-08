@@ -1,0 +1,159 @@
+diff --git a/src/impl/kernel/main.c b/src/impl/kernel/main.c
+index 3cd34f7..2a1462b 100755
+--- a/src/impl/kernel/main.c
++++ b/src/impl/kernel/main.c
+@@ -11,10 +11,11 @@
+ #include "drivers/ata.h"
+ #include "sys/editor.h"
+ #include "sys/shell.h"
++#include "drivers/pic.h"
++#include "drivers/rtl8139.h"
+ 
+ extern void irq0_stub();
+ extern void irq1_stub();
+-void pic_remap();
+ 
+ extern void memory_init(uint64_t mem_upper);
+ extern void irq_nic_stub();
+@@ -51,7 +52,7 @@ void kernel_main() {
+     expand_scrollback();
+     
+     if (rtl8139_probe_init() == 0) {
+-        idt_set_entry(0x20 + 0xFF, irq_nic_stub, 0x8E);
++        idt_set_entry(0x20 + rtl8139_get_irq(), irq_nic_stub, 0x8E);
+         print_str("[NET] NIC driver installed\n");
+     }
+ 
+diff --git a/src/impl/x86_64/core/irq.asm b/src/impl/x86_64/core/irq.asm
+index 95ecb05..14fe3db 100644
+--- a/src/impl/x86_64/core/irq.asm
++++ b/src/impl/x86_64/core/irq.asm
+@@ -19,7 +19,9 @@ irq1_stub:
+     push r14
+     push r15
+ 
++    sub rsp, 8          ; keep rsp 16-byte aligned for the C ABI
+     call isr_keyboard
++    add rsp, 8
+ 
+     ; send EOI to PIC
+     mov al, 0x20
+@@ -67,7 +69,9 @@ irq0_stub:
+     push r15
+ 
+     ; Call C handler
++    sub rsp, 8          ; keep rsp 16-byte aligned for the C ABI
+     call isr_timer
++    add rsp, 8
+ 
+     ; Send End-of-Interrupt (EOI) to PIC
+     mov al, 0x20
+@@ -114,10 +118,14 @@ irq_nic_stub:
+     push r14
+     push r15
+ 
++    sub rsp, 8          ; keep rsp 16-byte aligned for the C ABI
+     call rtl8139_handle_irq
++    add rsp, 8
+ 
+-    ; Acknowledge master/slave PIC only if needed: since rtl8139 writes ISR, still need EOI
++    ; The NIC usually sits on the slave PIC (IRQ 8-15): EOI both PICs.
++    ; (An extra EOI to an idle slave is harmless.)
+     mov al, 0x20
++    out 0xA0, al
+     out 0x20, al
+ 
+     pop r15
+diff --git a/src/impl/x86_64/drivers/keyboard.c b/src/impl/x86_64/drivers/keyboard.c
+index 4788db5..134e3c6 100644
+--- a/src/impl/x86_64/drivers/keyboard.c
++++ b/src/impl/x86_64/drivers/keyboard.c
+@@ -2,6 +2,7 @@
+ #include "lib/print.h"
+ #include "../lib/ports.h"
+ #include "lib/string.h"
++#include "drivers/pic.h"
+ 
+ #define KEYBOARD_DATA_PORT 0x60
+ #define HISTORY_SIZE 20
+@@ -125,8 +126,10 @@ void keyboard_handler() {
+ void enable_irq(uint8_t irq) {
+     if (irq < 8)
+         outb(0x21, inb(0x21) & ~(1 << irq));
+-    else
++    else {
+         outb(0xA1, inb(0xA1) & ~(1 << (irq - 8)));
++        outb(0x21, inb(0x21) & ~(1 << 2));   // cascade line: slave -> master
++    }
+ }
+ 
+ void init_keyboard() {
+diff --git a/src/impl/x86_64/drivers/rtl8139.c b/src/impl/x86_64/drivers/rtl8139.c
+index 3cec07a..07d4e96 100644
+--- a/src/impl/x86_64/drivers/rtl8139.c
++++ b/src/impl/x86_64/drivers/rtl8139.c
+@@ -1,5 +1,6 @@
+ #include "drivers/rtl8139.h"
+ #include "drivers/pci.h"
++#include "drivers/pic.h"
+ #include "../lib/ports.h"
+ #include "lib/print.h"
+ #include "drivers/heap.h"   // kmalloc/kfree
+@@ -189,6 +190,11 @@ static void rtl8139_handle_rx(void) {
+     rx_offset = read_offset;
+ }
+ 
++/* IRQ line the NIC reported over PCI (0xFF until rtl8139_probe_init succeeds). */
++uint8_t rtl8139_get_irq(void) {
++    return irq_line;
++}
++
+ /* This should be called by your IRQ stub for the NIC (which you assign to PCI IRQ) */
+ void rtl8139_handle_irq(void) {
+     uint16_t isr = inw_io(RTL_REG_ISR);
+diff --git a/src/impl/x86_64/drivers/timer.c b/src/impl/x86_64/drivers/timer.c
+index 7967bdc..6381b09 100644
+--- a/src/impl/x86_64/drivers/timer.c
++++ b/src/impl/x86_64/drivers/timer.c
+@@ -2,9 +2,9 @@
+ #include "lib/print.h"
+ #include "../lib/ports.h"
+ #include "core/idt.h"
++#include "drivers/pic.h"
+ #include <stdint.h>
+ 
+-extern void enable_irq(uint8_t irq);
+ 
+ typedef struct registers {
+     uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
+diff --git a/pb/src/intf/drivers/pic.h b/src/intf/drivers/pic.h
+new file mode 100644
+index 0000000..8f4bb61
+--- /dev/null
++++ b/src/intf/drivers/pic.h
+@@ -0,0 +1,13 @@
++#ifndef PIC_H
++#define PIC_H
++
++#include <stdint.h>
++
++// Remap the 8259 PICs to vectors 0x20-0x2F and mask everything except IRQ1.
++void pic_remap(void);
++
++// Unmask one IRQ line (0-15). IRQs 8-15 live on the slave PIC, so this also
++// unmasks the cascade line (IRQ2) on the master.
++void enable_irq(uint8_t irq);
++
++#endif
+diff --git a/src/intf/drivers/rtl8139.h b/src/intf/drivers/rtl8139.h
+index d9f5d4f..9d6d178 100644
+--- a/src/intf/drivers/rtl8139.h
++++ b/src/intf/drivers/rtl8139.h
+@@ -3,6 +3,7 @@
+ #include <stdint.h>
+ 
+ int rtl8139_probe_init(void); // returns 0 on success
++uint8_t rtl8139_get_irq(void); // PCI interrupt line; install the IDT entry at 0x20 + this
+ void rtl8139_handle_irq(void); // call from your IRQ stub or register an IDT entry
+ 
+ #endif

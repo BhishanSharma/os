@@ -1,5 +1,6 @@
 #include "drivers/rtl8139.h"
 #include "drivers/pci.h"
+#include "drivers/pic.h"
 #include "../lib/ports.h"
 #include "lib/print.h"
 #include "drivers/heap.h"   // kmalloc/kfree
@@ -187,6 +188,11 @@ static void rtl8139_handle_rx(void) {
         outw_io(RTL_REG_CAPR, read_offset - 16);
     }
     rx_offset = read_offset;
+}
+
+/* IRQ line the NIC reported over PCI (0xFF until rtl8139_probe_init succeeds). */
+uint8_t rtl8139_get_irq(void) {
+    return irq_line;
 }
 
 /* This should be called by your IRQ stub for the NIC (which you assign to PCI IRQ) */

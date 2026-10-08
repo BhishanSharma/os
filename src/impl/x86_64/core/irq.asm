@@ -19,7 +19,9 @@ irq1_stub:
     push r14
     push r15
 
+    sub rsp, 8          ; keep rsp 16-byte aligned for the C ABI
     call isr_keyboard
+    add rsp, 8
 
     ; send EOI to PIC
     mov al, 0x20
@@ -67,7 +69,9 @@ irq0_stub:
     push r15
 
     ; Call C handler
+    sub rsp, 8          ; keep rsp 16-byte aligned for the C ABI
     call isr_timer
+    add rsp, 8
 
     ; Send End-of-Interrupt (EOI) to PIC
     mov al, 0x20
@@ -114,10 +118,14 @@ irq_nic_stub:
     push r14
     push r15
 
+    sub rsp, 8          ; keep rsp 16-byte aligned for the C ABI
     call rtl8139_handle_irq
+    add rsp, 8
 
-    ; Acknowledge master/slave PIC only if needed: since rtl8139 writes ISR, still need EOI
+    ; The NIC usually sits on the slave PIC (IRQ 8-15): EOI both PICs.
+    ; (An extra EOI to an idle slave is harmless.)
     mov al, 0x20
+    out 0xA0, al
     out 0x20, al
 
     pop r15

@@ -2,6 +2,7 @@
 #include "lib/print.h"
 #include "../lib/ports.h"
 #include "lib/string.h"
+#include "drivers/pic.h"
 
 #define KEYBOARD_DATA_PORT 0x60
 #define HISTORY_SIZE 20
@@ -125,8 +126,10 @@ void keyboard_handler() {
 void enable_irq(uint8_t irq) {
     if (irq < 8)
         outb(0x21, inb(0x21) & ~(1 << irq));
-    else
+    else {
         outb(0xA1, inb(0xA1) & ~(1 << (irq - 8)));
+        outb(0x21, inb(0x21) & ~(1 << 2));   // cascade line: slave -> master
+    }
 }
 
 void init_keyboard() {

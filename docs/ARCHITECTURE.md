@@ -1,0 +1,107 @@
+# Architecture
+
+## Source layout
+
+```
+buildenv/Dockerfile            Build container (cross-gcc, nasm, grub, xorriso)
+Makefile                       Build system  (`make help`)
+build.ps1                      Windows one-shot: build + disk + QEMU
+scripts/mkdisk.sh              Creates a FAT32 test disk without root
+targets/x86_64/
+  linker.ld                    Kernel linked at 1 MiB, entry symbol `start`
+  iso/boot/grub/grub.cfg       GRUB menu: multiboot2 /boot/kernel.bin
+src/
+  intf/                        Public headers  (-I src/intf, include as "drivers/fat32.h")
+    core/  drivers/  lib/  sys/
+  impl/
+    kernel/main.c              kernel_main(): initialises everything, starts the shell
+    x86_64/
+      boot/                    header.asm (Multiboot2), main.asm (32->64 bit), main64.asm
+      core/                    idt.c, isr.c, idt_load.asm, irq.asm (interrupt stubs)
+      drivers/                 ata, fat32, heap, keyboard, memory, paging, pci, pic, rtl8139, timer
+      lib/                     print (VGA + kprintf), string, string_utils, compiler, ports.h
+      sys/                     shell, editor, script, system (reboot)
+```
+
+Headers live in `src/intf`, implementations in `src/impl`. A header such as
+`src/intf/drivers/pic.h` is included as `#include "drivers/pic.h"`.
+`src/impl/x86_64/lib/ports.h` (port I/O helpers `inb`/`outb`...) is private and
+included with a relative path.
+
+## Boot flow
+
+```
+BIOS -> GRUB -> loads /boot/kernel.bin at 1 MiB (Multiboot2, header.asm)
+  start            (main.asm, 32-bit)
+    check multiboot magic, CPUID, long-mode support   (error codes 'M', 'C', 'L' on screen)
+    build page tables: PML4 -> PDPT -> PD, 512 x 2 MiB pages = first 1 GiB identity-mapped
+    enable PAE + long mode + paging, load a minimal GDT, far-jump
+  long_mode_start  (main64.asm, 64-bit)
+    zero the data segment registers, call kernel_main
+  kernel_main      (kernel/main.c)
+```
+
+`kernel_main` then, in order:
+
+1. Sets the colour theme, clears the screen, prints the banner.
+2. `idt_init()`, `pic_remap()`; installs the IRQ0 (timer) and IRQ1 (keyboard) stubs.
+3. `init_keyboard()`, `timer_init()` (PIT at 100 Hz), `memory_init()`.
+4. `paging_init()` builds a **new** set of page tables (identity map of the kernel image, heap, page tables and VGA memory) and switches to them; then `heap_init()`.
+5. `expand_scrollback()`: grows the scrollback buffer to 2000 lines.
+6. Probes for an RTL8139 NIC; if found, installs its IRQ handler.
+7. `ata_init()` then `fat32_init(0)` and `cd /`.
+8. `sti` (enable interrupts) and `shell_run()`, which never returns.
+
+## Memory map (physical == virtual, identity mapped)
+
+| Address                  | What                                                        |
+| ------------------------ | ----------------------------------------------------------- |
+| `0x000B8000`             | VGA text buffer                                             |
+| `0x00100000`-`0x00120000`| Kernel image (text/data/bss + boot stack), **128 KiB mapped** |
+| `0x00200000`-`0x00300000`| Kernel heap, 1 MiB (`kmalloc`)                              |
+| `0x00300000`-            | Page tables built by `paging_init()`                        |
+
+These numbers are hard-coded in `kernel_main()`. `make size` warns when the kernel
+image outgrows its 128 KiB region (see KNOWN-ISSUES #1).
+
+## Interrupts
+
+* IDT: 256 entries, kernel code selector `0x08`, interrupt-gate flags `0x8E`.
+* The 8259 PICs are remapped so IRQ 0-7 -> vectors `0x20`-`0x27` and IRQ 8-15 -> `0x28`-`0x2F`.
+  `pic_remap()` masks everything except IRQ1; drivers call `enable_irq(n)` to unmask theirs
+  (for IRQ 8-15 it also unmasks the cascade line, IRQ2).
+* Handlers are assembly stubs in `core/irq.asm` that save registers, call a C
+  handler, send EOI and `iretq`:
+
+  | Vector        | Stub            | C handler            |
+  | ------------- | --------------- | -------------------- |
+  | `0x20` (IRQ0) | `irq0_stub`     | `isr_timer`          |
+  | `0x21` (IRQ1) | `irq1_stub`     | `isr_keyboard`       |
+  | `0x20 + NIC IRQ` | `irq_nic_stub` | `rtl8139_handle_irq` |
+
+* **There are no CPU exception handlers yet**: a page fault or general-protection
+  fault becomes a triple fault and QEMU resets. See DEVELOPING.md for how to debug this.
+
+## Drivers
+
+| Driver     | File                       | Notes                                                           |
+| ---------- | -------------------------- | --------------------------------------------------------------- |
+| Display    | `lib/print.c`              | VGA text mode, themes, scrollback, `kprintf`                    |
+| Keyboard   | `drivers/keyboard.c`       | Scancode set 1, line input with history, shift/ctrl             |
+| Timer      | `drivers/timer.c`          | PIT channel 0 at 100 Hz, `get_tick`, `sleep(ms)`                |
+| PIC        | `drivers/pic.c`            | 8259 remap; `enable_irq()` lives in `keyboard.c` for historical reasons |
+| Paging     | `drivers/paging.c`         | 4-level tables, 4 KiB pages, identity mapping                   |
+| Frames     | `drivers/memory.c`         | Bitmap physical-frame allocator (barely used)                   |
+| Heap       | `drivers/heap.c`           | First-fit free list, 8-byte alignment, `kmalloc`/`kfree`        |
+| ATA        | `drivers/ata.c`            | PIO, LBA28, primary bus master drive, polling (no timeouts)     |
+| FAT32      | `drivers/fat32.c`          | Short (8.3) names only; long-name entries are skipped           |
+| PCI        | `drivers/pci.c`            | Config-space access via ports `0xCF8`/`0xCFC`, device lookup    |
+| RTL8139    | `drivers/rtl8139.c`        | Init, RX ring, interrupts; logs received packet lengths; no TX  |
+
+## System layer
+
+* `sys/shell.c`: one big `if/else` chain in `shell_execute_command()`.
+* `sys/editor.c`: line-based editor on top of the FAT32 API.
+* `sys/script.c`: runs a file line by line through the shell, with `VAR=value`, `$VAR`, `echo`, `sleep`, `exit`.
+* `lib/compiler.c`: tokenizer + a code generator that currently understands only `main` containing `printf("literal")` and `return N`, executed on a small stack VM.
+* `sys/system.c`: `reboot()` via the keyboard controller reset line.

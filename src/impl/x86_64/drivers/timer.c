@@ -2,9 +2,9 @@
 #include "lib/print.h"
 #include "../lib/ports.h"
 #include "core/idt.h"
+#include "drivers/pic.h"
 #include <stdint.h>
 
-extern void enable_irq(uint8_t irq);
 
 typedef struct registers {
     uint64_t r15, r14, r13, r12, r11, r10, r9, r8;

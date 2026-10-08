@@ -11,10 +11,11 @@
 #include "drivers/ata.h"
 #include "sys/editor.h"
 #include "sys/shell.h"
+#include "drivers/pic.h"
+#include "drivers/rtl8139.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
-void pic_remap();
 
 extern void memory_init(uint64_t mem_upper);
 extern void irq_nic_stub();
@@ -51,7 +52,7 @@ void kernel_main() {
     expand_scrollback();
     
     if (rtl8139_probe_init() == 0) {
-        idt_set_entry(0x20 + 0xFF, irq_nic_stub, 0x8E);
+        idt_set_entry(0x20 + rtl8139_get_irq(), irq_nic_stub, 0x8E);
         print_str("[NET] NIC driver installed\n");
     }
 

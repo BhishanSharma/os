@@ -1,131 +1,78 @@
-# 🚀 Welcome to the World of Idiots 👋
+# Terminal OS
 
-Hey there! If you're reading this, congratulations — either you're really into computers, or you just stumbled here wandering through the vast universe of GitHub projects. Either way, you’re welcome! 😎
+A tiny hobby operating system for x86_64, written from scratch in C and NASM.
+It boots with GRUB, drops into 64-bit long mode and gives you a text-mode shell
+with a FAT32 filesystem, a line editor, a simple script runner and an
+RTL8139 network-card driver.
 
----
+> Version 0.1. Terminal only, everything runs in ring 0, no userspace yet.
 
-## 💡 What’s the Idea?
+## Quick start
 
-Honestly, there’s nothing earth-shattering here. Just another “idiot” trying to write their own operating system.
-
-I’ve always dreamed of building my own OS, and after countless hours exploring the depths of the internet and debugging my own mistakes, I’m finally **close to achieving it**.
-
-> Thanks to the internet, sheer patience, and too much caffeine ☕
-
----
-
-## 🖥️ What’s in This OS?
-
-This is **version 0.1**, minimalist by design. But hey, even minimalism can be powerful! 💪
-
-This OS is:
-
-* **Terminal-based** — pure text action.
-* **Ring 0 / Kernel-space only** — every task runs directly on the CPU.
-* **Bare-metal** — no Linux, no Unix layer, just your hardware and the OS.
-
-**Future Goals:** More features, more fancy stuff, and maybe competing with real OSes one day… or at least impressing ourselves.
-
----
-
-## ⚙️ Compatibility
-
-| Component      | Requirement                |
-| -------------- | -------------------------- |
-| 💾 RAM         | Minimum 1 MB               |
-| 🗄️ Storage    | Minimum 8 GB               |
-| 🖥️ CPU        | x86_64 (Intel recommended) |
-| ⌨️ Peripherals | Keyboard & VGA monitor     |
-
----
-
-## ✨ Features
-
-| Feature          | Description              |
-| ---------------- | ------------------------ |
-| FAT32 Filesystem | Read & write files       |
-| Shell Scripting  | Command-line interface   |
-| C File Support   | Compile & run C programs |
-| Networking       | Basic network stack      |
-| Text Editor      | Minimal editor inside OS |
-
-> Think of it as a tiny but mighty OS lab in your hands.
-
----
-
-## 🛠️ How to Build Your ISO
-
-### **Stage 1: Clone the Repo**
+You need **Docker** (to build), **QEMU** (to run) and **Git**.
+Full instructions for Windows, Linux and macOS are in [docs/SETUP.md](docs/SETUP.md).
 
 ```bash
 git clone https://github.com/BhishanSharma/os.git
+cd os
+
+docker build buildenv -t myos-buildenv                  # once
+docker run --rm -v "$PWD":/root/env myos-buildenv make build-x86_64
 ```
+
+On Windows (PowerShell) one script does everything, including creating the
+test disk and launching QEMU:
+
+```powershell
+.\build.ps1
+```
+
+The ISO ends up at `dist/x86_64/kernel.iso`.
+
+## What works
+
+| Area           | Status                                                                           |
+| -------------- | -------------------------------------------------------------------------------- |
+| Boot           | GRUB (Multiboot2) -> 32-bit stub -> long mode -> `kernel_main`                   |
+| Display        | VGA text mode, 8 colour themes, 2000-line scrollback                             |
+| Input          | PS/2 keyboard, command history, arrow keys                                       |
+| Memory         | Paging (identity mapped), first-fit heap allocator (`kmalloc`/`kfree`)           |
+| Storage        | ATA PIO driver (primary master), FAT32 read/write, directories, 8.3 names        |
+| Shell          | ~30 commands (files, memory, disk, themes), see [docs/SHELL.md](docs/SHELL.md)   |
+| Editor         | Line-based text editor (`edit <file>`)                                           |
+| Scripts        | Shell scripts with variables (`sh <file>`)                                       |
+| C subset       | `compile <file.c>` runs a tiny C subset on a stack VM (`printf` of a literal, `return N`) |
+| Networking     | RTL8139 driver: PCI detect, init, receive interrupts. **No TCP/IP stack yet.**    |
+
+See [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) for the honest list of rough edges.
+
+## Documentation
+
+| Doc                                      | What's in it                                              |
+| ---------------------------------------- | --------------------------------------------------------- |
+| [docs/SETUP.md](docs/SETUP.md)           | Set up a build environment (Windows / Linux / macOS)      |
+| [docs/DEVELOPING.md](docs/DEVELOPING.md) | Daily workflow, debugging, adding commands and drivers    |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Boot flow, memory map, interrupts, source layout       |
+| [docs/SHELL.md](docs/SHELL.md)           | Every shell command, editor keys, scripting, C subset     |
+| [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) | Bugs, limits and ideas for what to do next            |
+
+## Everyday commands
+
+```text
+make help            list every target
+make build-x86_64    build the ISO            (inside Docker)
+make DEBUG=1 ...     build with debug symbols
+make disk            create disk.img          (host: needs dosfstools + mtools)
+make run             boot in QEMU             (host)
+make debug           boot paused for gdb      (host)
+make clean
+```
+
+## Hardware (real or virtual)
+
+x86_64 CPU, BIOS boot (not UEFI), VGA text-mode display, PS/2 keyboard
+(QEMU provides one), and for storage an IDE/ATA disk. QEMU is the supported way to run it.
 
 ---
 
-### **Stage 2: Build Docker Container**
-
-> Only needed once if you’re new to Docker or not changing the build environment.
-
-```bash
-docker build buildenv -t myos-buildenv
-```
-
-* `buildenv` → folder containing the Dockerfile
-* `myos-buildenv` → name of the Docker environment (you can rename it!)
-
----
-
-### **Stage 3: Build Your ISO**
-
-```bash
-docker run --rm -it -v ~/os:/root/env myos-buildenv
-make build-x86_64
-```
-
-✅ Your freshly baked ISO will appear at:
-
-```
-dist/x86_64/kernel.iso
-```
-
----
-
-### **Stage 4: Create a FAT32 Partition (Optional, for QEMU users)**
-
-```bash
-sudo rm -f disk.img
-sudo dd if=/dev/zero of=disk.img bs=1M count=32
-sudo mkfs.fat -F 32 disk.img
-sudo chmod 666 disk.img
-mkdir -p /tmp/disk_mount
-sudo mount -o loop disk.img /tmp/disk_mount
-echo "Hello from FAT32!" | sudo tee /tmp/disk_mount/test.txt
-echo "Readme file content" | sudo tee /tmp/disk_mount/readme.txt
-sudo umount /tmp/disk_mount
-echo "disk.img created successfully!"
-```
-
-> Creates a 32 MB FAT32 disk image to test file operations. 🗄️
-
----
-
-### **Stage 5: Run Your OS in QEMU**
-
-```bash
-qemu-system-x86_64 \
-    -cdrom dist/x86_64/kernel.iso \
-    -hda disk.img \
-    -boot d \
-    -device rtl8139,netdev=n0 \
-    -netdev user,id=n0
-```
-
-* Boot your OS in a virtual environment safely 🖥️
-* Test networking, shell commands, and more
-
----
-
-## 🎨 Footer
-
-Made with ☕ + 💻 + 🧠 by an **idiot**.
+Made with coffee and stubbornness.

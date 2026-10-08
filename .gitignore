@@ -1,7 +1,4 @@
-# VSCode settings
-.vscode/
-
-# Build directories
+# Build output
 build/
 dist/
 
@@ -10,6 +7,7 @@ disk.img
 
 # Object and binary files
 *.o
+*.d
 *.elf
 *.bin
 *.iso
@@ -18,3 +16,7 @@ disk.img
 *.log
 *.tmp
 *~
+
+# Editor settings (shared tasks.json is kept on purpose)
+.vscode/*
+!.vscode/tasks.json

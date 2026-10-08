@@ -1,0 +1,8 @@
+# Normalise line endings so Windows and Linux/Docker builds behave the same.
+# (Assembly, linker scripts and Makefiles break with CRLF inside the container.)
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.iso binary
+*.img binary
+*.bin binary
