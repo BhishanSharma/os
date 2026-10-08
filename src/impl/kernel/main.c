@@ -20,6 +20,16 @@ extern void irq1_stub();
 extern void memory_init(uint64_t mem_upper);
 extern void irq_nic_stub();
 
+// Exported by targets/x86_64/linker.ld: the real extent of the kernel image
+// (.text, .rodata, .data, .bss and the boot stack), page aligned at the end.
+extern char kernel_start[];
+extern char kernel_end[];
+
+// The heap lives right above the 1 MiB reserved for the kernel image. The
+// linker script asserts that the image never grows into it.
+#define HEAP_START 0x200000ULL
+#define HEAP_SIZE  (1024 * 1024)
+
 void kernel_main() {
     print_set_theme(THEME_CYBERPUNK);
     print_clear();
@@ -41,13 +51,8 @@ void kernel_main() {
     timer_init();
     memory_init(512 * 1024);
 
-    uint64_t kernel_start = 0x100000;
-    uint64_t kernel_end   = 0x120000;
-    uint64_t heap_start   = 0x200000;
-    uint64_t heap_size    = 1024*1024;
-
-    paging_init(kernel_start, kernel_end, heap_start, heap_size);
-    heap_init(heap_start, heap_size);
+    paging_init((uint64_t)kernel_start, (uint64_t)kernel_end, HEAP_START, HEAP_SIZE);
+    heap_init(HEAP_START, HEAP_SIZE);
 
     expand_scrollback();
     

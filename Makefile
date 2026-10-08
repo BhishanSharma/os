@@ -58,9 +58,11 @@ x86_c_obj  := $(patsubst $(SRC_X86)/%.c,$(BUILD)/x86_64/%.o,$(x86_c))
 x86_asm_obj:= $(patsubst $(SRC_X86)/%.asm,$(BUILD)/x86_64/%.o,$(x86_asm))
 objects    := $(kernel_obj) $(x86_c_obj) $(x86_asm_obj)
 
-# Kernel is currently mapped as 0x100000..0x120000 in kernel_main(); warn
-# when the image outgrows that. See docs/KNOWN-ISSUES.md.
-KERNEL_MAP_LIMIT := 131072
+# The kernel image starts at 1 MiB and must end before the heap at 2 MiB.
+# linker.ld exports kernel_end and ASSERTs this limit, so an oversized kernel
+# fails to link; `make size` just shows how much headroom is left.
+KERNEL_BASE  := 1048576
+KERNEL_LIMIT := 2097152
 
 # ---- Targets --------------------------------------------------------------
 .PHONY: all build-x86_64 iso run run-nodisk debug disk size clean help
@@ -109,13 +111,11 @@ $(KERNEL_ISO): $(KERNEL_BIN) $(ISO_SRC)/boot/grub/grub.cfg
 	cp $(KERNEL_BIN) $(ISO_STAGE)/boot/kernel.bin
 	grub-mkrescue /usr/lib/grub/i386-pc -o $@ $(ISO_STAGE)
 
-size: $(KERNEL_BIN) ## Print kernel size and warn if it exceeds the mapped region
+size: $(KERNEL_BIN) ## Print kernel size and remaining headroom below the heap
 	@$(CROSS)size $(KERNEL_BIN)
-	@total=$$($(CROSS)size $(KERNEL_BIN) | awk 'NR==2{print $$4}'); \
-	if [ "$$total" -gt $(KERNEL_MAP_LIMIT) ]; then \
-	  echo "WARNING: kernel is $$total bytes; kernel_main() only maps $(KERNEL_MAP_LIMIT)."; \
-	  echo "         Raise kernel_end in src/impl/kernel/main.c (see docs/KNOWN-ISSUES.md)."; \
-	fi
+	@end=$$($(CROSS)nm $(KERNEL_BIN) | awk '$$3=="kernel_end"{print "0x"$$1}'); \
+	used=$$(( end - $(KERNEL_BASE) )); free=$$(( $(KERNEL_LIMIT) - end )); \
+	echo "kernel image: $$used bytes mapped, $$free bytes of headroom (limit $$(( $(KERNEL_LIMIT) - $(KERNEL_BASE) )))"
 
 # ---- Host-side helpers (run these on your machine, NOT in Docker) ----------
 disk: ## Create a 32 MB FAT32 test disk (needs dosfstools + mtools)

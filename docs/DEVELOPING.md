@@ -16,9 +16,9 @@ Incremental builds work: `make` tracks header dependencies (`-MMD`), so editing 
 `.h` rebuilds exactly the files that include it. You only need `make clean` if you
 change the Makefile or linker script and something looks stale.
 
-**After every build, glance at the `size` line** it prints. If it warns that the
-kernel is larger than the mapped region, fix that first (KNOWN-ISSUES #1); the
-symptom otherwise is a silent reboot loop.
+`make` ends with a `kernel image: ... bytes of headroom` line. The kernel is mapped from
+the linker's `kernel_end`, so it only matters if headroom reaches zero, and then the link
+itself fails with an explanatory `ASSERT` message (see ARCHITECTURE.md, "Memory map").
 
 ## Build options
 

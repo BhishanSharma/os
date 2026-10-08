@@ -8,7 +8,7 @@ Makefile                       Build system  (`make help`)
 build.ps1                      Windows one-shot: build + disk + QEMU
 scripts/mkdisk.sh              Creates a FAT32 test disk without root
 targets/x86_64/
-  linker.ld                    Kernel linked at 1 MiB, entry symbol `start`
+  linker.ld                    Kernel linked at 1 MiB, entry symbol `start`, exports kernel_start/kernel_end
   iso/boot/grub/grub.cfg       GRUB menu: multiboot2 /boot/kernel.bin
 src/
   intf/                        Public headers  (-I src/intf, include as "drivers/fat32.h")
@@ -46,7 +46,7 @@ BIOS -> GRUB -> loads /boot/kernel.bin at 1 MiB (Multiboot2, header.asm)
 1. Sets the colour theme, clears the screen, prints the banner.
 2. `idt_init()`, `pic_remap()`; installs the IRQ0 (timer) and IRQ1 (keyboard) stubs.
 3. `init_keyboard()`, `timer_init()` (PIT at 100 Hz), `memory_init()`.
-4. `paging_init()` builds a **new** set of page tables (identity map of the kernel image, heap, page tables and VGA memory) and switches to them; then `heap_init()`.
+4. `paging_init()` builds a **new** set of page tables (identity map of the kernel image `kernel_start`..`kernel_end`, heap, page tables and VGA memory) and switches to them; then `heap_init()`.
 5. `expand_scrollback()`: grows the scrollback buffer to 2000 lines.
 6. Probes for an RTL8139 NIC; if found, installs its IRQ handler.
 7. `ata_init()` then `fat32_init(0)` and `cd /`.
@@ -57,12 +57,16 @@ BIOS -> GRUB -> loads /boot/kernel.bin at 1 MiB (Multiboot2, header.asm)
 | Address                  | What                                                        |
 | ------------------------ | ----------------------------------------------------------- |
 | `0x000B8000`             | VGA text buffer                                             |
-| `0x00100000`-`0x00120000`| Kernel image (text/data/bss + boot stack), **128 KiB mapped** |
+| `0x00100000`-`kernel_end` | Kernel image (text/rodata/data/bss + boot stack); `kernel_end` comes from `linker.ld`, currently about `0x11d000` |
 | `0x00200000`-`0x00300000`| Kernel heap, 1 MiB (`kmalloc`)                              |
 | `0x00300000`-            | Page tables built by `paging_init()`                        |
 
-These numbers are hard-coded in `kernel_main()`. `make size` warns when the kernel
-image outgrows its 128 KiB region (see KNOWN-ISSUES #1).
+The kernel image is mapped from the linker-provided `kernel_start`/`kernel_end`, so it can grow
+freely up to the heap at `0x200000` (about 900 KiB of headroom). `linker.ld` has an `ASSERT` that
+fails the link if the image would reach the heap; `make size` prints the headroom. The heap
+(`HEAP_START`/`HEAP_SIZE` in `kernel_main()`) and the page-table area (`PAGE_TABLE_AREA` in
+`paging.c`) are still fixed addresses: if the kernel ever needs more than 1 MiB, move those
+and raise `KERNEL_LIMIT` in `linker.ld`.
 
 ## Interrupts
 
