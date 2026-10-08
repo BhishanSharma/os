@@ -43,7 +43,7 @@ The ISO ends up at `dist/x86_64/kernel.iso`.
 | Editor         | Line-based text editor (`edit <file>`)                                           |
 | Scripts        | Shell scripts with variables (`sh <file>`)                                       |
 | C subset       | `compile <file.c>` runs a tiny C subset on a stack VM (`printf` of a literal, `return N`) |
-| Networking     | RTL8139 driver: PCI detect, init, receive interrupts. **No TCP/IP stack yet.**    |
+| Networking     | RTL8139 driver: PCI detect, init, MAC, **send and receive raw frames**, `ifconfig`, `nettest`. No IP/TCP stack yet, see [docs/NETWORKING.md](docs/NETWORKING.md). |
 
 See [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) for the honest list of rough edges.
 
@@ -56,6 +56,7 @@ See [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) for the honest list of rough ed
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Boot flow, memory map, interrupts, source layout       |
 | [docs/SHELL.md](docs/SHELL.md)           | Every shell command, editor keys, scripting, C subset     |
 | [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) | Bugs, limits and ideas for what to do next            |
+| [docs/NETWORKING.md](docs/NETWORKING.md) | Network stack roadmap (towards `download <url>`)          |
 
 ## Everyday commands
 

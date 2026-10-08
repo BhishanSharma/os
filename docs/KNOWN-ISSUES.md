@@ -7,12 +7,25 @@ move to the "Fixed" section below so you can see what changed and where.
 
 1. **The "C compiler" is a stub.** It only understands `main` with `printf("...")` and
    `return N`. Tokenizing handles more than the code generator does.
-2. **No networking stack.** The RTL8139 driver initialises the card and logs received
-   packets (`[NET] RX pkt len=N`). There is no transmit path, ARP, IP or UDP/TCP.
+2. **Networking stops at raw Ethernet frames.** The RTL8139 driver can send and receive
+   frames (`ifconfig`, `nettest`), but there is no ARP cache, IP, UDP/TCP, DNS or HTTP yet. See
+   [NETWORKING.md](NETWORKING.md) for the plan.
 3. **FAT32:** short (8.3) names only, long-file-name entries are skipped; `ls`/`tree`
    show at most 32 entries; `cat` refuses files over 4 KB.
 
 ## Fixed
+
+### NIC receive ring and missing transmit path (fixed)
+
+`rtl8139.c` had no way to send, never read the MAC, and its receive code was wrong for packets
+that cross the end of the 8 KiB ring: the chip was configured with the WRAP bit **off** (it wraps
+at 8192), but the code wrapped at 8192+16 and copied the second half from the wrong place. The
+card is now in WRAP mode (the chip writes a packet contiguously past the end of the ring; the
+buffer has 1536+16 bytes of slack for that), the ring is walked with `CR.BUFE`, a corrupt header
+restarts the receiver instead of reading garbage, and the per-packet `kprintf` that spammed the
+shell is gone. Added `rtl8139_send()` (four TX descriptors, interrupt-safe), `rtl8139_get_mac()`,
+packet counters and an RX callback. `memcpy`/`memcmp` were added to `string.c` and declared next
+to `memset` in `string.h`.
 
 ### Outdated `help` (fixed)
 

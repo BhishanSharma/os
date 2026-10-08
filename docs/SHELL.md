@@ -46,6 +46,13 @@ Up/Down arrows browse command history; Shift+Up/Down scroll the screen.
 | `crash <kind>`             | Trigger a CPU exception on purpose: `div0 ud gp pf null stack int3 irq panic` |
 | `reboot`                   | Reset the machine                                        |
 
+### Network
+| Command                    | Description                                              |
+| -------------------------- | -------------------------------------------------------- |
+| `ifconfig`                 | MAC address, IP settings, RX/TX packet counters          |
+| `nettest`                  | Send an ARP request to the gateway and wait for the reply (proves TX + RX work) |
+| `netdebug <on\|off>`       | Print one line per received frame                        |
+
 ### Appearance
 `themes` lists them, `theme <name>` switches: `default`, `dracula`, `nord`,
 `monokai`, `gruvbox`, `solarized`, `matrix`, `cyberpunk`. `demo` shows the

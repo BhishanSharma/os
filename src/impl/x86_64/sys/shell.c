@@ -13,6 +13,7 @@
 #include "sys/script.h"
 #include "lib/compiler.h"
 #include "core/exceptions.h"
+#include "net/net.h"
 
 #define MAX_TEST_ALLOCS 16
 static void *test_allocs[MAX_TEST_ALLOCS];
@@ -80,6 +81,10 @@ static void cmd_help(void)
     print_str("fat32info          - FAT32 volume parameters\n");
     print_str("crash <kind>       - trigger a CPU exception on purpose\n");
     print_str("                     (div0 ud gp pf null stack int3 irq panic)\n");
+    print_str("\n=== Network ===\n");
+    print_str("ifconfig           - show MAC, IP settings and packet counters\n");
+    print_str("nettest            - send an ARP request to the gateway, wait for the reply\n");
+    print_str("netdebug <on|off>  - print a line for every received frame\n");
     print_str("\n=== Appearance ===\n");
     print_str("theme <name>       - change color theme\n");
     print_str("themes             - list available themes\n");
@@ -811,6 +816,32 @@ int shell_execute_command(const char* line) {
     else if (strncmp(line, "crash ", 6) == 0)
     {
         cmd_crash(line + 6);
+    }
+    else if (strcmp(line, "ifconfig") == 0)
+    {
+        net_print_ifconfig();
+    }
+    else if (strcmp(line, "nettest") == 0)
+    {
+        net_selftest();
+    }
+    else if (strncmp(line, "netdebug ", 9) == 0)
+    {
+        const char *arg = line + 9;
+        if (strcmp(arg, "on") == 0)
+        {
+            net_set_debug(1);
+            print_str("Network debug on\n");
+        }
+        else if (strcmp(arg, "off") == 0)
+        {
+            net_set_debug(0);
+            print_str("Network debug off\n");
+        }
+        else
+        {
+            print_str("Usage: netdebug <on|off>\n");
+        }
     }
     else
     {

@@ -15,6 +15,7 @@
 #include "drivers/rtl8139.h"
 #include "core/gdt.h"
 #include "lib/serial.h"
+#include "net/net.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
@@ -64,6 +65,7 @@ void kernel_main() {
     if (rtl8139_probe_init() == 0) {
         idt_set_entry(0x20 + rtl8139_get_irq(), irq_nic_stub, 0x8E);
         print_str("[NET] NIC driver installed\n");
+        net_init();
     }
 
     if (ata_init() == 0) {
