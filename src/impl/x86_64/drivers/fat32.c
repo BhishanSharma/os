@@ -84,6 +84,17 @@ static void fat32_string_to_fat_name(const char* str, uint8_t* fat_name) {
     }
 }
 
+static int fat32_set_fat_entry(uint32_t cluster, uint32_t value);
+
+/* FAT[0] and FAT[1] are reserved markers, not part of any cluster chain. Older
+ * builds zeroed them when deleting empty files; put them back. */
+static void fat32_repair_reserved_entries(void) {
+    if (fat32_get_fat_entry(0) != (0x0FFFFF00u | boot_sector.media_type))
+        fat32_set_fat_entry(0, 0x0FFFFF00u | boot_sector.media_type);
+    if (fat32_get_fat_entry(1) != 0x0FFFFFFF)
+        fat32_set_fat_entry(1, 0x0FFFFFFF);
+}
+
 int fat32_init(uint32_t partition_lba) {
     partition_start_lba = partition_lba;
     
@@ -108,7 +119,8 @@ int fat32_init(uint32_t partition_lba) {
     data_start_sector = fat_start_sector + 
                        (boot_sector.num_fats * fat_size) + 
                        root_dir_sectors;
-    
+
+    fat32_repair_reserved_entries();
     return 0;
 }
 
@@ -551,10 +563,13 @@ int fat32_delete_file(const char* path) {
         return -1;  // File not found
     }
     
-    // Free clusters if any exist
-    if (file_cluster > 0) {
+    // Free clusters if any exist. fat32_find_file returns 1 for an empty file,
+    // which owns no clusters; only clusters >= 2 hold data. The step limit stops
+    // a corrupted (cyclic) chain from looping forever.
+    if (file_cluster >= 2) {
         uint32_t cluster = file_cluster;
-        while (cluster < 0x0FFFFFF8) {
+        uint32_t max_steps = boot_sector.total_sectors_32 / boot_sector.sectors_per_cluster;
+        while (cluster >= 2 && cluster < 0x0FFFFFF8 && max_steps--) {
             uint32_t next = fat32_get_fat_entry(cluster);
             fat32_set_fat_entry(cluster, 0);
             cluster = next;
