@@ -69,7 +69,7 @@ static void cmd_help(void)
     print_str("clear              - clear screen\n");
     print_str("echo <text>        - print text\n");
     print_str("uptime             - seconds since boot\n");
-    print_str("date               - current date and time (UTC)\n");
+    print_str("date [-u]          - current date and time (IST, or UTC with -u)\n");
     print_str("sleep <seconds>    - wait\n");
     print_str("status             - uptime and allocation count\n");
     print_str("reboot             - reboot system\n");
@@ -253,16 +253,18 @@ int shell_execute_command(const char* line) {
         uint32_t seconds = get_seconds();
         kprintf("Uptime: %d seconds\n", seconds);
     }
-    else if (strcmp(line, "date") == 0)
+    else if (strcmp(line, "date") == 0 || strcmp(line, "date -u") == 0)
     {
         rtc_time_t t;
+        int utc = line[4] != '\0';
         if (rtc_read(&t) != 0) {
             print_str("date: real-time clock unreadable\n");
         } else {
-            kprintf("%d-%s%d-%s%d %s%d:%s%d:%s%d UTC\n", t.year,
+            if (!utc) rtc_add_minutes(&t, RTC_LOCAL_OFFSET_MIN);
+            kprintf("%d-%s%d-%s%d %s%d:%s%d:%s%d %s\n", t.year,
                     t.month < 10 ? "0" : "", t.month, t.day < 10 ? "0" : "", t.day,
                     t.hour < 10 ? "0" : "", t.hour, t.minute < 10 ? "0" : "", t.minute,
-                    t.second < 10 ? "0" : "", t.second);
+                    t.second < 10 ? "0" : "", t.second, utc ? "UTC" : RTC_LOCAL_TZ_NAME);
         }
     }
     else if (strcmp(line, "reboot") == 0)

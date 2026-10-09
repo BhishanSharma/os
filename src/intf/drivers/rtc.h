@@ -20,6 +20,14 @@ typedef struct {
  * Returns 0 on success, -1 if the clock holds an impossible value. */
 int rtc_read(rtc_time_t *out);
 
+/* Local time zone used for display. The RTC itself stays in UTC (TLS needs it). */
+#define RTC_LOCAL_OFFSET_MIN 330   /* UTC+05:30 */
+#define RTC_LOCAL_TZ_NAME    "IST"
+
+/* Shift a time by a number of minutes (may be negative), rolling over days,
+ * months and years. */
+void rtc_add_minutes(rtc_time_t *t, int minutes);
+
 #ifdef __cplusplus
 }
 #endif

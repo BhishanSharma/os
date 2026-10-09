@@ -43,6 +43,34 @@ static int raw_equal(const raw_time_t *a, const raw_time_t *b) {
            a->mon == b->mon && a->year == b->year && a->cent == b->cent;
 }
 
+static uint8_t days_in_month(uint16_t year, uint8_t month) {
+    static const uint8_t mdays[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    int leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    return (uint8_t)(mdays[month - 1] + (month == 2 && leap));
+}
+
+void rtc_add_minutes(rtc_time_t *t, int minutes) {
+    int total = t->hour * 60 + t->minute + minutes;
+    int day_shift = 0;
+    while (total < 0) { total += 24 * 60; day_shift--; }
+    while (total >= 24 * 60) { total -= 24 * 60; day_shift++; }
+    t->hour = (uint8_t)(total / 60);
+    t->minute = (uint8_t)(total % 60);
+
+    for (; day_shift > 0; day_shift--) {
+        if (++t->day > days_in_month(t->year, t->month)) {
+            t->day = 1;
+            if (++t->month > 12) { t->month = 1; t->year++; }
+        }
+    }
+    for (; day_shift < 0; day_shift++) {
+        if (--t->day < 1) {
+            if (--t->month < 1) { t->month = 12; t->year--; }
+            t->day = days_in_month(t->year, t->month);
+        }
+    }
+}
+
 static uint8_t from_bcd(uint8_t v) {
     return (uint8_t)((v >> 4) * 10 + (v & 0x0F));
 }
