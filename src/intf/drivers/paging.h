@@ -28,4 +28,14 @@ uint64_t paging_get_entry(uint64_t virt);
  * was not mapped. */
 uint64_t unmap_page(uint64_t virt);
 
+/* Address spaces for user programs (the 1-2 GiB range; the kernel is shared).
+ * Roots are physical (= virtual) addresses of PML4 tables. */
+uint64_t paging_kernel_root(void);
+int paging_user_range_free(void);                    /* no kernel mapping in 1-2 GiB */
+uint64_t paging_create_address_space(void);          /* 0 if out of memory */
+int paging_map_user(uint64_t root, uint64_t virt, uint64_t phys);   /* 0 on success */
+uint64_t paging_get_user_entry(uint64_t root, uint64_t virt);       /* 0 if unmapped */
+void paging_free_address_space(uint64_t root);       /* also frees every mapped page */
+void paging_switch(uint64_t root);                   /* load CR3 */
+
 #endif

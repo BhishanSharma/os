@@ -1,4 +1,5 @@
 #include "drivers/timer.h"
+#include "sys/task.h"
 #include "lib/print.h"
 #include "../lib/ports.h"
 #include "core/idt.h"
@@ -24,6 +25,7 @@ void timer_set_poll_hook(void (*hook)(void)) {
 // Called on every timer interrupt (IRQ0)
 void isr_timer(registers_t regs) {
     tick++;
+    task_tick();
     if (poll_hook) poll_hook();
 }
 
@@ -50,6 +52,10 @@ uint32_t get_seconds() {
 
 // Simple busy-wait sleep
 void sleep(uint32_t ms) {
+    if (task_running()) {      // let other tasks run meanwhile
+        task_sleep(ms);
+        return;
+    }
     uint32_t target_ticks = tick + (ms * TIMER_FREQ) / 1000;
     while (tick < target_ticks) {
         asm volatile("hlt"); // Halt CPU until next interrupt (saves power)

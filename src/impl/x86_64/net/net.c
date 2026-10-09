@@ -20,7 +20,13 @@ extern uint64_t net_test_tsc(void);
 static inline uint64_t irq_save(void) { return 0; }
 static inline void irq_restore(uint64_t f) { (void)f; }
 #else
-#define CPU_WAIT()  __asm__ volatile("hlt")
+#include "sys/task.h"
+/* Waiting for the network: let ready programs run, then sleep until the next
+ * interrupt (a packet wakes us at once). */
+static inline void CPU_WAIT(void) {
+    task_yield();
+    __asm__ volatile("hlt");
+}
 static inline uint64_t READ_TSC(void) {
     uint32_t lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));

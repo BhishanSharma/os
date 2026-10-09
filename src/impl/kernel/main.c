@@ -21,6 +21,7 @@
 #include "lib/fbcon.h"
 #include "drivers/rtc.h"
 #include "sys/sysinfo.h"
+#include "sys/task.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
@@ -210,6 +211,7 @@ void kernel_main() {
 
     print_set_muted(0);
     print_bootlog_stop();
+    task_init();        // the shell becomes task 1; programs run alongside it
     statusbar_update(1);
     keyboard_set_idle_hook(statusbar_idle);
 

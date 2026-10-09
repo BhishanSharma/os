@@ -1,14 +1,15 @@
-// process.c - load ELF programs and run them in user mode (ring 3)
+// process.c - user programs: loading ELF files, system calls, ending programs
 //
-// One program runs at a time, in the foreground: the shell calls
-// process_run(), which maps the program into the user range (1-2 GiB), drops
-// to ring 3 with user_enter() and gets control back when the program exits,
-// faults or is interrupted with Ctrl+C. The kernel stays mapped (identity, no
-// user bit), so system calls can read user memory directly once the pointer
-// has been checked with user_range_ok().
+// Every program is a task (sys/task.c) with its own page tables: the user
+// range (1-2 GiB) holds its code, heap and stack, and the kernel is mapped the
+// same way in every address space, so a system call can read the program's
+// memory directly once the pointer is checked (user_range_ok). Several
+// programs can run at once; the timer switches between them. One of them may
+// be in the foreground: it gets the keyboard and Ctrl+C.
 #include "sys/process.h"
 #include "sys/syscall_nums.h"
-#include "core/gdt.h"
+#include "sys/task.h"
+#include "sys/users.h"
 #include "core/exceptions.h"
 #include "drivers/paging.h"
 #include "drivers/memory.h"
@@ -19,10 +20,6 @@
 #include "drivers/rtc.h"
 #include "lib/print.h"
 #include "lib/string.h"
-#include "sys/users.h"
-
-extern int64_t user_enter(uint64_t entry, uint64_t user_rsp);   // usermode.asm
-extern void user_return(int64_t code) __attribute__((noreturn));
 
 #define USER_STACK_SIZE  (256 * 1024)
 #define USER_HEAP_MAX    (256ULL * 1024 * 1024)
@@ -36,28 +33,23 @@ _Static_assert(KEYCODE_UP == KEY_UP_ARROW && KEYCODE_DOWN == KEY_DOWN_ARROW &&
                KEYCODE_LEFT == KEY_LEFT_ARROW && KEYCODE_RIGHT == KEY_RIGHT_ARROW,
                "user key codes must match the keyboard driver");
 
-/* Interrupts and system calls from ring 3 arrive on this stack (TSS.rsp0). */
-static uint8_t kernel_stack[32 * 1024] __attribute__((aligned(16)));
-
-static struct {
-    int running;
-    char name[16];
-    uint64_t image_lo, image_hi;      // pages holding the ELF segments
-    uint64_t brk_start, brk, brk_mapped;
-    uint64_t stack_lo;
-} proc;
-
 typedef struct {
     int used, mode;                   // OPEN_READ / OPEN_WRITE / OPEN_APPEND
     char path[MAX_PATH];
     uint8_t *data;
     uint32_t size, capacity, pos;
 } file_t;
-static file_t files[MAX_FDS];
 
-/* Keyboard input for read(0): one line at a time, like a terminal. */
-static char line_buf[256];
-static uint32_t line_len, line_pos;
+typedef struct {
+    uint64_t brk_start, brk, brk_mapped;
+    uint64_t stack_lo;
+    file_t files[MAX_FDS];
+    char line_buf[256];               // keyboard input for read(0), one line at a time
+    uint32_t line_len, line_pos;
+    char cwd[128];                    // its own current directory
+} process_t;
+
+static int foreground_pid;            // 0: the shell has the keyboard
 
 /* ---- ELF ---------------------------------------------------------------- */
 
@@ -79,32 +71,50 @@ typedef struct {
 #define ELF_MACHINE_X64 62
 #define PT_LOAD         1
 
-/* ---- User memory ------------------------------------------------------- */
+/* ---- The current program -------------------------------------------- */
 
-static int map_user_range(uint64_t lo, uint64_t hi) {
+static process_t *P(void) {
+    return (process_t *)task_current()->process;
+}
+
+/* ---- User memory -------------------------------------------------------- */
+
+static int map_user_range(uint64_t root, uint64_t lo, uint64_t hi) {
     for (uint64_t v = PAGE_DOWN(lo); v < hi; v += PAGE_SIZE) {
-        if (paging_get_entry(v) & PAGE_PRESENT) continue;
+        if (paging_get_user_entry(root, v) & PAGE_PRESENT) continue;
         void *frame = alloc_frame();
         if (!frame) return -1;
         memset(frame, 0, PAGE_SIZE);
-        map_page(v, (uint64_t)frame, PAGE_PRESENT | PAGE_RW | PAGE_USER);
+        if (paging_map_user(root, v, (uint64_t)frame) != 0) {
+            free_frame(frame);
+            return -1;
+        }
     }
     return 0;
 }
 
-static void unmap_user_range(uint64_t lo, uint64_t hi) {
-    for (uint64_t v = PAGE_DOWN(lo); v < hi; v += PAGE_SIZE) {
-        uint64_t phys = unmap_page(v);
-        if (phys) free_frame((void *)phys);
+/* Copy into another address space through the pages' identity mapping. */
+static void copy_to_space(uint64_t root, uint64_t vaddr, const void *src, uint64_t len) {
+    const uint8_t *s = src;
+    while (len) {
+        uint64_t page_off = vaddr & (PAGE_SIZE - 1);
+        uint64_t n = PAGE_SIZE - page_off;
+        if (n > len) n = len;
+        uint64_t phys = paging_get_user_entry(root, vaddr) & ~0xFFFULL;
+        memcpy((void *)(phys + page_off), s, n);
+        vaddr += n;
+        s += n;
+        len -= n;
     }
 }
 
-/* 1 if the program may read (or, with `write`, write) [ptr, ptr + len). */
+/* 1 if the running program may read (or, with `write`, write) [ptr, ptr + len). */
 static int user_range_ok(uint64_t ptr, uint64_t len, int write) {
     if (len == 0) return 1;
     if (ptr < USER_BASE || ptr + len > USER_TOP || ptr + len < ptr) return 0;
+    uint64_t root = task_current()->root;
     for (uint64_t v = PAGE_DOWN(ptr); v < ptr + len; v += PAGE_SIZE) {
-        uint64_t e = paging_get_entry(v);
+        uint64_t e = paging_get_user_entry(root, v);
         if (!(e & PAGE_PRESENT) || !(e & PAGE_USER)) return 0;
         if (write && !(e & PAGE_RW)) return 0;
     }
@@ -121,55 +131,21 @@ static int copy_user_string(char *out, uint64_t ptr, size_t max) {
     return -1;
 }
 
-/* The user range must not overlap kernel mappings (heap, RAM disk, framebuffer). */
-static int user_window_free(void) {
-    static int checked = 0, ok = 0;
-    if (!checked) {
-        checked = 1;
-        ok = 1;
-        for (uint64_t v = USER_BASE; v < USER_TOP; v += PAGE_SIZE) {
-            uint64_t e = paging_get_entry(v);
-            if ((e & PAGE_PRESENT) && !(e & PAGE_USER)) { ok = 0; break; }
-        }
-    }
-    return ok;
+/* ---- Working directory ---------------------------------------------------
+ * The FAT32 driver has one current directory (the shell's). File system calls
+ * switch to the program's own for the duration of the call. */
+
+static void enter_cwd(char *saved, uint32_t size) {
+    saved[0] = 0;
+    fat32_get_current_directory(saved, size);
+    if (fat32_change_directory(P()->cwd) != 0) fat32_change_directory("/");
 }
 
-/* ---- Ending a program -------------------------------------------------- */
-
-static void __attribute__((noreturn)) end_program(int64_t code) {
-    user_return(code);
+static void leave_cwd(const char *saved) {
+    if (saved[0]) fat32_change_directory(saved);
 }
 
-void process_fault(uint64_t vector, const char *name, uint64_t rip, uint64_t address) {
-    if (!proc.running) return;
-    print_set_theme_colors();
-    if (print_get_col() != 0) print_str("\n");
-    char msg[160];
-    if (vector == 14)
-        k_snprintf(msg, sizeof(msg), "%s: %s at address 0x%lx (rip 0x%lx) - program terminated",
-                   proc.name, address < USER_BASE || address >= USER_TOP ? "Segmentation fault (kernel or unmapped memory)" : "Segmentation fault",
-                   address, rip);
-    else
-        k_snprintf(msg, sizeof(msg), "%s: %s (rip 0x%lx) - program terminated", proc.name, name, rip);
-    print_error(msg);
-    int64_t code = vector == 0 ? EXIT_ARITHMETIC : vector == 6 ? EXIT_ILLEGAL : EXIT_SEGFAULT;
-    end_program(code);
-}
-
-static void __attribute__((noreturn)) interrupted(void) {
-    keyboard_ctrl_c = 0;
-    print_set_theme_colors();
-    print_str("^C\n");
-    end_program(EXIT_INTERRUPTED);
-}
-
-/* Timer interrupt that arrived in user mode (irq.asm). */
-void user_check_interrupt(void) {
-    if (proc.running && keyboard_ctrl_c) interrupted();
-}
-
-/* ---- Files ------------------------------------------------------------- */
+/* ---- Files -------------------------------------------------------------- */
 
 static int file_grow(file_t *f, uint32_t need) {
     if (need <= f->capacity) return 0;
@@ -185,79 +161,170 @@ static int file_grow(file_t *f, uint32_t need) {
 }
 
 static int64_t sys_open(uint64_t path_ptr, uint64_t mode) {
-    char path[MAX_PATH];
+    char path[MAX_PATH], saved[256];
     if (copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
     if (mode > OPEN_APPEND) return SYSERR_BADCALL;
-    if (mode != OPEN_READ && !user_may_write(path)) return SYSERR_PERM;
+    process_t *p = P();
     int fd = -1;
     for (int i = 3; i < MAX_FDS; i++)
-        if (!files[i].used) { fd = i; break; }
+        if (!p->files[i].used) { fd = i; break; }
     if (fd < 0) return SYSERR_MFILE;
 
-    file_t *f = &files[fd];
+    file_t *f = &p->files[fd];
     memset(f, 0, sizeof(*f));
     f->mode = (int)mode;
     memcpy(f->path, path, sizeof(path));
 
-    int exists = fat32_file_exists(path);
-    if (mode == OPEN_READ || (mode == OPEN_APPEND && exists)) {
-        uint32_t size = fat32_get_file_size(path);
-        if (!exists || size == 0xFFFFFFFF) return SYSERR_NOENT;
-        if (file_grow(f, size + 1) != 0) return SYSERR_NOMEM;
-        if (size && fat32_read_file(path, f->data, size) < 0) {
-            kfree(f->data);
-            return SYSERR_IO;
+    int64_t result = fd;
+    enter_cwd(saved, sizeof(saved));
+    if (mode != OPEN_READ && !user_may_write(path)) {
+        result = SYSERR_PERM;
+    } else {
+        int exists = fat32_file_exists(path);
+        if (mode == OPEN_READ || (mode == OPEN_APPEND && exists)) {
+            uint32_t size = exists ? fat32_get_file_size(path) : 0xFFFFFFFF;
+            if (size == 0xFFFFFFFF) {
+                result = SYSERR_NOENT;
+            } else if (file_grow(f, size + 1) != 0) {
+                result = SYSERR_NOMEM;
+            } else {
+                int r = size ? fat32_read_file(path, f->data, size) : 0;
+                if (r < 0) result = r == FAT32_ERR_PERMISSION ? SYSERR_PERM : SYSERR_IO;
+                f->size = size;
+            }
         }
-        f->size = size;
     }
-    f->used = 1;
-    return fd;
+    leave_cwd(saved);
+    if (result < 0) {
+        kfree(f->data);
+        memset(f, 0, sizeof(*f));
+    } else {
+        f->used = 1;
+    }
+    return result;
 }
 
-static int64_t sys_close(uint64_t fd) {
-    if (fd < 3 || fd >= MAX_FDS || !files[fd].used) return SYSERR_BADFD;
-    file_t *f = &files[fd];
+static int64_t close_file(file_t *f) {
     int64_t result = 0;
     if (f->mode != OPEN_READ) {
+        char saved[256];
+        enter_cwd(saved, sizeof(saved));
         fat32_create_file(f->path);                 // fails harmlessly if it exists
-        if (fat32_write_file(f->path, f->data ? f->data : (const uint8_t *)"", f->size) < 0)
-            result = SYSERR_IO;
+        int r = fat32_write_file(f->path, f->data ? f->data : (const uint8_t *)"", f->size);
+        if (r < 0) result = r == FAT32_ERR_PERMISSION ? SYSERR_PERM : SYSERR_IO;
+        leave_cwd(saved);
     }
     kfree(f->data);
     memset(f, 0, sizeof(*f));
     return result;
 }
 
-static void close_all_files(void) {
-    for (int i = 3; i < MAX_FDS; i++)
-        if (files[i].used) sys_close(i);
+static int64_t sys_close(uint64_t fd) {
+    if (fd < 3 || fd >= MAX_FDS || !P()->files[fd].used) return SYSERR_BADFD;
+    return close_file(&P()->files[fd]);
 }
 
-/* ---- Keyboard ---------------------------------------------------------- */
+/* ---- Ending a program -------------------------------------------------- */
 
-static void read_keyboard_line(void) {
-    line_len = line_pos = 0;
+/* End the running program: save its files, free its memory, become a zombie
+ * for the shell to collect. */
+static void __attribute__((noreturn)) process_exit(int code) {
+    task_t *t = task_current();
+    process_t *p = t->process;
+    if (p) {
+        for (int i = 3; i < MAX_FDS; i++)
+            if (p->files[i].used) close_file(&p->files[i]);
+        kfree(p);
+        t->process = 0;
+    }
+    uint64_t root = t->root;
+    t->root = paging_kernel_root();
+    paging_switch(t->root);
+    paging_free_address_space(root);
+    if (foreground_pid == t->pid) {
+        foreground_pid = 0;
+        print_set_theme_colors();
+        print_set_cursor_visible(1);
+    }
+    task_exit(code);
+}
+
+/* Called where a program can be stopped safely: Ctrl+C, `kill`. */
+static void check_killed(void) {
+    task_t *t = task_current();
+    if (t->is_user && t->kill_code) {
+        if (t->kill_code == EXIT_INTERRUPTED && t->pid == foreground_pid) {
+            print_set_theme_colors();
+            print_str("^C\n");
+        }
+        process_exit(t->kill_code);
+    }
+}
+
+void process_fault(uint64_t vector, const char *name, uint64_t rip, uint64_t address) {
+    task_t *t = task_current();
+    if (!t || !t->is_user) return;
+    print_set_theme_colors();
+    if (print_get_col() != 0) print_str("\n");
+    char msg[200];
+    if (vector == 14)
+        k_snprintf(msg, sizeof(msg), "%s (pid %d): %s at address 0x%lx (rip 0x%lx) - program terminated",
+                   t->name, t->pid,
+                   address < USER_BASE || address >= USER_TOP ? "Segmentation fault (kernel or unmapped memory)"
+                                                               : "Segmentation fault",
+                   address, rip);
+    else
+        k_snprintf(msg, sizeof(msg), "%s (pid %d): %s (rip 0x%lx) - program terminated", t->name, t->pid, name, rip);
+    print_error(msg);
+    process_exit(vector == 0 ? EXIT_ARITHMETIC : vector == 6 ? EXIT_ILLEGAL : EXIT_SEGFAULT);
+}
+
+/* Timer interrupt that arrived in user mode (irq.asm): stop the program if it
+ * was asked to, otherwise switch if its time slice is used up. */
+void user_check_interrupt(void) {
+    check_killed();
+    task_preempt();
+}
+
+/* ---- Keyboard ----------------------------------------------------------- */
+
+/* Wait until this program is in the foreground (background programs do not
+ * get the keyboard). */
+static void wait_for_foreground(void) {
+    while (foreground_pid != task_current()->pid) {
+        check_killed();
+        task_sleep(50);
+    }
+}
+
+static void read_keyboard_line(process_t *p) {
+    p->line_len = p->line_pos = 0;
     while (1) {
+        wait_for_foreground();
+        check_killed();
         int c = get_char();
         if (!c) {
-            keyboard_idle();
+            task_sleep(10);
             continue;
         }
-        if (c == KEY_CTRL_C) interrupted();
+        if (c == KEY_CTRL_C) {
+            task_current()->kill_code = EXIT_INTERRUPTED;
+            check_killed();
+        }
         if (c == '\n') {
             print_str("\n");
-            line_buf[line_len++] = '\n';
+            p->line_buf[p->line_len++] = '\n';
             return;
         }
         if (c == '\b') {
-            if (line_len > 0) {
-                line_len--;
+            if (p->line_len > 0) {
+                p->line_len--;
                 print_str("\b \b");
             }
             continue;
         }
-        if (c >= 32 && c < 127 && line_len < sizeof(line_buf) - 1) {
-            line_buf[line_len++] = (char)c;
+        if (c >= 32 && c < 127 && p->line_len < sizeof(p->line_buf) - 1) {
+            p->line_buf[p->line_len++] = (char)c;
             print_char((char)c);
         }
     }
@@ -267,59 +334,64 @@ static void read_keyboard_line(void) {
 
 static int64_t sys_write(uint64_t fd, uint64_t buf, uint64_t len) {
     if (!user_range_ok(buf, len, 0)) return SYSERR_FAULT;
-    const char *p = (const char *)buf;
+    const char *src = (const char *)buf;
     if (fd == 1 || fd == 2) {
         print_batch_begin();
-        for (uint64_t i = 0; i < len; i++) print_char(p[i]);
+        for (uint64_t i = 0; i < len; i++) print_char(src[i]);
         print_batch_end();
         return (int64_t)len;
     }
-    if (fd >= MAX_FDS || !files[fd].used || files[fd].mode == OPEN_READ) return SYSERR_BADFD;
-    file_t *f = &files[fd];
+    process_t *p = P();
+    if (fd >= MAX_FDS || !p->files[fd].used || p->files[fd].mode == OPEN_READ) return SYSERR_BADFD;
+    file_t *f = &p->files[fd];
     if (len > 64 * 1024 * 1024 || file_grow(f, f->size + (uint32_t)len) != 0) return SYSERR_NOMEM;
-    memcpy(f->data + f->size, p, len);
+    memcpy(f->data + f->size, src, len);
     f->size += (uint32_t)len;
     return (int64_t)len;
 }
 
 static int64_t sys_read(uint64_t fd, uint64_t buf, uint64_t len) {
     if (!user_range_ok(buf, len, 1)) return SYSERR_FAULT;
-    char *p = (char *)buf;
+    char *dst = (char *)buf;
+    process_t *p = P();
     if (fd == 0) {
         if (len == 0) return 0;
-        if (line_pos >= line_len) read_keyboard_line();
+        if (p->line_pos >= p->line_len) read_keyboard_line(p);
         uint64_t n = 0;
-        while (n < len && line_pos < line_len) p[n++] = line_buf[line_pos++];
+        while (n < len && p->line_pos < p->line_len) dst[n++] = p->line_buf[p->line_pos++];
         return (int64_t)n;
     }
-    if (fd >= MAX_FDS || !files[fd].used || files[fd].mode != OPEN_READ) return SYSERR_BADFD;
-    file_t *f = &files[fd];
+    if (fd >= MAX_FDS || !p->files[fd].used || p->files[fd].mode != OPEN_READ) return SYSERR_BADFD;
+    file_t *f = &p->files[fd];
     uint64_t n = f->size - f->pos;
     if (n > len) n = len;
-    memcpy(p, f->data + f->pos, n);
+    memcpy(dst, f->data + f->pos, n);
     f->pos += (uint32_t)n;
     return (int64_t)n;
 }
 
 static int64_t sys_sbrk(int64_t increment) {
-    uint64_t old = proc.brk, new_brk = proc.brk + (uint64_t)increment;
-    if (new_brk < proc.brk_start || new_brk > proc.brk_start + USER_HEAP_MAX ||
-        new_brk > proc.stack_lo - 16 * PAGE_SIZE)
+    process_t *p = P();
+    uint64_t old = p->brk, new_brk = p->brk + (uint64_t)increment;
+    if (new_brk < p->brk_start || new_brk > p->brk_start + USER_HEAP_MAX ||
+        new_brk > p->stack_lo - 16 * PAGE_SIZE)
         return SYSERR_NOMEM;
-    if (PAGE_UP(new_brk) > proc.brk_mapped) {
-        if (map_user_range(proc.brk_mapped, PAGE_UP(new_brk)) != 0) return SYSERR_NOMEM;
-        proc.brk_mapped = PAGE_UP(new_brk);
+    if (PAGE_UP(new_brk) > p->brk_mapped) {
+        if (map_user_range(task_current()->root, p->brk_mapped, PAGE_UP(new_brk)) != 0) return SYSERR_NOMEM;
+        p->brk_mapped = PAGE_UP(new_brk);
     }
-    proc.brk = new_brk;
+    p->brk = new_brk;
     return (int64_t)old;
 }
 
 static int64_t sys_sleep(uint64_t ms) {
     uint32_t end = get_tick() + (uint32_t)((ms + 9) / 10);   // 100 Hz timer
     while ((int32_t)(end - get_tick()) > 0) {
-        if (keyboard_ctrl_c) interrupted();
-        __asm__ volatile("hlt");
+        check_killed();
+        uint32_t left = (end - get_tick()) * 10;
+        task_sleep(left > 50 ? 50 : left);
     }
+    check_killed();
     return 0;
 }
 
@@ -336,8 +408,12 @@ static int64_t sys_time(uint64_t ptr) {
 }
 
 static int64_t sys_getkey(void) {
+    if (foreground_pid != task_current()->pid) return 0;
     int c = get_char();
-    if (c == KEY_CTRL_C) interrupted();
+    if (c == KEY_CTRL_C) {
+        task_current()->kill_code = EXIT_INTERRUPTED;
+        check_killed();
+    }
     return c;
 }
 
@@ -357,7 +433,10 @@ static int64_t sys_readdir(uint64_t index, uint64_t ptr) {
     if (!user_range_ok(ptr, sizeof(struct os_dirent), 1)) return SYSERR_FAULT;
     fat32_file_info_t *list = kmalloc(32 * sizeof(fat32_file_info_t));
     if (!list) return SYSERR_NOMEM;
+    char saved[256];
+    enter_cwd(saved, sizeof(saved));
     int count = fat32_list_directory(list, 32);
+    leave_cwd(saved);
     int64_t result = 0;
     if (count < 0) {
         result = SYSERR_IO;
@@ -373,11 +452,18 @@ static int64_t sys_readdir(uint64_t index, uint64_t ptr) {
 }
 
 static int64_t sys_unlink(uint64_t path_ptr) {
-    char path[MAX_PATH];
+    char path[MAX_PATH], saved[256];
     if (copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
-    if (!fat32_file_exists(path)) return SYSERR_NOENT;
-    int r = fat32_delete_file(path);
-    return r == 0 ? 0 : r == FAT32_ERR_PERMISSION ? SYSERR_PERM : SYSERR_IO;
+    enter_cwd(saved, sizeof(saved));
+    int64_t result;
+    if (!fat32_file_exists(path)) {
+        result = SYSERR_NOENT;
+    } else {
+        int r = fat32_delete_file(path);
+        result = r == 0 ? 0 : r == FAT32_ERR_PERMISSION ? SYSERR_PERM : SYSERR_IO;
+    }
+    leave_cwd(saved);
+    return result;
 }
 
 static int64_t sys_getuser(uint64_t ptr) {
@@ -394,9 +480,10 @@ static int64_t sys_getuser(uint64_t ptr) {
  * (keyboard, sleep) still gets timer and keyboard interrupts. */
 void syscall_dispatch(struct exc_frame *f) {
     __asm__ volatile("sti");
+    check_killed();
     int64_t r;
     switch (f->rax) {
-        case SYS_EXIT:    end_program((int64_t)(int32_t)f->rdi);
+        case SYS_EXIT:    process_exit((int)(int32_t)f->rdi);
         case SYS_WRITE:   r = sys_write(f->rdi, f->rsi, f->rdx); break;
         case SYS_READ:    r = sys_read(f->rdi, f->rsi, f->rdx); break;
         case SYS_OPEN:    r = sys_open(f->rdi, f->rsi); break;
@@ -410,32 +497,29 @@ void syscall_dispatch(struct exc_frame *f) {
         case SYS_READDIR: r = sys_readdir(f->rdi, f->rsi); break;
         case SYS_UNLINK:  r = sys_unlink(f->rdi); break;
         case SYS_GETUSER: r = sys_getuser(f->rdi); break;
+        case SYS_GETPID:  r = task_current()->pid; break;
+        case SYS_YIELD:   task_yield(); r = 0; break;
         default:          r = SYSERR_BADCALL; break;
     }
     f->rax = (uint64_t)r;
 }
 
-/* ---- Loading and running ----------------------------------------------- */
+/* ---- Starting programs -------------------------------------------------- */
 
 const char *process_error_text(int err) {
     switch (err) {
         case PROC_ERR_NOT_FOUND: return "no such program";
         case PROC_ERR_NOT_ELF:   return "not an x86_64 ELF executable for this OS";
         case PROC_ERR_NO_MEMORY: return "out of memory";
-        case PROC_ERR_BUSY:      return "a program is already running";
+        case PROC_ERR_BUSY:      return "too many programs running";
         case PROC_ERR_NO_WINDOW: return "kernel memory occupies the user address range";
         default:                 return "error";
     }
 }
 
-static void release_memory(void) {
-    unmap_user_range(proc.image_lo, proc.image_hi);
-    unmap_user_range(proc.brk_start, proc.brk_mapped);
-    unmap_user_range(proc.stack_lo, USER_TOP);
-}
-
-/* Load the segments; fills proc.image_lo/hi. Returns the entry point or 0. */
-static uint64_t load_elf(const uint8_t *data, uint32_t size) {
+/* Map and copy the segments into `root`. Returns the entry point (0 on
+ * error) and the end of the image in *image_end. */
+static uint64_t load_elf(uint64_t root, const uint8_t *data, uint32_t size, uint64_t *image_end) {
     const elf64_ehdr_t *eh = (const elf64_ehdr_t *)data;
     if (size < sizeof(*eh) || eh->ident[0] != 0x7F || eh->ident[1] != 'E' || eh->ident[2] != 'L' ||
         eh->ident[3] != 'F' || eh->ident[4] != 2 /* 64-bit */ || eh->ident[5] != 1 /* little endian */ ||
@@ -444,87 +528,126 @@ static uint64_t load_elf(const uint8_t *data, uint32_t size) {
         return 0;
 
     uint64_t limit = USER_TOP - USER_STACK_SIZE - USER_HEAP_MAX;
-    proc.image_lo = USER_TOP;
-    proc.image_hi = USER_BASE;
+    uint64_t lo = USER_TOP, hi = USER_BASE;
     for (int i = 0; i < eh->phnum; i++) {
         const elf64_phdr_t *ph = (const elf64_phdr_t *)(data + eh->phoff + i * sizeof(elf64_phdr_t));
         if (ph->type != PT_LOAD || ph->memsz == 0) continue;
         if (ph->vaddr < USER_BASE || ph->vaddr + ph->memsz > limit || ph->filesz > ph->memsz ||
             ph->offset + ph->filesz > size)
             return 0;
-        if (map_user_range(ph->vaddr, ph->vaddr + ph->memsz) != 0) return 0;
-        if (PAGE_DOWN(ph->vaddr) < proc.image_lo) proc.image_lo = PAGE_DOWN(ph->vaddr);
-        if (PAGE_UP(ph->vaddr + ph->memsz) > proc.image_hi) proc.image_hi = PAGE_UP(ph->vaddr + ph->memsz);
-        memcpy((void *)ph->vaddr, data + ph->offset, ph->filesz);
+        if (map_user_range(root, ph->vaddr, ph->vaddr + ph->memsz) != 0) return 0;
+        if (PAGE_DOWN(ph->vaddr) < lo) lo = PAGE_DOWN(ph->vaddr);
+        if (PAGE_UP(ph->vaddr + ph->memsz) > hi) hi = PAGE_UP(ph->vaddr + ph->memsz);
+        copy_to_space(root, ph->vaddr, data + ph->offset, ph->filesz);
     }
-    if (proc.image_hi <= proc.image_lo) return 0;
-    if (eh->entry < proc.image_lo || eh->entry >= proc.image_hi) return 0;
+    if (hi <= lo || eh->entry < lo || eh->entry >= hi) return 0;
+    *image_end = hi;
     return eh->entry;
 }
 
-/* argc, argv[], NULL and the strings at the top of the stack, as the SysV
- * ABI has it for _start. Returns the initial stack pointer. */
-static uint64_t build_stack(int argc, char **argv) {
-    uint64_t sp = USER_TOP;
-    uint64_t ptrs[MAX_ARGS];
+/* argc, argv[], NULL and the strings at the top of the stack, as the SysV ABI
+ * has it for _start. Built in a kernel copy of the top page, then copied in.
+ * Returns the initial stack pointer, or 0 if the arguments do not fit. */
+static uint64_t build_stack(uint64_t root, int argc, char **argv) {
+    static uint8_t page[PAGE_SIZE];
+    uint64_t base = USER_TOP - PAGE_SIZE;
+    uint64_t sp = USER_TOP, ptrs[MAX_ARGS];
     for (int i = argc - 1; i >= 0; i--) {
         size_t len = strlen(argv[i]) + 1;
+        if (sp - len < base + 512) return 0;
         sp -= len;
-        memcpy((void *)sp, argv[i], len);
+        memcpy(page + (sp - base), argv[i], len);
         ptrs[i] = sp;
     }
     sp &= ~(uint64_t)15;
-    // argc + argv[0..argc-1] + NULL: keep the final rsp 16-byte aligned.
-    if ((argc + 2) % 2) sp -= 8;
+    if ((argc + 2) % 2) sp -= 8;          // keep the final rsp 16-byte aligned
     sp -= 8;
-    *(uint64_t *)sp = 0;
+    *(uint64_t *)(page + (sp - base)) = 0;
     for (int i = argc - 1; i >= 0; i--) {
         sp -= 8;
-        *(uint64_t *)sp = ptrs[i];
+        *(uint64_t *)(page + (sp - base)) = ptrs[i];
     }
     sp -= 8;
-    *(uint64_t *)sp = (uint64_t)argc;
+    *(uint64_t *)(page + (sp - base)) = (uint64_t)argc;
+    copy_to_space(root, sp, page + (sp - base), USER_TOP - sp);
     return sp;
 }
 
-int process_run(const uint8_t *data, uint32_t size, int argc, char **argv) {
-    if (proc.running) return PROC_ERR_BUSY;
-    if (!user_window_free()) return PROC_ERR_NO_WINDOW;
+int process_spawn(const uint8_t *data, uint32_t size, int argc, char **argv) {
+    if (!paging_user_range_free()) return PROC_ERR_NO_WINDOW;
     if (argc > MAX_ARGS) argc = MAX_ARGS;
 
-    memset(&proc, 0, sizeof(proc));
-    uint64_t entry = load_elf(data, size);
-    if (!entry) {
-        if (proc.image_hi > proc.image_lo) unmap_user_range(proc.image_lo, proc.image_hi);
-        return PROC_ERR_NOT_ELF;
-    }
-    proc.stack_lo = USER_TOP - USER_STACK_SIZE;
-    proc.brk_start = proc.brk = proc.brk_mapped = proc.image_hi;
-    if (map_user_range(proc.stack_lo, USER_TOP) != 0) {
-        release_memory();
+    process_t *p = kmalloc(sizeof(process_t));
+    uint64_t root = paging_create_address_space();
+    if (!p || !root) {
+        kfree(p);
+        if (root) paging_free_address_space(root);
         return PROC_ERR_NO_MEMORY;
     }
-    uint64_t sp = build_stack(argc, argv);
+    memset(p, 0, sizeof(*p));
 
-    // Name for messages: the file name in upper case, without the extension.
+    uint64_t image_end = 0, entry = load_elf(root, data, size, &image_end), sp = 0;
+    int err = entry ? 0 : PROC_ERR_NOT_ELF;
+    p->stack_lo = USER_TOP - USER_STACK_SIZE;
+    if (!err && map_user_range(root, p->stack_lo, USER_TOP) != 0) err = PROC_ERR_NO_MEMORY;
+    if (!err && !(sp = build_stack(root, argc, argv))) err = PROC_ERR_NO_MEMORY;
+    if (err) {
+        paging_free_address_space(root);
+        kfree(p);
+        return err;
+    }
+    p->brk_start = p->brk = p->brk_mapped = image_end;
+    fat32_get_current_directory(p->cwd, sizeof(p->cwd));
+
+    // Name for ps and messages: the file name without the extension.
+    char name[16];
     int n = 0;
-    for (const char *p = argv[0]; *p && *p != '.' && n < (int)sizeof(proc.name) - 1; p++) proc.name[n++] = *p;
-    proc.name[n] = 0;
+    for (const char *s = argv[0]; *s && *s != '.' && n < (int)sizeof(name) - 1; s++) name[n++] = *s;
+    name[n] = 0;
 
-    memset(files, 0, sizeof(files));
-    line_len = line_pos = 0;
-    keyboard_ctrl_c = 0;
-    gdt_set_kernel_stack((uint64_t)(kernel_stack + sizeof(kernel_stack)));
-    proc.running = 1;
-
-    int64_t code = user_enter(entry, sp);
-
+    // The task starts running at the next switch, so set it up before it can.
+    __asm__ volatile("cli");
+    task_t *t = task_create_user(name, root, entry, sp);
+    if (!t) {
+        __asm__ volatile("sti");
+        paging_free_address_space(root);
+        kfree(p);
+        return PROC_ERR_BUSY;
+    }
+    t->process = p;
+    t->user = *user_current();
     __asm__ volatile("sti");
-    proc.running = 0;
-    close_all_files();
-    release_memory();
-    print_set_theme_colors();
-    print_set_cursor_visible(1);
+    return t->pid;
+}
+
+int process_foreground(void) {
+    return foreground_pid;
+}
+
+int process_wait(int pid, int foreground) {
+    task_t *t = task_by_pid(pid);
+    if (!t || !t->is_user) return PROC_ERR_NOT_FOUND;
+    if (foreground) {
+        foreground_pid = pid;
+        keyboard_ctrl_c = 0;
+    }
+    while (t->state != TASK_ZOMBIE) {
+        if (foreground && keyboard_ctrl_c) {
+            keyboard_ctrl_c = 0;
+            t->kill_code = EXIT_INTERRUPTED;
+        }
+        keyboard_idle();       // status bar, then sleep a tick
+    }
+    if (foreground_pid == pid) foreground_pid = 0;
+    int code = t->exit_code;
+    task_reap(t);
     if (print_get_col() != 0) print_str("\n");
-    return (int)code;
+    return code;
+}
+
+int process_kill(int pid, int code) {
+    task_t *t = task_by_pid(pid);
+    if (!t || !t->is_user || t->state == TASK_ZOMBIE) return PROC_ERR_NOT_FOUND;
+    t->kill_code = code;
+    return 0;
 }

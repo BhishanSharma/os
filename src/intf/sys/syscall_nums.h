@@ -21,6 +21,8 @@
 #define SYS_READDIR 11   /* readdir(index, struct os_dirent *)           -> 1, or 0 past the end */
 #define SYS_UNLINK  12   /* unlink(path)                                 -> 0          */
 #define SYS_GETUSER 13   /* getuser(struct os_user *) who runs this      -> 0          */
+#define SYS_GETPID  14   /* getpid()                                     -> process id */
+#define SYS_YIELD   15   /* yield(): let other programs run now          -> 0          */
 
 /* open() modes */
 #define OPEN_READ    0

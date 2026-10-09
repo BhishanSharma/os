@@ -19,6 +19,7 @@
 #include "sys/sysinfo.h"
 #include "sys/process.h"
 #include "sys/users.h"
+#include "sys/task.h"
 
 #define MAX_TEST_ALLOCS 16
 static void *test_allocs[MAX_TEST_ALLOCS];
@@ -34,6 +35,11 @@ static void cmd_cat(const char *filename);
 static void cmd_mount(const char *which);
 static int run_program(const char *line, int report_missing);
 static int need_root(const char *what);
+static void report_exit(const char *name, int pid, int code, int background);
+static void reap_background(void);
+static void cmd_ps(int programs_only);
+static void cmd_kill(const char *arg);
+static void cmd_fg(const char *arg);
 static void cmd_programs(void);
 int shell_execute_command(const char* line);
 
@@ -48,6 +54,7 @@ void shell_run(void)
         while (1)
         {
             char cwd[256], who[32];
+            reap_background();
             cwd[0] = 0;
             fat32_get_current_directory(cwd, sizeof(cwd));
             if (print_get_col() != 0) print_str("\n");   // never start the prompt mid-line
@@ -112,6 +119,10 @@ static void cmd_help(void)
     print_str("<program> [args]   - run a user-mode program (e.g. hello, snake, primes)\n");
     print_str("run <file> [args]  - run a program by file name\n");
     print_str("programs           - list the installed programs\n");
+    print_str("<program> ... &    - run it in the background and keep using the shell\n");
+    print_str("jobs / ps          - running programs / every task with its CPU time\n");
+    print_str("fg [pid]           - bring a background program to the foreground\n");
+    print_str("kill <pid>         - stop a program\n");
     print_str("sh <script>        - run a script file\n");
     print_str("compile <file>     - compile and run a C file (tiny subset)\n");
     print_str("\n=== Users ===\n");
@@ -433,6 +444,22 @@ int shell_execute_command(const char* line) {
     else if (strcmp(line, "programs") == 0)
     {
         cmd_programs();
+    }
+    else if (strcmp(line, "ps") == 0)
+    {
+        cmd_ps(0);
+    }
+    else if (strcmp(line, "jobs") == 0)
+    {
+        cmd_ps(1);
+    }
+    else if (strncmp(line, "kill ", 5) == 0 || strcmp(line, "kill") == 0)
+    {
+        cmd_kill(line + 4);
+    }
+    else if (strncmp(line, "fg ", 3) == 0 || strcmp(line, "fg") == 0)
+    {
+        cmd_fg(line + 2);
     }
     else if (strcmp(line, "uptime") == 0)
     {
@@ -1214,9 +1241,25 @@ static int run_program(const char *line, int report_missing)
         argv[argc++] = p;
         while (*p && *p != ' ') p++;
     }
+    // A trailing "&" (separate or attached to the last word) runs it in the background.
+    int background = 0;
+    if (argc > 0 && strcmp(argv[argc - 1], "&") == 0)
+    {
+        background = 1;
+        argc--;
+    }
+    else if (argc > 0)
+    {
+        size_t len = strlen(argv[argc - 1]);
+        if (len > 1 && argv[argc - 1][len - 1] == '&')
+        {
+            argv[argc - 1][len - 1] = '\0';
+            background = 1;
+        }
+    }
     if (argc == 0)
     {
-        if (report_missing) print_str("Usage: run <program> [arguments]\n");
+        if (report_missing) print_str("Usage: run <program> [arguments] [&]\n");
         return 1;
     }
 
@@ -1229,19 +1272,141 @@ static int run_program(const char *line, int report_missing)
         return 1;
     }
 
-    int code = process_run(image, size, argc, argv);
+    int pid = process_spawn(image, size, argc, argv);
     kfree(image);
-    if (code < 0)
+    if (pid < 0)
     {
         char msg[96];
-        k_snprintf(msg, sizeof(msg), "%s: %s", argv[0], process_error_text(code));
+        k_snprintf(msg, sizeof(msg), "%s: %s", argv[0], process_error_text(pid));
         print_error(msg);
+        return 1;
     }
-    else if (code != 0 && code != EXIT_INTERRUPTED && code < 128)
+    if (background)
     {
-        kprintf("[%s exited with code %d]\n", argv[0], code);
+        kprintf("[%d] %s running in the background\n", pid, argv[0]);
+        return 1;
     }
+    report_exit(argv[0], pid, process_wait(pid, 1), 0);
     return 1;
+}
+
+/* Explain how a program ended (nothing for a normal exit 0). */
+static void report_exit(const char *name, int pid, int code, int background)
+{
+    if (background)
+        kprintf("[%d] Done: %s (exit code %d)\n", pid, name, code);
+    else if (code == EXIT_KILLED)
+        kprintf("[%d] %s: killed\n", pid, name);
+    else if (code != 0 && code != EXIT_INTERRUPTED && code < 128)
+        kprintf("[%s exited with code %d]\n", name, code);
+}
+
+/* Before each prompt: collect background programs that have ended. */
+static void reap_background(void)
+{
+    for (int i = 0; i < MAX_TASKS; i++)
+    {
+        task_t *t = task_at(i);
+        if (t->state != TASK_ZOMBIE || !t->is_user) continue;
+        char name[16];
+        k_snprintf(name, sizeof(name), "%s", t->name);
+        int pid = t->pid, code = t->exit_code;
+        task_reap(t);
+        if (code == EXIT_KILLED)
+            kprintf("[%d] Killed: %s\n", pid, name);
+        else
+            report_exit(name, pid, code, 1);
+    }
+}
+
+static const char *state_name(const task_t *t)
+{
+    switch (t->state)
+    {
+        case TASK_READY:    return t == task_current() ? "running" : "ready";
+        case TASK_SLEEPING: return "sleeping";
+        case TASK_ZOMBIE:   return "done";
+        default:            return "?";
+    }
+}
+
+/* ps: every task; jobs: only programs. */
+static void cmd_ps(int programs_only)
+{
+    if (programs_only)
+        kprintf("  %5s  %-9s %-9s %s\n", "PID", "USER", "STATE", "PROGRAM");
+    else
+        kprintf("  %5s  %-9s %-9s %8s  %s\n", "PID", "USER", "STATE", "CPU", "NAME");
+    int shown = 0;
+    for (int i = 0; i < MAX_TASKS; i++)
+    {
+        task_t *t = task_at(i);
+        if (t->state == TASK_FREE || (programs_only && !t->is_user)) continue;
+        const char *user = t->is_user ? t->user.name : "kernel";
+        if (programs_only)
+            kprintf("  %5d  %-9s %-9s %s%s\n", t->pid, user, state_name(t), t->name,
+                    t->pid == process_foreground() ? "  (foreground)" : "");
+        else
+            kprintf("  %5d  %-9s %-9s %5u.%02us  %s\n", t->pid, user, state_name(t),
+                    t->ticks / 100, t->ticks % 100, t->name);
+        shown++;
+    }
+    if (programs_only && shown == 0) print_str("  (no programs running; start one with `name &`)\n");
+}
+
+static int parse_pid(const char *s)
+{
+    while (*s == ' ') s++;
+    if (*s < '0' || *s > '9') return -1;
+    int pid = 0;
+    while (*s >= '0' && *s <= '9') pid = pid * 10 + (*s++ - '0');
+    return pid;
+}
+
+static void cmd_kill(const char *arg)
+{
+    int pid = parse_pid(arg);
+    task_t *t = pid >= 0 ? task_by_pid(pid) : 0;
+    if (t && !t->is_user)
+    {
+        kprintf("kill: %d is the %s, part of the kernel: it cannot be stopped\n", pid, t->name);
+        return;
+    }
+    if (!t || t->state == TASK_ZOMBIE)
+    {
+        print_str("Usage: kill <pid>   (see `jobs` or `ps` for the pids of programs)\n");
+        return;
+    }
+    if (!user_is_root() && t->user.uid != user_current()->uid)
+    {
+        kprintf("kill: %d belongs to %s: permission denied\n", pid, t->user.name);
+        return;
+    }
+    process_kill(pid, EXIT_KILLED);
+    kprintf("Sent kill to %d (%s)\n", pid, t->name);
+}
+
+static void cmd_fg(const char *arg)
+{
+    int pid = parse_pid(arg);
+    if (pid < 0)   // no pid: the most recent program
+    {
+        for (int i = 0; i < MAX_TASKS; i++)
+        {
+            task_t *t = task_at(i);
+            if (t->state != TASK_FREE && t->state != TASK_ZOMBIE && t->is_user && t->pid > pid) pid = t->pid;
+        }
+    }
+    task_t *t = pid > 0 ? task_by_pid(pid) : 0;
+    if (!t || !t->is_user)
+    {
+        print_str("fg: no such program (see `jobs`)\n");
+        return;
+    }
+    char name[16];
+    k_snprintf(name, sizeof(name), "%s", t->name);
+    kprintf("%s (pid %d) is now in the foreground. Ctrl+C stops it.\n", name, pid);
+    report_exit(name, pid, process_wait(pid, 1), 0);
 }
 
 

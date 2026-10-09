@@ -23,6 +23,8 @@ int gettime(struct os_time *t)                  { return (int)os_syscall(SYS_TIM
 int getkey(void)                                { return (int)os_syscall(SYS_GETKEY, 0, 0, 0); }
 int readdir(int index, struct os_dirent *e)     { return (int)os_syscall(SYS_READDIR, index, (long)e, 0); }
 int getuser(struct os_user *u)                  { return (int)os_syscall(SYS_GETUSER, (long)u, 0, 0); }
+int getpid(void)                                { return (int)os_syscall(SYS_GETPID, 0, 0, 0); }
+void yield(void)                                { os_syscall(SYS_YIELD, 0, 0, 0); }
 
 void clear_screen(void)                         { os_syscall(SYS_CONSOLE, CON_CLEAR, 0, 0); }
 void gotoxy(int col, int row)                   { os_syscall(SYS_CONSOLE, CON_GOTO, col, row); }

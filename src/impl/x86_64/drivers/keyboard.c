@@ -3,6 +3,7 @@
 #include "../lib/ports.h"
 #include "lib/string.h"
 #include "drivers/pic.h"
+#include "sys/task.h"
 
 #define KEYBOARD_DATA_PORT 0x60
 #define HISTORY_SIZE 20
@@ -158,7 +159,10 @@ void keyboard_set_idle_hook(void (*hook)(void)) {
 
 void keyboard_idle(void) {
     if (idle_hook) idle_hook();
-    __asm__ volatile("hlt");
+    if (task_running())
+        task_sleep(10);              // one tick: other tasks run, or the CPU halts
+    else
+        __asm__ volatile("hlt");
 }
 
 int get_char() {

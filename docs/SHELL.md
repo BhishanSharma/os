@@ -68,6 +68,10 @@ disk the accounts last until reboot.
 | `<program> [args]`         | Run a user-mode program, e.g. `hello`, `snake`, `primes` (see [USERSPACE.md](USERSPACE.md)) |
 | `run <file> [args]`        | Run a program by file name                               |
 | `programs`                 | List the installed programs                              |
+| `<program> ... &`          | Run it in the background                                 |
+| `jobs` / `ps`              | Running programs / every task with its CPU time          |
+| `fg [pid]`                 | Bring a background program to the foreground             |
+| `kill <pid>`               | Stop a program (your own; root may stop any)             |
 | `sh <script>`              | Run a script file                                        |
 | `compile <file>[.c]`       | Compile and run a C file (tiny subset, see below)        |
 

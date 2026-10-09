@@ -12,6 +12,7 @@
 // editor, downloads, scripts and user programs alike.
 #include "sys/users.h"
 #include "sys/sysinfo.h"
+#include "sys/task.h"
 #include "drivers/fat32.h"
 #include "drivers/disk.h"
 #include "drivers/keyboard.h"
@@ -390,6 +391,8 @@ static int read_guard(const char *path) {
 
 const user_t *user_current(void) {
     static const user_t nobody = { "root", 0, "/" };
+    task_t *t = task_current();
+    if (t && t->is_user) return &t->user;      // a program runs as whoever started it
     return session_depth ? &sessions[session_depth - 1] : &nobody;
 }
 

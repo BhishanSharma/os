@@ -13,12 +13,23 @@
 #define EXIT_INTERRUPTED 130   /* Ctrl+C */
 #define EXIT_ILLEGAL     132   /* invalid instruction */
 #define EXIT_ARITHMETIC  136   /* division by zero */
+#define EXIT_KILLED      137   /* `kill` */
 #define EXIT_SEGFAULT    139   /* page fault, protection fault */
 
-/* Run the ELF executable `data` (the whole file) in user mode until it exits.
- * argv[0] is the program name. Returns its exit code, or a negative
- * PROC_ERR_* if it could not be started. */
-int process_run(const uint8_t *data, uint32_t size, int argc, char **argv);
+/* Start the ELF executable `data` (the whole file) as a new task in the
+ * current directory, as the current user. argv[0] is the program name.
+ * Returns its pid, or a negative PROC_ERR_*. It runs alongside everything
+ * else until it exits. */
+int process_spawn(const uint8_t *data, uint32_t size, int argc, char **argv);
+
+/* Wait for program `pid` to end and return its exit code. With `foreground`,
+ * it gets the keyboard meanwhile and Ctrl+C ends it. */
+int process_wait(int pid, int foreground);
+
+/* Ask program `pid` to end with exit code `code` (at its next safe point). */
+int process_kill(int pid, int code);
+
+int process_foreground(void);   /* pid with the keyboard, 0 for the shell */
 
 #define PROC_ERR_NOT_FOUND  -1
 #define PROC_ERR_NOT_ELF    -2

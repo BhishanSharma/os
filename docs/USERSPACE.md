@@ -20,7 +20,29 @@ Reading kernel memory at 0x100000...
 | `<name> [args]`         | Runs `<name>` or `<name>.elf` (if `<name>` is not a shell command) |
 | `run <file> [args]`     | Runs a file by name                                               |
 | `programs`              | Lists the programs in the current directory and on the RAM disk   |
-| Ctrl+C                  | Stops the running program                                         |
+| `<name> [args] &`       | Runs it in the background; the shell is free at once              |
+| `jobs`                  | Running programs, and which one has the keyboard                  |
+| `ps`                    | Every task (shell, idle, programs) with its CPU time              |
+| `fg [pid]`              | Brings a background program to the foreground (waits for it)      |
+| `kill <pid>`            | Stops a program (your own; root may stop any)                     |
+| Ctrl+C                  | Stops the foreground program                                      |
+
+Several programs run at the same time. The foreground one gets the keyboard; background
+programs keep running and printing, and wait if they ask for keyboard input. When a
+background program ends, the shell reports `[pid] Done` before its next prompt.
+
+```
+alice@terminal-os:/HOME/ALICE$ ticker 30 &
+[2] ticker running in the background
+alice@terminal-os:/HOME/ALICE$ spin 20 &
+[3] spin running in the background
+alice@terminal-os:/HOME/ALICE$ ps
+    PID  USER      STATE          CPU  NAME
+      1  kernel    running     0.12s  shell
+      0  kernel    ready       3.40s  idle
+      2  alice     sleeping    0.01s  ticker
+      3  alice     ready       1.95s  spin
+```
 
 The shell looks in the current directory first, then in the root of the RAM disk, which
 works as the system's program directory even when the files are on the ATA disk.
@@ -36,6 +58,8 @@ works as the system's program directory even when the files are on the ATA disk.
 | `wc <file>...`        | Reading files: lines, words, bytes                            |
 | `note [text]`         | Writing files: appends a time-stamped line to `NOTES.TXT`     |
 | `fault <kind>`        | Breaks a rule on purpose: `kernel`, `write`, `null`, `div`, `cli`, `loop` |
+| `ticker [s] [every]`  | Prints the time every second; run it with `&`                  |
+| `spin [s]`            | Keeps the CPU busy; the timer still shares it with everyone    |
 
 ## Writing your own
 
@@ -69,16 +93,23 @@ Programs are compiled with `-mgeneral-regs-only`: no `float`/`double` yet.
 
 ## How it works
 
-* **Memory.** Programs are static ELF executables linked at 1 GiB (`user/user.ld`). The
-  range 1-2 GiB belongs to the running program: its segments, then its heap (grown by
-  `sbrk`, up to 256 MiB), and a 256 KiB stack ending at 2 GiB. These pages are the only ones
-  with the *user* bit set; the kernel's identity-mapped memory below 1 GiB is not. The kernel
-  heap is kept below 1 GiB for this. When the program ends, all its pages are freed.
-* **Entering and leaving ring 3.** `core/gdt.c` has user code and data segments (DPL 3) and
-  sets `TSS.rsp0`, the kernel stack the CPU switches to on an interrupt in user mode.
-  `core/usermode.asm`: `user_enter` saves the kernel's registers and `iretq`s to the program;
-  `user_return` (from `exit`, a fault or Ctrl+C) restores them, so `process_run()` returns
-  the exit code.
+* **Memory.** Programs are static ELF executables linked at 1 GiB (`user/user.ld`). Each
+  program has its own page tables: the range 1-2 GiB holds its segments, its heap (grown by
+  `sbrk`, up to 256 MiB) and a 256 KiB stack ending at 2 GiB, while the kernel is mapped the
+  same way in every program (`paging_create_address_space`). Only the program's pages have
+  the *user* bit; the kernel heap stays below 1 GiB. When a program ends, its page tables and
+  pages are freed.
+* **Tasks and scheduling** (`sys/task.c`). Every program is a task with its own kernel
+  stack; the shell is task 1 and an idle task (pid 0) halts the CPU when nobody has work.
+  The timer interrupt switches programs every 5 ticks (50 ms), but only when it interrupts
+  user code. Kernel code is never preempted: it gives up the CPU only where it waits
+  (keyboard, `sleep`, waiting for a program), so drivers and the file system need no locks.
+  Each program also has its own open files and current directory.
+* **Entering and leaving ring 3.** `core/gdt.c` has user code and data segments (DPL 3);
+  the scheduler points `TSS.rsp0` at the running program's kernel stack. A new program
+  starts in `task_start_user` (`core/taskswitch.asm`), which `iretq`s into it. `exit`, a
+  fault, Ctrl+C or `kill` frees the program and leaves a zombie task whose exit code the
+  shell collects.
 * **System calls.** `int 0x80` (an IDT gate with DPL 3), number in `rax`, arguments in `rdi`,
   `rsi`, `rdx`, result in `rax`. The numbers are in `src/intf/sys/syscall_nums.h`, shared by
   the kernel (`sys/process.c`) and the library. Every pointer a program passes is checked
@@ -90,13 +121,13 @@ Programs are compiled with `-mgeneral-regs-only`: no `float`/`double` yet.
   it prints what happened and ends the program instead of showing the kernel panic screen.
   Exit codes follow Unix shells: 139 segmentation fault, 136 division by zero, 132 invalid
   instruction, 130 Ctrl+C.
-* **Ctrl+C.** The keyboard interrupt sets a flag. The timer interrupt, when it lands in user
-  mode, ends the program if the flag is set, so even `for (;;) {}` can be stopped. Blocking
-  calls (keyboard input, `sleep_ms`) check it too.
+* **Ctrl+C and kill.** Both mark the program; it ends at its next safe point: the next
+  timer tick in user mode (so even `for (;;) {}` stops), a system call, or while it waits
+  for input or sleeps.
 
 ## Limits (next steps)
 
-* One program at a time, in the foreground: no multitasking or background jobs yet.
-* All programs share the same address range, so there is no `fork`/`exec` from a program.
-* No floating point in user programs (the kernel does not save FPU/SSE state yet).
+* Up to 14 programs at once. Programs cannot start other programs yet (no `spawn`/`exec`
+  system call), so a shell written as a user program is the next step.
+* No floating point in programs, and no priorities: every program gets the same time slice.
 * Files are read whole into memory on `open` and written back on `close`.

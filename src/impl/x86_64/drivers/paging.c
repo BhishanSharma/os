@@ -184,3 +184,112 @@ uint64_t unmap_page(uint64_t virt) {
     asm volatile("invlpg (%0)" :: "r"(virt) : "memory");
     return pte & ~0xFFFULL;
 }
+
+/* ---- Address spaces for user programs ------------------------------------
+ *
+ * Every program gets its own PML4. It shares the kernel's mappings: the
+ * kernel PML4 entries are copied, and so is the kernel PDPT for the first
+ * 512 GiB, except entry 1 (1-2 GiB, the user range), which points to the
+ * program's own page directory. Kernel page directories and tables are shared
+ * by pointer, so kernel mappings stay identical everywhere. The program's
+ * tables and pages come from the heap (identity mapped below 1 GiB) and are
+ * freed with the address space. */
+
+#define USER_PDPT_INDEX 1     /* 1-2 GiB */
+
+static uint64_t *new_table(void) {
+    uint64_t *t = alloc_frame();
+    if (t) for (int i = 0; i < 512; i++) t[i] = 0;
+    return t;
+}
+
+uint64_t paging_kernel_root(void) {
+    return (uint64_t)pml4;
+}
+
+int paging_user_range_free(void) {
+    if (!(pml4[0] & PAGE_PRESENT)) return 1;
+    page_entry_t *pdpt = (page_entry_t *)(pml4[0] & ~0xFFFULL);
+    return !(pdpt[USER_PDPT_INDEX] & PAGE_PRESENT);
+}
+
+uint64_t paging_create_address_space(void) {
+    uint64_t *root = new_table(), *pdpt = new_table();
+    if (!root || !pdpt) {
+        if (root) free_frame(root);
+        if (pdpt) free_frame(pdpt);
+        return 0;
+    }
+    for (int i = 0; i < 512; i++) root[i] = pml4[i];
+    if (pml4[0] & PAGE_PRESENT) {
+        page_entry_t *kernel_pdpt = (page_entry_t *)(pml4[0] & ~0xFFFULL);
+        for (int i = 0; i < 512; i++) pdpt[i] = kernel_pdpt[i];
+    }
+    pdpt[USER_PDPT_INDEX] = 0;
+    root[0] = (uint64_t)pdpt | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+    return (uint64_t)root;
+}
+
+/* The user page directory of `root`, created if `create`. */
+static page_entry_t *user_pd(uint64_t root, int create) {
+    page_entry_t *pdpt = (page_entry_t *)(((page_entry_t *)root)[0] & ~0xFFFULL);
+    if (!(pdpt[USER_PDPT_INDEX] & PAGE_PRESENT)) {
+        if (!create) return 0;
+        uint64_t *pd = new_table();
+        if (!pd) return 0;
+        pdpt[USER_PDPT_INDEX] = (uint64_t)pd | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+    }
+    return (page_entry_t *)(pdpt[USER_PDPT_INDEX] & ~0xFFFULL);
+}
+
+static int in_user_range(uint64_t virt) {
+    return ((virt >> 39) & 0x1FF) == 0 && ((virt >> 30) & 0x1FF) == USER_PDPT_INDEX;
+}
+
+int paging_map_user(uint64_t root, uint64_t virt, uint64_t phys) {
+    if (!in_user_range(virt)) return -1;
+    page_entry_t *pd = user_pd(root, 1);
+    if (!pd) return -1;
+    uint64_t pd_idx = (virt >> 21) & 0x1FF;
+    if (!(pd[pd_idx] & PAGE_PRESENT)) {
+        uint64_t *pt = new_table();
+        if (!pt) return -1;
+        pd[pd_idx] = (uint64_t)pt | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+    }
+    page_entry_t *pt = (page_entry_t *)(pd[pd_idx] & ~0xFFFULL);
+    pt[(virt >> 12) & 0x1FF] = (phys & ~0xFFFULL) | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+    asm volatile("invlpg (%0)" :: "r"(virt) : "memory");
+    return 0;
+}
+
+uint64_t paging_get_user_entry(uint64_t root, uint64_t virt) {
+    if (!root || !in_user_range(virt)) return 0;
+    page_entry_t *pd = user_pd(root, 0);
+    if (!pd) return 0;
+    page_entry_t e = pd[(virt >> 21) & 0x1FF];
+    if (!(e & PAGE_PRESENT)) return 0;
+    return ((page_entry_t *)(e & ~0xFFFULL))[(virt >> 12) & 0x1FF];
+}
+
+void paging_free_address_space(uint64_t root) {
+    if (!root) return;
+    page_entry_t *pd = user_pd(root, 0);
+    if (pd) {
+        for (int i = 0; i < 512; i++) {
+            if (!(pd[i] & PAGE_PRESENT)) continue;
+            page_entry_t *pt = (page_entry_t *)(pd[i] & ~0xFFFULL);
+            for (int j = 0; j < 512; j++)
+                if (pt[j] & PAGE_PRESENT) free_frame((void *)(pt[j] & ~0xFFFULL));
+            free_frame(pt);
+        }
+        free_frame(pd);
+    }
+    free_frame((void *)(((page_entry_t *)root)[0] & ~0xFFFULL));   // the PDPT copy
+    free_frame((void *)root);
+}
+
+void paging_switch(uint64_t root) {
+    uint64_t current;
+    asm volatile("mov %%cr3, %0" : "=r"(current));
+    if (current != root) asm volatile("mov %0, %%cr3" :: "r"(root) : "memory");
+}
