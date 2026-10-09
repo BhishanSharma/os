@@ -61,7 +61,7 @@ The C library (`user/include`, `user/lib`) has:
   (formats `%d %u %x %p %c %s`, widths and zero padding; no floating point)
 * `stdlib.h`: `malloc`, `calloc`, `realloc`, `free`, `atoi`, `atol`, `rand`, `srand`, `exit`
 * `string.h`, `ctype.h`: the usual string, memory and character functions
-* `os.h`: files (`open`, `read`, `write`, `close`, `unlink`, `readdir`), time (`sleep_ms`,
+* `os.h`: who is running it (`getuser`), files (`open`, `read`, `write`, `close`, `unlink`, `readdir`), time (`sleep_ms`,
   `uptime_ms`, `gettime`), keys (`getkey`, which does not wait) and the screen (`clear_screen`,
   `gotoxy`, `set_color`, `reset_color`, `console_size`, `show_cursor`)
 
@@ -83,6 +83,9 @@ Programs are compiled with `-mgeneral-regs-only`: no `float`/`double` yet.
   `rsi`, `rdx`, result in `rax`. The numbers are in `src/intf/sys/syscall_nums.h`, shared by
   the kernel (`sys/process.c`) and the library. Every pointer a program passes is checked
   against its page tables before the kernel touches it.
+* **Users.** A program runs as the logged-in user. Opening a file for writing or deleting
+  one outside that user's home folder fails with `SYSERR_PERM` (root may write anywhere);
+  see [SHELL.md](SHELL.md#users-and-login).
 * **Faults.** `exception_handler` checks the privilege level of the faulting code: in ring 3
   it prints what happened and ends the program instead of showing the kernel panic screen.
   Exit codes follow Unix shells: 139 segmentation fault, 136 division by zero, 132 invalid

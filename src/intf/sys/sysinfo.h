@@ -5,9 +5,8 @@
 #include <stdint.h>
 
 #define OS_NAME     "Terminal OS"
-#define OS_VERSION  "0.6"
+#define OS_VERSION  "0.7"
 #define OS_HOSTNAME "terminal-os"
-#define OS_USER     "root"
 
 /* Facts only kernel_main knows, recorded during boot for `sysinfo`. */
 typedef struct {

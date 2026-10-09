@@ -210,12 +210,6 @@ void kernel_main() {
 
     print_set_muted(0);
     print_bootlog_stop();
-    kprintf("\n  Welcome to %s %s. Type ", OS_NAME, OS_VERSION);
-    print_accent("help");
-    print_str(" for commands, ");
-    print_accent("sysinfo");
-    print_str(" for this machine.\n\n");
-
     statusbar_update(1);
     keyboard_set_idle_hook(statusbar_idle);
 

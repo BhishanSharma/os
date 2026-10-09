@@ -4,7 +4,9 @@
 #include <os.h>
 
 int main(int argc, char **argv) {
-    printf("Hello from user space!\n\n");
+    struct os_user me;
+    getuser(&me);
+    printf("Hello, %s, from user space!\n\n", me.name);
     printf("This program runs in ring 3. Its code is at %p and its stack at %p.\n",
            (void *)main, (void *)&argc);
 

@@ -9,6 +9,17 @@ extern void kfree(void* ptr);
 #include "drivers/disk.h"
 
 static uint32_t current_directory_cluster = 0;
+static int (*write_guard)(const char *path);
+
+void fat32_set_write_guard(int (*guard)(const char *path)) {
+    write_guard = guard;
+}
+
+static int (*read_guard)(const char *path);
+
+void fat32_set_read_guard(int (*guard)(const char *path)) {
+    read_guard = guard;
+}
 static char current_path[FAT32_MAX_PATH] = "/";
 static fat32_boot_sector_t boot_sector;
 static uint32_t partition_start_lba;
@@ -199,6 +210,7 @@ static uint32_t fat32_find_file(uint32_t dir_cluster, const char* filename,
 }
 
 int fat32_read_file(const char* path, uint8_t* buffer, uint32_t max_size) {
+    if (read_guard && !read_guard(path)) return FAT32_ERR_PERMISSION;
     fat32_dir_entry_t entry;
     
     // Initialize entry
@@ -395,6 +407,7 @@ static int fat32_write_cluster(uint32_t cluster, const uint8_t* buffer) {
 }
 
 int fat32_write_file(const char* path, const uint8_t* buffer, uint32_t size) {
+    if (write_guard && !write_guard(path)) return FAT32_ERR_PERMISSION;
     fat32_dir_entry_t entry;
     uint32_t dir_cluster = current_directory_cluster ? current_directory_cluster : boot_sector.root_cluster;
     
@@ -542,6 +555,7 @@ int fat32_write_file(const char* path, const uint8_t* buffer, uint32_t size) {
 }
 
 int fat32_delete_file(const char* path) {
+    if (write_guard && !write_guard(path)) return FAT32_ERR_PERMISSION;
     fat32_dir_entry_t entry;
     uint32_t dir_cluster = current_directory_cluster ? current_directory_cluster : boot_sector.root_cluster;
    
@@ -714,6 +728,7 @@ static uint32_t find_directory(uint32_t parent_cluster, const char* name) {
 }
 
 int fat32_create_file(const char* path) {
+    if (write_guard && !write_guard(path)) return FAT32_ERR_PERMISSION;
     char upper_path[256];
     int idx = 0;
     while (path[idx] && idx < 255) {
@@ -901,6 +916,7 @@ int fat32_get_current_directory(char* buffer, uint32_t size) {
 }
 
 int fat32_mkdir(const char* path) {
+    if (write_guard && !write_guard(path)) return FAT32_ERR_PERMISSION;
     char upper_path[256];
     int idx = 0;
     while (path[idx] && idx < 255) {

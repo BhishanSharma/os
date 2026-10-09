@@ -22,6 +22,7 @@ unsigned long uptime_ms(void)                   { return (unsigned long)os_sysca
 int gettime(struct os_time *t)                  { return (int)os_syscall(SYS_TIME, (long)t, 0, 0); }
 int getkey(void)                                { return (int)os_syscall(SYS_GETKEY, 0, 0, 0); }
 int readdir(int index, struct os_dirent *e)     { return (int)os_syscall(SYS_READDIR, index, (long)e, 0); }
+int getuser(struct os_user *u)                  { return (int)os_syscall(SYS_GETUSER, (long)u, 0, 0); }
 
 void clear_screen(void)                         { os_syscall(SYS_CONSOLE, CON_CLEAR, 0, 0); }
 void gotoxy(int col, int row)                   { os_syscall(SYS_CONSOLE, CON_GOTO, col, row); }

@@ -40,6 +40,7 @@ The ISO ends up at `dist/x86_64/kernel.iso`.
 | Memory         | Paging, heap sized from the bootloader memory map (`kmalloc`/`kfree`)            |
 | User space     | Programs run in ring 3 with their own memory, system calls (`int 0x80`), a small C library, faults and Ctrl+C end only the program; see [docs/USERSPACE.md](docs/USERSPACE.md) |
 | Storage        | ATA PIO disk or a RAM disk loaded by GRUB; FAT32 read/write, directories, 8.3 names |
+| Users          | Login prompt, root and normal accounts (`useradd`, `passwd`, `su`), salted password hashes, users may only change files in their home folder |
 | Shell          | ~30 commands (files, memory, disk, themes), see [docs/SHELL.md](docs/SHELL.md)   |
 | Editor         | Line-based text editor (`edit <file>`)                                           |
 | Scripts        | Shell scripts with variables (`sh <file>`)                                       |

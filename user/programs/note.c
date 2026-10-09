@@ -16,6 +16,10 @@ int main(int argc, char **argv) {
         line[n++] = '\n';
 
         int fd = open(NOTES, OPEN_APPEND);
+        if (fd == SYSERR_PERM) {
+            printf("note: permission denied: run it in your home folder (cd ~ is your home)\n");
+            return 1;
+        }
         if (fd < 0 || write(fd, line, n) != n || close(fd) != 0) {
             printf("note: cannot write %s\n", NOTES);
             return 1;

@@ -31,6 +31,7 @@ int gettime(struct os_time *t);              /* local date and time */
 
 int getkey(void);                            /* next key or 0, does not wait */
 int readdir(int index, struct os_dirent *entry);   /* 1 = filled, 0 = no more */
+int getuser(struct os_user *user);           /* who is running this program */
 
 /* Console */
 void clear_screen(void);

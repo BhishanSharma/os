@@ -20,6 +20,7 @@
 #define SYS_CONSOLE 10   /* console(op, a, b), op = CON_*                -> see below  */
 #define SYS_READDIR 11   /* readdir(index, struct os_dirent *)           -> 1, or 0 past the end */
 #define SYS_UNLINK  12   /* unlink(path)                                 -> 0          */
+#define SYS_GETUSER 13   /* getuser(struct os_user *) who runs this      -> 0          */
 
 /* open() modes */
 #define OPEN_READ    0
@@ -48,10 +49,17 @@
 #define SYSERR_NOMEM    -5   /* out of memory */
 #define SYSERR_MFILE    -6   /* too many open files */
 #define SYSERR_IO       -7   /* disk error */
+#define SYSERR_PERM     -8   /* not allowed for this user (outside their home folder) */
 
 struct os_time {
     int year, month, day, hour, minute, second;
     char zone[8];          /* "IST" */
+};
+
+struct os_user {
+    unsigned int uid;      /* 0 = root */
+    char name[16];
+    char home[48];         /* "/HOME/ALICE" */
 };
 
 struct os_dirent {

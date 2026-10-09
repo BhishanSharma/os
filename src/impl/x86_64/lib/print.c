@@ -828,12 +828,12 @@ void print_highlight(const char *text) {
     print_colored(theme_success, text);
 }
 
-void print_shell_prompt(const char *user_host, const char *path) {
+void print_shell_prompt(const char *user_host, const char *path, int root) {
     flush_deferred++;
-    print_colored(theme_success, user_host);
+    print_colored(root ? theme_error : theme_success, user_host);
     print_str(":");
     print_colored(theme_accent, path);
-    print_str("# ");
+    print_str(root ? "# " : "$ ");
     flush_deferred--;
     move_cursor();
 }

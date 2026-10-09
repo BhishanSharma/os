@@ -78,6 +78,15 @@ typedef struct {
     uint32_t cluster;
 } path_component_t;
 
+/* Returned by the functions that change the disk when the write guard says no. */
+#define FAT32_ERR_PERMISSION (-13)
+
+/* Called with the path before every create, write, delete and mkdir; return 0
+ * to refuse (the user-permission check, sys/users.c). */
+void fat32_set_write_guard(int (*guard)(const char *path));
+/* Same for reading a file (keeps the password file root-only). */
+void fat32_set_read_guard(int (*guard)(const char *path));
+
 // Core functions
 int fat32_init(uint32_t partition_lba);
 int fat32_read_file(const char* path, uint8_t* buffer, uint32_t max_size);

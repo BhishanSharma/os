@@ -19,6 +19,7 @@
 #include "drivers/rtc.h"
 #include "lib/print.h"
 #include "lib/string.h"
+#include "sys/users.h"
 
 extern int64_t user_enter(uint64_t entry, uint64_t user_rsp);   // usermode.asm
 extern void user_return(int64_t code) __attribute__((noreturn));
@@ -187,6 +188,7 @@ static int64_t sys_open(uint64_t path_ptr, uint64_t mode) {
     char path[MAX_PATH];
     if (copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
     if (mode > OPEN_APPEND) return SYSERR_BADCALL;
+    if (mode != OPEN_READ && !user_may_write(path)) return SYSERR_PERM;
     int fd = -1;
     for (int i = 3; i < MAX_FDS; i++)
         if (!files[i].used) { fd = i; break; }
@@ -374,7 +376,18 @@ static int64_t sys_unlink(uint64_t path_ptr) {
     char path[MAX_PATH];
     if (copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
     if (!fat32_file_exists(path)) return SYSERR_NOENT;
-    return fat32_delete_file(path) == 0 ? 0 : SYSERR_IO;
+    int r = fat32_delete_file(path);
+    return r == 0 ? 0 : r == FAT32_ERR_PERMISSION ? SYSERR_PERM : SYSERR_IO;
+}
+
+static int64_t sys_getuser(uint64_t ptr) {
+    if (!user_range_ok(ptr, sizeof(struct os_user), 1)) return SYSERR_FAULT;
+    const user_t *u = user_current();
+    struct os_user *out = (struct os_user *)ptr;
+    out->uid = u->uid;
+    k_snprintf(out->name, sizeof(out->name), "%s", u->name);
+    k_snprintf(out->home, sizeof(out->home), "%s", u->home);
+    return 0;
 }
 
 /* int 0x80 (usermode.asm). Runs with interrupts on, so a blocking call
@@ -396,6 +409,7 @@ void syscall_dispatch(struct exc_frame *f) {
         case SYS_CONSOLE: r = sys_console(f->rdi, f->rsi, f->rdx); break;
         case SYS_READDIR: r = sys_readdir(f->rdi, f->rsi); break;
         case SYS_UNLINK:  r = sys_unlink(f->rdi); break;
+        case SYS_GETUSER: r = sys_getuser(f->rdi); break;
         default:          r = SYSERR_BADCALL; break;
     }
     f->rax = (uint64_t)r;

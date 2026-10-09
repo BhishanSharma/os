@@ -18,6 +18,7 @@
 #include "drivers/rtc.h"
 #include "sys/sysinfo.h"
 #include "sys/process.h"
+#include "sys/users.h"
 
 #define MAX_TEST_ALLOCS 16
 static void *test_allocs[MAX_TEST_ALLOCS];
@@ -32,6 +33,7 @@ static void cmd_ls(void);
 static void cmd_cat(const char *filename);
 static void cmd_mount(const char *which);
 static int run_program(const char *line, int report_missing);
+static int need_root(const char *what);
 static void cmd_programs(void);
 int shell_execute_command(const char* line);
 
@@ -39,17 +41,55 @@ void shell_run(void)
 {
     char line[128];
 
+    users_init();
     while (1)
     {
-        char cwd[256];
-        cwd[0] = 0;
-        fat32_get_current_directory(cwd, sizeof(cwd));
-        if (print_get_col() != 0) print_str("\n");   // never start the prompt mid-line
-        statusbar_update(1);
-        print_shell_prompt(OS_USER "@" OS_HOSTNAME, cwd[0] ? cwd : "/");
-        get_line(line, sizeof(line));
-        shell_execute_command(line);
+        users_login();
+        while (1)
+        {
+            char cwd[256], who[32];
+            cwd[0] = 0;
+            fat32_get_current_directory(cwd, sizeof(cwd));
+            if (print_get_col() != 0) print_str("\n");   // never start the prompt mid-line
+            statusbar_update(1);
+            k_snprintf(who, sizeof(who), "%s@%s", user_current()->name, OS_HOSTNAME);
+            print_shell_prompt(who, cwd[0] ? cwd : "/", user_is_root());
+            get_line(line, sizeof(line));
+
+            const char *cmd = line;
+            while (*cmd == ' ') cmd++;
+            if (strcmp(cmd, "logout") == 0 || strcmp(cmd, "exit") == 0)
+            {
+                if (users_logout())
+                {
+                    kprintf("Back to %s.\n", user_current()->name);
+                    continue;
+                }
+                print_clear();
+                break;   // back to the login prompt
+            }
+            shell_execute_command(line);
+        }
     }
+}
+
+/* Root-only shell commands call this first. */
+static int need_root(const char *what)
+{
+    if (user_is_root()) return 1;
+    char msg[96];
+    k_snprintf(msg, sizeof(msg), "%s: only root can do that (try `su`)", what);
+    print_error(msg);
+    return 0;
+}
+
+static void print_fs_error(const char *what, const char *name, int result)
+{
+    if (result == FAT32_ERR_PERMISSION)
+        kprintf("%s: %s: permission denied (you can change files in %s and /tmp)\n", what, name,
+                user_current()->home);
+    else
+        kprintf("%s: %s: failed (error %d)\n", what, name, result);
 }
 
 static void cmd_help(void)
@@ -74,6 +114,14 @@ static void cmd_help(void)
     print_str("programs           - list the installed programs\n");
     print_str("sh <script>        - run a script file\n");
     print_str("compile <file>     - compile and run a C file (tiny subset)\n");
+    print_str("\n=== Users ===\n");
+    print_str("whoami / id        - who you are (name, uid, home folder)\n");
+    print_str("users              - list the accounts\n");
+    print_str("su [user]          - become another user (default root); exit to go back\n");
+    print_str("passwd [user]      - change your password (root: anyone's)\n");
+    print_str("useradd <name>     - create an account with a home folder (root)\n");
+    print_str("userdel <name>     - delete an account, keeping its files (root)\n");
+    print_str("logout / exit      - end the session, back to the login prompt\n");
     print_str("\n=== System ===\n");
     print_str("help               - show this message\n");
     print_str("sysinfo            - this machine at a glance (also: neofetch)\n");
@@ -264,7 +312,11 @@ static void cmd_cat(const char *filename)
             else
             {
                 int bytes = fat32_read_file(filename, buffer, size);
-                if (bytes < 0)
+                if (bytes == FAT32_ERR_PERMISSION)
+                {
+                    kprintf("cat: %s: permission denied (only root can read it)\n", filename);
+                }
+                else if (bytes < 0)
                 {
                     print_str("Failed to read file\n");
                 }
@@ -366,6 +418,10 @@ int shell_execute_command(const char* line) {
     {
         print_clear();
     }
+    else if (users_command(line))
+    {
+        // whoami, id, users, useradd, userdel, passwd, su
+    }
     else if (strcmp(line, "sysinfo") == 0 || strcmp(line, "neofetch") == 0)
     {
         sysinfo_print();
@@ -399,6 +455,7 @@ int shell_execute_command(const char* line) {
     }
     else if (strcmp(line, "reboot") == 0)
     {
+        if (!need_root("reboot")) return 0;
         print_str("Rebooting...\n");
         reboot();
     }
@@ -608,6 +665,7 @@ int shell_execute_command(const char* line) {
     }
     else if (strcmp(line, "mount") == 0 || strncmp(line, "mount ", 6) == 0)
     {
+        if (line[5] && !need_root("mount")) return 0;
         cmd_mount(line[5] ? line + 6 : "");
     }
     else if (strcmp(line, "diskinfo") == 0)
@@ -758,7 +816,7 @@ int shell_execute_command(const char* line) {
             int result = fat32_write_file(filename, (uint8_t *)content, strlen(content));
             if (result < 0)
             {
-                kprintf("Failed to write file: %d\n", result);
+                print_fs_error("write", filename, result);
             }
             else
             {
@@ -774,49 +832,48 @@ int shell_execute_command(const char* line) {
     {
         const char *filename = line + 6;
 
-        if (fat32_create_file(filename) == 0)
+        int result = fat32_create_file(filename);
+        if (result == 0)
         {
             kprintf("Created file: %s\n", filename);
         }
         else
         {
-            print_str("Failed to create file\n");
+            print_fs_error("touch", filename, result);
         }
     }
     else if (strncmp(line, "rm ", 3) == 0)
     {
         const char *filename = line + 3;
-        if (fat32_delete_file(filename) == 0)
+        int result = fat32_delete_file(filename);
+        if (result == 0)
         {
             kprintf("Deleted: %s\n", filename);
         }
         else
         {
-            print_str("Failed to delete file\n");
+            print_fs_error("rm", filename, result);
         }
     }
     else if (strncmp(line, "mkdir ", 6) == 0)
     {
         const char *dirname = line + 6;
-        if (fat32_mkdir(dirname) == 0)
+        int result = fat32_mkdir(dirname);
+        if (result == 0)
         {
             kprintf("Created directory: %s\n", dirname);
         }
         else
         {
-            print_str("Failed to create directory\n");
+            print_fs_error("mkdir", dirname, result);
         }
     }
-    else if (strncmp(line, "cd ", 3) == 0)
+    else if (strcmp(line, "cd") == 0 || strncmp(line, "cd ", 3) == 0)
     {
-        const char *path = line + 3;
-        if (fat32_change_directory(path) == 0)
-        {
-            char cwd[256];
-            fat32_get_current_directory(cwd, sizeof(cwd));
-            kprintf("Changed to: %s\n", cwd);
-        }
-        else
+        const char *path = line[2] ? line + 3 : "~";
+        while (*path == ' ') path++;
+        if (*path == '\0' || strcmp(path, "~") == 0) path = user_current()->home;   // home folder
+        if (fat32_change_directory(path) != 0)
         {
             print_str("Directory not found\n");
         }
@@ -973,6 +1030,7 @@ int shell_execute_command(const char* line) {
     }
     else if (strncmp(line, "crash ", 6) == 0)
     {
+        if (!need_root("crash")) return 0;
         cmd_crash(line + 6);
     }
     else if (strcmp(line, "ifconfig") == 0)
@@ -981,6 +1039,7 @@ int shell_execute_command(const char* line) {
     }
     else if (strcmp(line, "dhcp") == 0)
     {
+        if (!need_root("dhcp")) return 0;
         net_configure();
     }
     else if (strcmp(line, "nettest") == 0)
@@ -997,6 +1056,7 @@ int shell_execute_command(const char* line) {
     }
     else if (strncmp(line, "netdebug ", 9) == 0)
     {
+        if (!need_root("netdebug")) return 0;
         const char *arg = line + 9;
         if (strcmp(arg, "on") == 0)
         {
@@ -1053,23 +1113,29 @@ static uint8_t *read_program_file(const char *name, uint32_t *size)
 static uint8_t *find_program(const char *name, uint32_t *size)
 {
     uint8_t *data = read_program_file(name, size);
-    if (data || disk_selected() == DISK_RAM || !disk_ramdisk_size()) return data;
+    if (data || !disk_ramdisk_size()) return data;
 
     char cwd[256] = "/";
     fat32_get_current_directory(cwd, sizeof(cwd));
     disk_kind_t old = disk_selected();
-    disk_select(DISK_RAM);
-    if (fat32_init(0) == 0)
+    if (old != DISK_RAM)
     {
-        fat32_change_directory("/");
-        data = read_program_file(name, size);
+        disk_select(DISK_RAM);
+        if (fat32_init(0) != 0)
+        {
+            disk_select(old);
+            if (old != DISK_NONE) fat32_init(0);
+            return 0;
+        }
     }
-    disk_select(old);
-    if (old != DISK_NONE)
+    fat32_change_directory("/");
+    data = read_program_file(name, size);
+    if (old != DISK_RAM)
     {
-        fat32_init(0);
-        fat32_change_directory(cwd);
+        disk_select(old);
+        if (old != DISK_NONE) fat32_init(0);
     }
+    fat32_change_directory(cwd);
     return data;
 }
 
@@ -1099,24 +1165,32 @@ static void list_elf_files(const char *where)
 
 static void cmd_programs(void)
 {
-    list_elf_files("In this directory");
-    if (disk_selected() != DISK_RAM && disk_ramdisk_size())
+    char cwd[256] = "/";
+    fat32_get_current_directory(cwd, sizeof(cwd));
+    disk_kind_t old = disk_selected();
+    int at_ram_root = old == DISK_RAM && strcmp(cwd, "/") == 0;
+    if (!at_ram_root) list_elf_files("In this directory");
+    if (disk_ramdisk_size())
     {
-        char cwd[256] = "/";
-        fat32_get_current_directory(cwd, sizeof(cwd));
-        disk_kind_t old = disk_selected();
-        disk_select(DISK_RAM);
-        if (fat32_init(0) == 0)
+        if (old != DISK_RAM)
         {
-            fat32_change_directory("/");
-            list_elf_files("On the RAM disk");
+            disk_select(DISK_RAM);
+            if (fat32_init(0) != 0)
+            {
+                disk_select(old);
+                if (old != DISK_NONE) fat32_init(0);
+                fat32_change_directory(cwd);
+                return;
+            }
         }
-        disk_select(old);
-        if (old != DISK_NONE)
+        fat32_change_directory("/");
+        list_elf_files("On the RAM disk");
+        if (old != DISK_RAM)
         {
-            fat32_init(0);
-            fat32_change_directory(cwd);
+            disk_select(old);
+            if (old != DISK_NONE) fat32_init(0);
         }
+        fat32_change_directory(cwd);
     }
     print_str("Type a program's name (with arguments) to run it in user mode.\n");
 }

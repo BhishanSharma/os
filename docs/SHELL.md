@@ -11,6 +11,40 @@ At boot the screen shows the logo and one `[  OK  ]` / `[ WARN ]` / `[ FAIL ]` l
 subsystem (CPU, memory, display, interrupts, keyboard, network, storage, clock, DHCP). The
 detailed driver messages go to the serial port and to the boot log: `dmesg` prints it.
 
+## Users and login
+
+After the boot screen the OS asks you to log in, like Linux:
+
+```
+terminal-os login: alice
+Password:                      (not shown while you type)
+alice@terminal-os:/HOME/ALICE$
+```
+
+The first time a disk is used (no `/PASSWD` yet) it asks for a root password and offers to
+create your own account. The prompt ends in `#` for root and `$` for everyone else.
+
+**Permissions.** FAT32 has no file owners, so the rule goes by location: root may change any
+file; other users may read everything but create, change or delete only inside their home
+folder (`/HOME/<NAME>`) and `/TMP`. This is enforced in the kernel for every command, the
+editor, `download`, scripts and user programs. `mount <disk>`, `reboot`, `dhcp`,
+`netdebug`, `crash`, `useradd` and `userdel` need root.
+
+| Command            | Description                                                      |
+| ------------------ | ---------------------------------------------------------------- |
+| `whoami`, `id`     | Your name, or uid and home folder                                |
+| `users`            | All accounts                                                     |
+| `su [user]`        | Become another user (default root); asks their password unless you are root. `exit` goes back |
+| `passwd [user]`    | Change your password; root can change anyone's                   |
+| `useradd <name>`   | Create an account and its home folder (root; 1-8 lower-case letters/digits) |
+| `userdel <name>`   | Delete an account; its files stay (root)                         |
+| `logout` / `exit`  | End the session and return to the login prompt                  |
+| `cd` / `cd ~`      | Go to your home folder                                           |
+
+Accounts are stored in `/PASSWD` as `name:uid:salt:hash:home`; the hash is SHA-256 over the
+salt and password, repeated 2000 times, so the file does not contain passwords. On the RAM
+disk the accounts last until reboot.
+
 ## Commands
 
 ### Files

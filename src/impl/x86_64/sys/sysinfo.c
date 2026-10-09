@@ -9,6 +9,7 @@
 #include "drivers/disk.h"
 #include "drivers/nic.h"
 #include "net/net.h"
+#include "sys/users.h"
 
 boot_info_t boot_info;
 
@@ -143,8 +144,8 @@ void statusbar_update(int force) {
     format_uptime(up, sizeof(up));
     uint64_t used = heap_get_used();
     uint32_t total = (uint32_t)(heap_get_total() >> 20);
-    k_snprintf(left, sizeof(left), " %s %s" SEP "%s" SEP "RAM %u.%u/%u MiB" SEP "%s" SEP "up %s",
-               OS_NAME, OS_VERSION, ip, (uint32_t)(used >> 20), (uint32_t)((used & 0xFFFFF) * 10 >> 20),
+    k_snprintf(left, sizeof(left), " %s %s" SEP "%s" SEP "%s" SEP "RAM %u.%u/%u MiB" SEP "%s" SEP "up %s",
+               OS_NAME, OS_VERSION, user_current()->name, ip, (uint32_t)(used >> 20), (uint32_t)((used & 0xFFFFF) * 10 >> 20),
                total, disk_name(), up);
 
     rtc_time_t t;
@@ -171,7 +172,7 @@ static void info_line(const char *label, const char *fmt, ...) {
 
 void sysinfo_print(void) {
     char title[64], buf[64];
-    k_snprintf(title, sizeof(title), "%s@%s", OS_USER, OS_HOSTNAME);
+    k_snprintf(title, sizeof(title), "%s@%s", user_current()->name, OS_HOSTNAME);
     print_str("\n  ");
     print_highlight(title);
     print_str("\n  ");

@@ -4,6 +4,7 @@
 #include "lib/string.h"
 #include "drivers/fat32.h"
 #include "drivers/heap.h"
+#include "sys/users.h"
 
 #define MAX_LINES 8000
 #define EDIT_MAX  256        // longest line Ctrl-E can edit
@@ -38,6 +39,7 @@ static int visible_lines(void) {
 static int editor_load_file(const char* filename) {
     use_crlf = 0;
     read_only_reason = 0;
+    if (!user_may_write(filename)) read_only_reason = "permission denied (outside your home folder)";
     if (!fat32_file_exists(filename)) {
         // New file
         return 0;
