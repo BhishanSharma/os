@@ -69,6 +69,16 @@ static struct Char drawn[MAX_ROWS * MAX_COLS];
 static int drawn_valid = 0;
 static int drawn_cursor = -1;
 static int cursor_hidden = 0;
+static int flush_deferred = 0;   // >0 while print_str/kprintf run: redraw once at the end
+
+void print_batch_begin(void) {
+    flush_deferred++;
+}
+
+void print_batch_end(void) {
+    if (flush_deferred > 0) flush_deferred--;
+    if (!flush_deferred) print_flush();
+}
 
 void print_hide_cursor(void) {
     cursor_hidden = 1;
@@ -280,9 +290,12 @@ void print_char(char character) {
 }
 
 void print_str(const char* str) {
+    flush_deferred++;
     for (size_t i = 0; str[i] != '\0'; i++) {
         print_char(str[i]);
     }
+    flush_deferred--;
+    move_cursor();
 }
 
 void print_set_color(uint8_t foreground, uint8_t background) {
@@ -476,6 +489,7 @@ void print_box(const char* title, const char* content) {
 void kprintf(const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
+    flush_deferred++;
 
     while (*fmt) {
         if (*fmt == '%') {
@@ -539,11 +553,13 @@ void kprintf(const char* fmt, ...) {
     }
 
     va_end(args);
+    flush_deferred--;
+    move_cursor();
 }
 
 static void move_cursor(void) {
     if (buffer == shadow) {      /* framebuffer console: no VGA cursor registers */
-        print_flush();
+        if (!flush_deferred) print_flush();
         return;
     }
     uint16_t pos = row * NUM_COLS + col;

@@ -53,9 +53,10 @@ void keyboard_handler() {
     // Handle key releases
     if (scancode & 0x80) {
         scancode &= 0x7F;  // Remove release bit
-        
+        extended_scancode = 0;  // E0-prefixed releases (arrows) end here too
+
         // Track modifier key releases
-        if (scancode == 0x1D) ctrl_pressed = 0;   // Left Ctrl
+        if (scancode == 0x1D) ctrl_pressed = 0;   // Left or right Ctrl
         if (scancode == 0x2A || scancode == 0x36) shift_pressed = 0;  // Shift
         return;
     }
@@ -64,6 +65,7 @@ void keyboard_handler() {
     if (extended_scancode) {
         // Arrow keys
         switch (scancode) {
+            case 0x1D: ctrl_pressed = 1; break;   // Right Ctrl (E0 1D)
             case 0x48:
                 if (shift_pressed)
                     key_buffer[buffer_index++] = SHIFT_UP_COMBO;

@@ -51,6 +51,10 @@ void kprintf(const char* fmt, ...);
 void print_use_shadow_buffer(size_t cols, size_t rows);   /* grid size, see fbcon_grid_size */
 void print_flush(void);
 void print_hide_cursor(void);   /* framebuffer console: stop drawing the cursor (panic screen) */
+/* Group many screen updates (e.g. a full-screen redraw) into one framebuffer
+ * redraw at print_batch_end(). Calls nest. */
+void print_batch_begin(void);
+void print_batch_end(void);
 /* The active grid as VGA cells (character | attribute << 8), print_get_cols() wide. */
 volatile uint16_t* print_text_cells(void);
 

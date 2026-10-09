@@ -5,11 +5,12 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// Special key codes
-#define KEY_UP_ARROW    0x48
-#define KEY_DOWN_ARROW  0x50
-#define KEY_LEFT_ARROW  0x4B
-#define KEY_RIGHT_ARROW 0x4D
+// Special key codes returned by get_char(). Above 0xFF so they can never be
+// mistaken for a typed character (the old values 0x48/0x50 were 'H' and 'P').
+#define KEY_UP_ARROW    0x101
+#define KEY_DOWN_ARROW  0x102
+#define KEY_LEFT_ARROW  0x103
+#define KEY_RIGHT_ARROW 0x104
 #define KEY_CTRL_Q  17
 #define KEY_CTRL_S  19
 #define KEY_CTRL_N  14

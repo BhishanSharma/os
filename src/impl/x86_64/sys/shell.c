@@ -50,7 +50,7 @@ static void cmd_help(void)
     print_info("Available commands:\n");
     print_str("\n=== Files ===\n");
     print_str("ls                 - list current directory\n");
-    print_str("cat <file>         - display file (max 4 KB)\n");
+    print_str("cat <file>         - display file (max 1 MB)\n");
     print_str("write <file> <txt> - write text to file\n");
     print_str("touch <file>       - create empty file\n");
     print_str("rm <file>          - delete file\n");
@@ -137,6 +137,9 @@ static void cmd_ls(void)
     kfree(files);
 }
 
+#define CAT_MAX   (1024 * 1024)   // largest file `cat` will show
+#define CAT_CHUNK 4096
+
 static void cmd_cat(const char *filename)
 {
     if (!fat32_file_exists(filename))
@@ -151,14 +154,15 @@ static void cmd_cat(const char *filename)
         {
             print_str("Empty file\n");
         }
-        else if (size > 4096)
+        else if (size > CAT_MAX)
         {
-            print_str("File too large (max 4KB for display)\n");
+            kprintf("File too large to display (%u KB, max %u KB)\n", size / 1024, CAT_MAX / 1024);
         }
         else
         {
-            uint8_t *buffer = kmalloc(size + 1);
-            if (!buffer)
+            uint8_t *buffer = kmalloc(size);
+            char *chunk = kmalloc(CAT_CHUNK + 8);
+            if (!buffer || !chunk)
             {
                 print_str("Out of memory\n");
             }
@@ -171,13 +175,26 @@ static void cmd_cat(const char *filename)
                 }
                 else
                 {
-                    buffer[bytes] = '\0';
+                    // Print in chunks; drop CR (web pages use CRLF), expand tabs,
+                    // and show other control bytes (binary files) as '.'.
                     print_str("=== File Contents ===\n");
-                    print_str((char *)buffer);
-                    print_str("\n=== End ===\n");
+                    int n = 0;
+                    for (int i = 0; i < bytes; i++)
+                    {
+                        uint8_t c = buffer[i];
+                        if (c == '\r') continue;
+                        if (c == '\t') { chunk[n++] = ' '; chunk[n++] = ' '; chunk[n++] = ' '; chunk[n++] = ' '; }
+                        else if (c == '\n' || (c >= 32 && c != 127)) chunk[n++] = (char)c;
+                        else chunk[n++] = '.';
+                        if (n >= CAT_CHUNK) { chunk[n] = '\0'; print_str(chunk); n = 0; }
+                    }
+                    chunk[n] = '\0';
+                    print_str(chunk);
+                    print_str("\n=== End === (Shift+Up/Down scrolls)\n");
                 }
-                kfree(buffer);
             }
+            kfree(chunk);
+            kfree(buffer);
         }
     }
 }

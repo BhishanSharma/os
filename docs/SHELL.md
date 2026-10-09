@@ -9,7 +9,7 @@ Up/Down arrows browse command history; Shift+Up/Down scroll the screen.
 | Command                    | Description                                              |
 | -------------------------- | -------------------------------------------------------- |
 | `ls`                       | List the current directory                               |
-| `cat <file>`               | Print a file (max 4 KB)                                  |
+| `cat <file>`               | Print a file (max 1 MB; Shift+Up/Down scrolls back)       |
 | `write <file> <text>`      | Write `<text>` to a file (creates or overwrites)         |
 | `touch <file>`             | Create an empty file                                     |
 | `rm <file>`                | Delete a file                                            |
@@ -65,7 +65,10 @@ message styles.
 
 ## Editor
 
-`edit <file>` opens a line-based editor.
+`edit <file>` opens a line-based editor (up to 8000 lines; the view scrolls with the cursor and
+long lines are clipped on screen, not in the file). Files with CRLF (`\r\n`) line endings are
+saved back with CRLF. Files the editor cannot save without losing data (NUL bytes, too many lines) open
+read-only, and Ctrl+S then refuses.
 
 | Key         | Action                  |
 | ----------- | ----------------------- |
@@ -73,7 +76,7 @@ message styles.
 | Ctrl+Q      | Quit                    |
 | Ctrl+N      | New line                |
 | Ctrl+D      | Delete line             |
-| Ctrl+E      | Edit the current line   |
+| Ctrl+E      | Append to the current line (lines up to 255 chars) |
 | Up / Down   | Move between lines      |
 
 ## Scripts
