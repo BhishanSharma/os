@@ -12,4 +12,12 @@ extern uint32_t multiboot_info;
  * -1 if there is none (e.g. GRUB left the machine in VGA text mode). */
 int mb2_get_framebuffer(fb_info_t *out);
 
+typedef struct {
+    uint64_t base, length;
+} mb2_region_t;
+
+/* Copy up to `max` usable-RAM regions from the memory map (tag 6). Returns the
+ * number copied, or -1 if the bootloader gave no memory map. */
+int mb2_get_memory_map(mb2_region_t *out, int max);
+
 #endif

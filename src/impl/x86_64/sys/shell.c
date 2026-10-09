@@ -376,6 +376,7 @@ int shell_execute_command(const char* line) {
         uint64_t allocs = heap_get_allocations();
 
         print_str("=== Heap Memory Info ===\n");
+        kprintf("Physical:    %d MB usable RAM\n", (uint32_t)(get_total_memory() >> 20));
         kprintf("Total:       %d bytes (%d KB)\n", total, total / 1024);
         kprintf("Used:        %d bytes (%d KB)\n", used, used / 1024);
         kprintf("Free:        %d bytes (%d KB)\n", free, free / 1024);

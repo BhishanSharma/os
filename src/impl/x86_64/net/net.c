@@ -634,7 +634,16 @@ int net_ping(const uint8_t ip[4], uint32_t count) {
 #define IP_PROTO_UDP 17
 #define DNS_PORT 53
 #define TCP_MSS 1460
-#define DOWNLOAD_MAX (512u * 1024u)
+/* Largest body one download may buffer in memory: half the free heap, between
+ * 512 KiB and 16 MiB (the FAT32 test disk is 32 MiB). Set before each download. */
+static uint32_t download_max = 512u * 1024u;
+#define DOWNLOAD_MAX download_max
+static void set_download_max(void) {
+    uint64_t half = heap_get_free() / 2;
+    if (half > 16u * 1024u * 1024u) half = 16u * 1024u * 1024u;
+    if (half < 512u * 1024u) half = 512u * 1024u;
+    download_max = (uint32_t)half;
+}
 #define TCP_SYN_SENT 1
 #define TCP_ESTABLISHED 2
 #define TCP_FIN_WAIT 3
@@ -1294,6 +1303,7 @@ int net_download_https(const char *url, const char *filename) {
     tcp_tls_rx = 0;
     tcp_tls_rx_size = 32768;
     tcp_tls_rx = (uint8_t*)kmalloc(tcp_tls_rx_size);
+    set_download_max();
     uint8_t *body = (uint8_t*)kmalloc(DOWNLOAD_MAX);
     if (!tcp_tls_rx || !body) {
         if (tcp_tls_rx) kfree(tcp_tls_rx);
@@ -1341,6 +1351,7 @@ int net_download_http(const char *url, const char *filename) {
         uint32_t n=0; while (b[n] && b[n]!='?' && n<sizeof(derived)-1) n++;
         memcpy(derived,b,n); derived[n]=0; outname=derived;
     }
+    set_download_max();
     tcp_body=kmalloc(DOWNLOAD_MAX); if (!tcp_body) { print_str("download: out of memory\n"); return -1; }
     tcp_body_len=0; tcp_content_length=0; tcp_content_length_known=0; tcp_body_overflow=0; tcp_headers_done=0; tcp_header_len=0; tcp_http_status=0; tcp_peer_fin=0; tcp_http_bad=0;
     uint8_t mac[6]; if (net_tcp_connect(ip, port, mac, 0) != 0) { print_str("download: TCP connection timeout\n"); kfree(tcp_body); return -1; }

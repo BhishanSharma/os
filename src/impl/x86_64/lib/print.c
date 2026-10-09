@@ -11,7 +11,8 @@
 
 // Scrollback buffer configuration
 #define EARLY_SCROLLBACK_LINES 50   // Small buffer for early boot
-#define SCROLLBACK_CELLS (2000 * 80) // After heap initialization: 2000 lines at 80 columns
+#define MAX_SCROLLBACK_LINES 2000   // After heap initialization
+#define SCROLLBACK_CELLS (2000 * 80) // Fallback budget on a small heap: 2000 lines at 80 columns
 
 // Screen grid: 80x25 in VGA text mode; on a framebuffer, whatever fits the screen
 // (print_use_shadow_buffer). Read through these macros everywhere.
@@ -132,9 +133,13 @@ void expand_scrollback(void) {
     }
     
     // Allocate larger buffer from heap
-    int new_lines = (int)(SCROLLBACK_CELLS / num_cols);   // same memory budget at any width
-    size_t total_size = (size_t)new_lines * num_cols * sizeof(struct Char);
-    struct Char *new_buffer = (struct Char *)kmalloc(total_size);
+    // 2000 lines if the heap has room, else the 80-column budget at this width.
+    int new_lines = MAX_SCROLLBACK_LINES;
+    struct Char *new_buffer = (struct Char *)kmalloc((size_t)new_lines * num_cols * sizeof(struct Char));
+    if (new_buffer == NULL) {
+        new_lines = (int)(SCROLLBACK_CELLS / num_cols);
+        new_buffer = (struct Char *)kmalloc((size_t)new_lines * num_cols * sizeof(struct Char));
+    }
     
     if (new_buffer == NULL) {
         print_warning("Failed to expand scrollback buffer - kmalloc returned NULL");

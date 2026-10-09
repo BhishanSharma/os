@@ -13,6 +13,8 @@
 
 void paging_init(uint64_t phys_base, uint64_t phys_end, uint64_t heap_start, uint64_t heap_size);
 void map_page(uint64_t virt, uint64_t phys, uint64_t flags);
+#define LARGE_PAGE 0x200000ULL
+void map_large_page(uint64_t virt, uint64_t phys);   // 2 MiB, both 2 MiB aligned
 
 /* Register a physical range (e.g. the framebuffer) for paging_init() to identity-map.
  * Call before paging_init(). */

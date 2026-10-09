@@ -1,9 +1,12 @@
 #include "drivers/memory.h"
+#include "drivers/heap.h"
+#include "core/multiboot2.h"
 
-#define MAX_PHYS_PAGES 65536 // Example: 256 MB RAM (adjust later)
-
-static uint64_t memory_bitmap[MAX_PHYS_PAGES / 64]; // 64 pages per uint64_t
-static uint64_t total_pages = 0;
+/* Usable RAM as reported by the bootloader's memory map. */
+#define MAX_REGIONS 32
+static mb2_region_t regions[MAX_REGIONS];
+static int region_count = -1;            /* -1: no memory map */
+static uint64_t total_usable;
 
 void* memset(void* ptr, int value, uint64_t num) {
     uint8_t* p = (uint8_t*)ptr;
@@ -13,41 +16,51 @@ void* memset(void* ptr, int value, uint64_t num) {
     return ptr;
 }
 
-void memory_init(uint64_t mem_upper) {
-    // mem_upper = memory in KB reported by BIOS
-    total_pages = (mem_upper * 1024) / PAGE_SIZE;
-
-    // Clear bitmap (all free)
-    memset((void*)memory_bitmap, 0, sizeof(memory_bitmap));
-
-    // Mark first few pages as used (kernel + bitmap)
-    // Suppose kernel is loaded at 1 MB, bitmap occupies 64 KB
-    uint64_t used_pages = (1024 + sizeof(memory_bitmap)) / PAGE_SIZE;
-    for (uint64_t i = 0; i < used_pages; i++) {
-        memory_bitmap[i / 64] |= (1ULL << (i % 64));
-    }
+int memory_init(void) {
+    region_count = mb2_get_memory_map(regions, MAX_REGIONS);
+    total_usable = 0;
+    for (int i = 0; i < region_count; i++) total_usable += regions[i].length;
+    return region_count;
 }
 
-void* alloc_frame() {
-    for (uint64_t i = 0; i < total_pages; i++) {
-        uint64_t idx = i / 64;
-        uint64_t bit = i % 64;
-        if ((memory_bitmap[idx] & (1ULL << bit)) == 0) {
-            memory_bitmap[idx] |= (1ULL << bit);
-            return (void*)(i * PAGE_SIZE);
-        }
-    }
+int memory_range_usable(uint64_t start, uint64_t end) {
+    for (int i = 0; i < region_count; i++)
+        if (start >= regions[i].base && end <= regions[i].base + regions[i].length) return 1;
     return 0;
 }
 
-void free_frame(void* frame) {
-    uint64_t addr = (uint64_t)frame;
-    uint64_t page = addr / PAGE_SIZE;
-    uint64_t idx = page / 64;
-    uint64_t bit = page % 64;
-    memory_bitmap[idx] &= ~(1ULL << bit);
+int memory_pick_heap(uint64_t low, uint64_t high, uint64_t max_size,
+                     uint64_t* start, uint64_t* size) {
+    const uint64_t align = 2ULL * 1024 * 1024;   /* heap is mapped with 2 MiB pages */
+    uint64_t best_start = 0, best_size = 0;
+    for (int i = 0; i < region_count; i++) {
+        uint64_t s = regions[i].base, e = regions[i].base + regions[i].length;
+        if (s < low) s = low;
+        if (e > high) e = high;
+        s = (s + align - 1) & ~(align - 1);
+        e &= ~(align - 1);
+        if (e > s && e - s > best_size) { best_start = s; best_size = e - s; }
+    }
+    if (!best_size) return -1;
+    *start = best_start;
+    *size = best_size > max_size ? max_size : best_size;
+    return 0;
 }
 
 uint64_t get_total_memory() {
-    return total_pages * PAGE_SIZE;
+    return total_usable;
+}
+
+/* Page frames come from the heap (which is identity mapped): over-allocate,
+ * align to 4 KiB and keep the original pointer just below the frame. */
+void* alloc_frame() {
+    uint8_t* raw = kmalloc(2 * PAGE_SIZE);
+    if (!raw) return 0;
+    uint64_t frame = ((uint64_t)raw + sizeof(void*) + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    ((void**)frame)[-1] = raw;
+    return (void*)frame;
+}
+
+void free_frame(void* frame) {
+    if (frame) kfree(((void**)frame)[-1]);
 }

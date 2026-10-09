@@ -66,6 +66,7 @@ uint64_t net_test_tsc(void) { return g_tsc; }
 /* download/TLS dependencies; these tests don't exercise them. */
 void *kmalloc(uint64_t size) { return malloc(size); }
 void kfree(void *p) { free(p); }
+uint64_t heap_get_free(void) { return 1u << 20; }
 int fat32_file_exists(const char *p) { (void)p; return 0; }
 int fat32_write_file(const char *p, const uint8_t *b, uint32_t n) { (void)p; (void)b; return (int)n; }
 int fat32_create_file(const char *p) { (void)p; return 0; }

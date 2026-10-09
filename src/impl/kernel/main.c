@@ -22,7 +22,6 @@
 extern void irq0_stub();
 extern void irq1_stub();
 
-extern void memory_init(uint64_t mem_upper);
 extern void irq_nic_stub();
 
 // Exported by targets/x86_64/linker.ld: the real extent of the kernel image
@@ -30,10 +29,14 @@ extern void irq_nic_stub();
 extern char kernel_start[];
 extern char kernel_end[];
 
-// The heap lives right above the 1 MiB reserved for the kernel image. The
-// linker script asserts that the image never grows into it.
-#define HEAP_START 0x200000ULL
-#define HEAP_SIZE  (1024 * 1024)
+// Physical layout: kernel image 1-2 MiB (linker.ld asserts it stays below
+// 2 MiB), page-table pool 2-4 MiB (paging.c), heap in the largest usable RAM
+// region above 4 MiB. The heap stays below 4 GiB because the NICs DMA from
+// kmalloc'd buffers with 32-bit addresses.
+#define HEAP_LOW       0x400000ULL
+#define HEAP_HIGH      0x100000000ULL
+#define HEAP_MAX       (1024ULL * 1024 * 1024)
+#define HEAP_FALLBACK  (1024 * 1024)      // no memory map: assume 1 MiB at 4 MiB
 
 void kernel_main() {
     serial_init();      // mirror all output to COM1 from the very first line
@@ -48,6 +51,11 @@ void kernel_main() {
         print_use_shadow_buffer(cols, rows);
         paging_add_identity_region(fb.addr, (uint64_t)fb.pitch * fb.height);
     }
+    // The memory map is in the multiboot info, which the heap may overwrite.
+    int mem_regions = memory_init();
+    uint64_t heap_start = HEAP_LOW, heap_size = HEAP_FALLBACK;
+    if (mem_regions > 0) memory_pick_heap(HEAP_LOW, HEAP_HIGH, HEAP_MAX, &heap_start, &heap_size);
+
     gdt_init();         // GDT + TSS (own stack for double faults)
 
     print_set_theme(THEME_CYBERPUNK);
@@ -68,9 +76,8 @@ void kernel_main() {
     // Initialize keyboard and enable interrupts
     init_keyboard();
     timer_init();
-    memory_init(512 * 1024);
 
-    paging_init((uint64_t)kernel_start, (uint64_t)kernel_end, HEAP_START, HEAP_SIZE);
+    paging_init((uint64_t)kernel_start, (uint64_t)kernel_end, heap_start, heap_size);
     if (have_fb) {
         if (fbcon_init(&fb) == 0) {
             print_flush();
@@ -80,7 +87,15 @@ void kernel_main() {
             serial_puts("[ERR] Unsupported framebuffer format; output on serial only\n");
         }
     }
-    heap_init(HEAP_START, HEAP_SIZE);
+    heap_init(heap_start, heap_size);
+    if (mem_regions > 0) {
+        kprintf("[OK] Memory: %u MiB usable, heap %u MiB at %u MiB\n",
+                (uint32_t)(get_total_memory() >> 20), (uint32_t)(heap_size >> 20), (uint32_t)(heap_start >> 20));
+        if (!memory_range_usable(0x100000, HEAP_LOW))
+            print_warning("RAM at 1-4 MiB (kernel, page tables) is not listed as usable");
+    } else {
+        print_warning("No memory map from the bootloader: using a 1 MiB heap");
+    }
 
     expand_scrollback();
     

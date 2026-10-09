@@ -1,5 +1,6 @@
 #include "drivers/paging.h"
 #include "drivers/memory.h"
+#include "core/exceptions.h"
 #include <stdint.h>
 
 typedef uint64_t page_entry_t;
@@ -8,7 +9,10 @@ extern char stack_guard[];   // boot stack guard page (main.asm): must stay unma
 
 static page_entry_t* pml4;
 
-#define PAGE_TABLE_AREA 0x300000
+// Page tables come from a fixed pool between the kernel image (ends below
+// 0x200000, see linker.ld) and the heap (starts at or above 0x400000).
+#define PAGE_TABLE_AREA 0x200000
+#define PAGE_TABLE_END  0x400000
 static uint64_t next_table = PAGE_TABLE_AREA;
 
 /* Extra physical ranges (e.g. the framebuffer) to identity-map in paging_init. */
@@ -25,6 +29,7 @@ void paging_add_identity_region(uint64_t base, uint64_t size) {
 }
 
 static void* alloc_table() {
+    if (next_table >= PAGE_TABLE_END) kpanic("page table pool exhausted");
     void* t = (void*)next_table;
     next_table += 0x1000;
     for (int i = 0; i < 512; i++) ((uint64_t*)t)[i] = 0;
@@ -35,31 +40,24 @@ void paging_init(uint64_t phys_base, uint64_t phys_end,
                  uint64_t heap_start, uint64_t heap_size) {
     pml4 = (page_entry_t*)alloc_table();
 
-    // IMPORTANT: Pre-allocate and identity map ALL page tables we'll need
-    // Calculate how many page tables we need for kernel
-    uint64_t kernel_pages = (phys_end - phys_base) / PAGE_SIZE;
-    uint64_t heap_pages = heap_size / PAGE_SIZE;
-    uint64_t table_pages = (next_table - PAGE_TABLE_AREA) / PAGE_SIZE;
-    
-    // Estimate total tables needed (rough upper bound)
-    uint64_t total_pages = kernel_pages + heap_pages + table_pages + 100; // +100 for safety
-    uint64_t tables_needed = (total_pages / 512) + 10; // Pages per table + overhead
-    
-    // Pre-allocate tables
-    for (uint64_t i = 0; i < tables_needed; i++) {
-        alloc_table();
-    }
-    
-    // NOW identity map everything BEFORE enabling paging
+    // Identity map everything BEFORE switching to these tables. Tables are
+    // allocated on demand; the last loop below maps them all, including any
+    // it allocates itself.
     // Identity map kernel
     for (uint64_t addr = phys_base; addr < phys_end; addr += PAGE_SIZE) {
         if (addr == (uint64_t)stack_guard) continue;   // guard page stays unmapped
         map_page(addr, addr, PAGE_PRESENT | PAGE_RW);
     }
 
-    // Identity map heap
-    for (uint64_t addr = heap_start; addr < heap_start + heap_size; addr += PAGE_SIZE) {
-        map_page(addr, addr, PAGE_PRESENT | PAGE_RW);
+    // Identity map heap: 2 MiB pages where aligned (the heap can be up to 1 GiB)
+    for (uint64_t addr = heap_start; addr < heap_start + heap_size; ) {
+        if ((addr & (LARGE_PAGE - 1)) == 0 && heap_start + heap_size - addr >= LARGE_PAGE) {
+            map_large_page(addr, addr);
+            addr += LARGE_PAGE;
+        } else {
+            map_page(addr, addr, PAGE_PRESENT | PAGE_RW);
+            addr += PAGE_SIZE;
+        }
     }
 
     // Identity map registered device regions (framebuffer)
@@ -96,6 +94,23 @@ void paging_init(uint64_t phys_base, uint64_t phys_end,
     asm volatile("mov %0, %%cr0" :: "r"(cr0));
 
     asm volatile("sti");
+}
+
+// Page directory for `virt`, creating the PDPT and PD if needed.
+static page_entry_t* get_pd(uint64_t virt) {
+    uint64_t pml4_idx = (virt >> 39) & 0x1FF;
+    uint64_t pdpt_idx = (virt >> 30) & 0x1FF;
+    if (!(pml4[pml4_idx] & PAGE_PRESENT))
+        pml4[pml4_idx] = (uint64_t)alloc_table() | PAGE_PRESENT | PAGE_RW;
+    page_entry_t* pdpt = (page_entry_t*)(pml4[pml4_idx] & ~0xFFFULL);
+    if (!(pdpt[pdpt_idx] & PAGE_PRESENT))
+        pdpt[pdpt_idx] = (uint64_t)alloc_table() | PAGE_PRESENT | PAGE_RW;
+    return (page_entry_t*)(pdpt[pdpt_idx] & ~0xFFFULL);
+}
+
+void map_large_page(uint64_t virt, uint64_t phys) {
+    page_entry_t* pd = get_pd(virt);
+    pd[(virt >> 21) & 0x1FF] = (phys & ~(LARGE_PAGE - 1)) | PAGE_PRESENT | PAGE_RW | PAGE_SIZE_2MB;
 }
 
 void map_page(uint64_t virt, uint64_t phys, uint64_t flags) {

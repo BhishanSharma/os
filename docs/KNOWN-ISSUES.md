@@ -84,9 +84,6 @@ Any fault used to be a triple fault: QEMU reset with no message. Now:
 
 ## Smaller things
 
-* `memory_init(512 * 1024)` is hard-coded rather than read from the Multiboot2 memory map,
-  and the bitmap (65,536 frames = 256 MiB) is smaller than the 512 MiB it is told about.
-  `alloc_frame()` can read past the bitmap. It is only used by the `alloc` test command.
 * `pic_remap()`: variables `a1`/`a2` unused; `enable_irq()` lives in `keyboard.c`.
 * Splash text says "Terminmal OS" in the source in this snapshot (typo).
 * ATA driver polls the status register forever (no timeouts) and handles only the primary
