@@ -62,6 +62,18 @@ void net_test_wait(void) {
     g_tsc += 10000 * CYCLES_PER_US;
 }
 uint64_t net_test_tsc(void) { return g_tsc; }
+/* download/TLS dependencies; these tests don't exercise them. */
+void *kmalloc(uint64_t size) { return malloc(size); }
+void kfree(void *p) { free(p); }
+int fat32_file_exists(const char *p) { (void)p; return 0; }
+int fat32_write_file(const char *p, const uint8_t *b, uint32_t n) { (void)p; (void)b; return (int)n; }
+int fat32_create_file(const char *p) { (void)p; return 0; }
+int fat32_delete_file(const char *p) { (void)p; return 0; }
+int tls_https_download(const char *h, const char *p, uint8_t *b, uint32_t m, uint32_t *n) {
+    (void)h; (void)p; (void)b; (void)m; *n = 0; return -1;
+}
+int tls_last_error(void) { return 0; }
+int tls_last_http_status(void) { return 0; }
 void sleep(uint32_t ms) { for (uint32_t t = 0; t < ms; t += 10) net_test_wait(); }
 
 /* ---- independent checksum (so we don't just test net.c against itself) -- */

@@ -658,6 +658,8 @@ static volatile uint32_t tcp_send_next;
 static volatile int tcp_peer_fin;
 static uint8_t *tcp_body;
 static volatile uint32_t tcp_body_len;
+static volatile uint32_t tcp_content_length;
+static volatile int tcp_content_length_known;
 static volatile int tcp_body_overflow;
 static volatile int tcp_http_status;
 static char tcp_header[4096];
@@ -673,6 +675,117 @@ static volatile uint32_t tcp_tls_rx_head;
 static volatile uint32_t tcp_tls_rx_tail;
 static volatile int tcp_tls_overflow;
 static uint8_t tcp_tls_mac[6];
+static volatile uint16_t tcp_last_window;
+static int download_progress_active;
+static uint32_t download_progress_received;
+static uint32_t download_progress_total;
+
+static int header_name_matches(const char *line, uint32_t line_len, const char *name) {
+    uint32_t i = 0;
+    while (name[i]) {
+        if (i >= line_len) return 0;
+        char c = line[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != name[i]) return 0;
+        i++;
+    }
+    return i < line_len && line[i] == ':';
+}
+
+static int parse_content_length(const char *headers, uint32_t length, uint32_t *out) {
+    uint32_t pos = 0;
+    while (pos < length) {
+        uint32_t end = pos;
+        while (end + 1 < length && !(headers[end] == '\r' && headers[end + 1] == '\n')) end++;
+        if (end + 1 >= length) break;
+        uint32_t line_len = end - pos;
+        if (header_name_matches(headers + pos, line_len, "content-length")) {
+            uint32_t i = pos;
+            while (i < end && headers[i] != ':') i++;
+            i++;
+            while (i < end && (headers[i] == ' ' || headers[i] == '\t')) i++;
+            if (i == end || headers[i] < '0' || headers[i] > '9') return 0;
+            uint32_t value = 0;
+            while (i < end && headers[i] >= '0' && headers[i] <= '9') {
+                uint32_t digit = (uint32_t)(headers[i] - '0');
+                if (value > (0xFFFFFFFFu - digit) / 10u) return 0;
+                value = value * 10u + digit;
+                i++;
+            }
+            while (i < end && (headers[i] == ' ' || headers[i] == '\t')) i++;
+            if (i != end) return 0;
+            *out = value;
+            return 1;
+        }
+        pos = end + 2;
+    }
+    return 0;
+}
+
+static void append_progress_number(char *line, uint32_t *length, uint32_t value) {
+    char digits[10];
+    uint32_t count = 0;
+    do {
+        digits[count++] = (char)('0' + value % 10u);
+        value /= 10u;
+    } while (value && count < sizeof(digits));
+    while (count) line[(*length)++] = digits[--count];
+}
+
+void net_download_progress(uint32_t received, uint32_t total) {
+    char line[64];
+    uint32_t length = 0;
+    static uint32_t unknown_step;
+    static uint32_t activity_step;
+    static const char activity[] = "|/-\\";
+
+    download_progress_received = received;
+    download_progress_total = total;
+
+    if (download_progress_active) {
+        for (uint32_t i = 0; i < sizeof(line) - 1; i++) print_str("\b");
+    }
+    download_progress_active = 1;
+
+    const char *label = "Downloading [";
+    while (*label) line[length++] = *label++;
+    uint32_t filled;
+    if (total) {
+        uint32_t bounded = received > total ? total : received;
+        filled = (bounded * 20u) / total;
+    } else {
+        filled = unknown_step++ % 20u;
+    }
+    for (uint32_t i = 0; i < 20; i++) {
+        if (total) line[length++] = i < filled ? '#' : '.';
+        else line[length++] = i == filled ? '>' : '.';
+    }
+    line[length++] = ']';
+    line[length++] = ' ';
+    if (total) {
+        uint32_t percent = received >= total ? 100u : (received * 100u) / total;
+        if (percent < 100) line[length++] = ' ';
+        if (percent < 10) line[length++] = ' ';
+        append_progress_number(line, &length, percent);
+        line[length++] = '%';
+        line[length++] = ' ';
+    }
+    append_progress_number(line, &length, received);
+    const char *suffix = " bytes";
+    while (*suffix) line[length++] = *suffix++;
+    line[length++] = ' ';
+    line[length++] = activity[activity_step++ % (sizeof(activity) - 1)];
+    while (length < sizeof(line) - 1) line[length++] = ' ';
+    line[length] = '\0';
+    print_str(line);
+}
+
+static void finish_download_progress(void) {
+    if (download_progress_active) {
+        print_str("\n");
+        download_progress_active = 0;
+    }
+}
 
 static uint16_t pseudo_checksum(const uint8_t src[4], const uint8_t dst[4],
                                 uint8_t proto, const uint8_t *data, uint16_t len) {
@@ -729,6 +842,14 @@ static void dns_rx(const uint8_t *udp, uint16_t len) {
     dns_failed = 1;
 }
 
+/* In TLS mode the advertised window is the free space in the receive ring, so the
+ * peer never sends more than net_tls_read() has room for. */
+static uint16_t tcp_rx_window(void) {
+    if (!tcp_tls_mode || !tcp_tls_rx_size) return 4096;
+    uint32_t free = tcp_tls_rx_size - (tcp_tls_rx_head - tcp_tls_rx_tail);
+    return free > 0xFFFFu ? 0xFFFFu : (uint16_t)free;
+}
+
 static void tcp_send_segment(const uint8_t dst_mac[6], uint8_t flags,
                              uint32_t seq, uint32_t ack,
                              const uint8_t *payload, uint16_t plen) {
@@ -739,7 +860,8 @@ static void tcp_send_segment(const uint8_t dst_mac[6], uint8_t flags,
     wr16be(t, tcp_local_port); wr16be(t + 2, tcp_peer_port);
     wr32be(t + 4, seq); wr32be(t + 8, ack);
     t[12] = 0x50; t[13] = flags;
-    wr16be(t + 14, 4096); wr16be(t + 16, 0); wr16be(t + 18, 0);
+    tcp_last_window = tcp_rx_window();
+    wr16be(t + 14, tcp_last_window); wr16be(t + 16, 0); wr16be(t + 18, 0);
     if (plen) memcpy(t + 20, payload, plen);
     wr16be(t + 16, pseudo_checksum(cfg.ip, tcp_peer, IP_PROTO_TCP, t, (uint16_t)(20 + plen)));
     rtl8139_send(f, (uint16_t)(54 + plen));
@@ -769,11 +891,13 @@ static void tcp_rx(const uint8_t *frame, const uint8_t *ip, uint16_t total) {
     if (tcp_state != TCP_ESTABLISHED && tcp_state != TCP_FIN_WAIT) return;
 
     if (plen && seq == tcp_recv_next) {
+        int accepted = 1;
         if (tcp_tls_mode) {
             if (tcp_tls_rx && tcp_tls_rx_size) {
                 uint32_t used = tcp_tls_rx_head - tcp_tls_rx_tail;
                 if (plen > tcp_tls_rx_size - used) {
-                    tcp_tls_overflow = 1;
+                    /* Beyond our window: drop it and re-ACK; the peer retransmits. */
+                    accepted = 0;
                 } else {
                     for (uint32_t i = 0; i < plen; ++i)
                         tcp_tls_rx[(tcp_tls_rx_head + i) % tcp_tls_rx_size] = payload[i];
@@ -792,6 +916,11 @@ static void tcp_rx(const uint8_t *frame, const uint8_t *ip, uint16_t total) {
                 if (tcp_header[i-3]=='\r' && tcp_header[i-2]=='\n' && tcp_header[i-1]=='\r' && tcp_header[i]=='\n') { sep = tcp_header + i + 1; break; }
             if (sep) {
                 tcp_headers_done = 1;
+                uint32_t parsed_content_length = 0;
+                int has_content_length = parse_content_length(
+                    tcp_header, tcp_header_len, &parsed_content_length);
+                tcp_content_length = parsed_content_length;
+                tcp_content_length_known = has_content_length;
                 if (tcp_header_len >= 12 && tcp_header[0]=='H' && tcp_header[1]=='T' && tcp_header[2]=='T' && tcp_header[3]=='P' && tcp_header[4]=='/')
                     tcp_http_status = (tcp_header[9]>='0'&&tcp_header[9]<='9'&&tcp_header[10]>='0'&&tcp_header[10]<='9'&&tcp_header[11]>='0'&&tcp_header[11]<='9') ? (tcp_header[9]-'0')*100+(tcp_header[10]-'0')*10+(tcp_header[11]-'0') : 0;
                 uint32_t body_off = (uint32_t)(sep - tcp_header);
@@ -814,14 +943,18 @@ static void tcp_rx(const uint8_t *frame, const uint8_t *ip, uint16_t total) {
             if (tcp_body_len + n > DOWNLOAD_MAX) { n = DOWNLOAD_MAX - tcp_body_len; tcp_body_overflow = 1; }
             memcpy(tcp_body + tcp_body_len, payload, n); tcp_body_len += n;
         }
-        tcp_recv_next += plen;
+        if (accepted) tcp_recv_next += plen;
         tcp_send_segment(src_mac, 0x10, tcp_send_next, tcp_recv_next, 0, 0);
     }
     if (flags & 0x01) {
-        if (seq + plen == tcp_recv_next) tcp_recv_next++;
+        /* Only honor FIN once every byte before it has arrived; otherwise wait
+         * for the retransmission of the missing data. */
+        if (seq + plen == tcp_recv_next) {
+            tcp_recv_next++;
+            tcp_peer_fin = 1;
+            tcp_state = TCP_CLOSED;
+        }
         tcp_send_segment(src_mac, 0x10, tcp_send_next, tcp_recv_next, 0, 0);
-        tcp_peer_fin = 1;
-        tcp_state = TCP_CLOSED;
     }
     (void)ack;
 }
@@ -898,6 +1031,7 @@ static int dns_lookup(const char *host, uint8_t out[4]) {
 int net_tls_read(unsigned char *buf, size_t len) {
     if (!tcp_tls_mode || !tcp_tls_rx || tcp_tls_rx_size == 0 || len == 0 || tcp_tls_overflow) return -1;
     uint32_t start = get_tick();
+    uint32_t last_progress_tick = start;
     for (;;) {
         uint32_t avail = tcp_tls_rx_head - tcp_tls_rx_tail;
         if (avail) {
@@ -905,9 +1039,20 @@ int net_tls_read(unsigned char *buf, size_t len) {
             for (size_t i = 0; i < len; ++i)
                 buf[i] = tcp_tls_rx[(tcp_tls_rx_tail + (uint32_t)i) % tcp_tls_rx_size];
             tcp_tls_rx_tail += (uint32_t)len;
+            /* Reopen a window that had (nearly) closed so the peer resumes sending. */
+            if (tcp_last_window < 2 * TCP_MSS && tcp_rx_window() >= 4 * TCP_MSS && tcp_state != TCP_CLOSED) {
+                uint64_t fl = irq_save();
+                tcp_send_segment(tcp_tls_mac, 0x10, tcp_send_next, tcp_recv_next, 0, 0);
+                irq_restore(fl);
+            }
             return (int)len;
         }
-        if (tcp_state == TCP_CLOSED || (uint32_t)(get_tick() - start) > 1000) return -1;
+        uint32_t now = get_tick();
+        if (download_progress_active && (uint32_t)(now - last_progress_tick) >= 5) {
+            net_download_progress(download_progress_received, download_progress_total);
+            last_progress_tick = now;
+        }
+        if (tcp_state == TCP_CLOSED || (uint32_t)(now - start) > 1000) return -1;
         CPU_WAIT();
     }
 }
@@ -917,8 +1062,10 @@ int net_tls_write(const unsigned char *buf, size_t len) {
     size_t done = 0;
     while (done < len) {
         uint16_t n = (uint16_t)((len - done > TCP_MSS) ? TCP_MSS : (len - done));
+        uint64_t fl = irq_save();
         tcp_send_segment(tcp_tls_mac, 0x18, tcp_send_next, tcp_recv_next, buf + done, n);
         tcp_send_next += n;
+        irq_restore(fl);
         done += n;
     }
     return (int)done;
@@ -1005,10 +1152,15 @@ int net_download_https(const char *url, const char *filename) {
 
     uint8_t mac[6];
     if (net_tcp_connect(ip, port, mac, 1) != 0) { net_tcp_disconnect(); kfree(body); print_str("download: TCP connection timeout\n"); return -1; }
+    download_progress_active = 0;
+    net_download_progress(0, 0);
     uint32_t body_len = 0;
     int rc = tls_https_download(host, path, body, DOWNLOAD_MAX, &body_len);
+    finish_download_progress();
     net_tcp_disconnect();
-    if (rc != 0) { kprintf("download: TLS/HTTPS failed (%d)\n", rc); kfree(body); return -1; }
+    if (rc == -5 || rc == -6) { kprintf("download: HTTP status %d\n", tls_last_http_status()); kfree(body); return -1; }
+    if (rc == -4) { print_str("download: file too large\n"); kfree(body); return -1; }
+    if (rc != 0) { kprintf("download: TLS/HTTPS failed (%d, BearSSL error %d)\n", rc, tls_last_error()); kfree(body); return -1; }
     int wr = fat32_write_file(outname, body, body_len);
     kfree(body);
     if (wr < 0) { kprintf("download: FAT32 write failed (%d)\n", wr); return -1; }
@@ -1033,14 +1185,26 @@ int net_download_http(const char *url, const char *filename) {
     if (fat32_file_exists(outname)) fat32_delete_file(outname);
     if (fat32_create_file(outname)!=0) { kprintf("download: cannot create %s\n",outname); return -1; }
     tcp_body=kmalloc(DOWNLOAD_MAX); if (!tcp_body) { print_str("download: out of memory\n"); return -1; }
-    tcp_body_len=0; tcp_body_overflow=0; tcp_headers_done=0; tcp_header_len=0; tcp_http_status=0; tcp_peer_fin=0; tcp_http_bad=0;
+    tcp_body_len=0; tcp_content_length=0; tcp_content_length_known=0; tcp_body_overflow=0; tcp_headers_done=0; tcp_header_len=0; tcp_http_status=0; tcp_peer_fin=0; tcp_http_bad=0;
     uint8_t mac[6]; if (net_tcp_connect(ip, port, mac, 0) != 0) { print_str("download: TCP connection timeout\n"); kfree(tcp_body); return -1; }
     char req[512]; uint32_t rn=0;
     const char *parts[] = {"GET ", path, " HTTP/1.0\r\nHost: ", host, "\r\nConnection: close\r\nUser-Agent: TerminalOS/1.0\r\n\r\n"};
     for (int pi=0; pi<5; pi++) { const char *z=parts[pi]; while (*z && rn<sizeof(req)-1) req[rn++]=*z++; }
     req[rn]=0;
     tcp_send_segment(mac,0x18,tcp_send_next,tcp_recv_next,(const uint8_t*)req,(uint16_t)rn); tcp_send_next += (uint32_t)rn; tcp_state=TCP_FIN_WAIT;
-    uint32_t start=get_tick(); while (tcp_state!=TCP_CLOSED && (uint32_t)(get_tick()-start)<1000) CPU_WAIT();
+    download_progress_active = 0;
+    net_download_progress(0, 0);
+    uint32_t start=get_tick(), last_update=start;
+    while (tcp_state!=TCP_CLOSED && (uint32_t)(get_tick()-start)<1000) {
+        uint32_t now = get_tick();
+        if ((uint32_t)(now - last_update) >= 5) {
+            net_download_progress(tcp_body_len, tcp_content_length_known ? tcp_content_length : 0);
+            last_update = now;
+        }
+        CPU_WAIT();
+    }
+    net_download_progress(tcp_body_len, tcp_content_length_known ? tcp_content_length : 0);
+    finish_download_progress();
     tcp_tls_mode = 0;
     if (!tcp_headers_done || tcp_http_status != 200 || tcp_body_overflow) { kprintf("download: HTTP status %d%s\n",tcp_http_status,tcp_body_overflow?" or file too large":""); kfree(tcp_body); return -1; }
     int write_result = fat32_write_file(outname,tcp_body,tcp_body_len);

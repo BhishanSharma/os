@@ -245,7 +245,7 @@ test-net: ## Unit-test the IP/ICMP/ARP code on the host with a simulated gateway
 	gcc -g -O1 -Wall -Wextra -Wno-unused-parameter \
 	    -fsanitize=address,undefined \
 	    -DNET_HOST_TEST \
-	    -I $(INCLUDES) \
+	    -I src/intf \
 	    tests/net_host_test.c \
 	    $(SRC_X86)/net/net.c \
 	    -o $(BUILD)/test/net_host_test

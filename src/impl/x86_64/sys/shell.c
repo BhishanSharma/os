@@ -14,6 +14,7 @@
 #include "lib/compiler.h"
 #include "core/exceptions.h"
 #include "net/net.h"
+#include "drivers/rtc.h"
 
 #define MAX_TEST_ALLOCS 16
 static void *test_allocs[MAX_TEST_ALLOCS];
@@ -68,6 +69,7 @@ static void cmd_help(void)
     print_str("clear              - clear screen\n");
     print_str("echo <text>        - print text\n");
     print_str("uptime             - seconds since boot\n");
+    print_str("date               - current date and time (UTC)\n");
     print_str("sleep <seconds>    - wait\n");
     print_str("status             - uptime and allocation count\n");
     print_str("reboot             - reboot system\n");
@@ -250,6 +252,18 @@ int shell_execute_command(const char* line) {
     {
         uint32_t seconds = get_seconds();
         kprintf("Uptime: %d seconds\n", seconds);
+    }
+    else if (strcmp(line, "date") == 0)
+    {
+        rtc_time_t t;
+        if (rtc_read(&t) != 0) {
+            print_str("date: real-time clock unreadable\n");
+        } else {
+            kprintf("%d-%s%d-%s%d %s%d:%s%d:%s%d UTC\n", t.year,
+                    t.month < 10 ? "0" : "", t.month, t.day < 10 ? "0" : "", t.day,
+                    t.hour < 10 ? "0" : "", t.hour, t.minute < 10 ? "0" : "", t.minute,
+                    t.second < 10 ? "0" : "", t.second);
+        }
     }
     else if (strcmp(line, "reboot") == 0)
     {

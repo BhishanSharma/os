@@ -1,4 +1,5 @@
 #include "tls/bearssl_client.h"
+#include "drivers/rtc.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -9,6 +10,7 @@ extern "C" {
 #endif
 int net_tls_read(unsigned char *buf, size_t len);
 int net_tls_write(const unsigned char *buf, size_t len);
+void net_download_progress(uint32_t received, uint32_t total);
 #ifdef __cplusplus
 }
 #endif
@@ -21,10 +23,11 @@ static int low_write(void *, const unsigned char *buf, size_t len) {
     return net_tls_write(buf, len);
 }
 
-/* Build-time date is used because the OS currently has no RTC. BearSSL counts
- * days from 0000-01-01 in the proleptic Gregorian calendar. */
+/* BearSSL counts days from 0000-01-01 in the proleptic Gregorian calendar
+ * (1970-01-01 is day 719528). The leap-year terms count leap years before y,
+ * including year 0. */
 static uint32_t days_from_year_month_day(unsigned y, unsigned m, unsigned d) {
-    uint32_t days = 365u * y + y / 4u - y / 100u + y / 400u;
+    uint32_t days = 365u * y + (y + 3u) / 4u - (y + 99u) / 100u + (y + 399u) / 400u;
     static const unsigned mdays[] = {31,28,31,30,31,30,31,31,30,31,30,31};
     for (unsigned i = 1; i < m; ++i) days += mdays[i - 1];
     if (m > 2 && ((y % 4u == 0 && y % 100u != 0) || (y % 400u == 0))) days++;
@@ -43,35 +46,25 @@ static void build_date(unsigned *y, unsigned *m, unsigned *d) {
     *y = (unsigned)((s[7] - '0') * 1000 + (s[8] - '0') * 100 + (s[9] - '0') * 10 + (s[10] - '0'));
 }
 
-/* ISRG Root X2. This covers modern Let's Encrypt ECDSA chains. */
-static unsigned char x2_dn[] = {
-    0x30,0x4f,0x31,0x0b,0x30,0x09,0x06,0x03,0x55,0x04,0x06,0x13,0x02,0x55,0x53,
-    0x31,0x29,0x30,0x27,0x06,0x03,0x55,0x04,0x0a,0x13,0x20,
-    'I','n','t','e','r','n','e','t',' ','S','e','c','u','r','i','t','y',' ','R','e','s','e','a','r','c','h',' ','G','r','o','u','p',
-    0x31,0x15,0x30,0x13,0x06,0x03,0x55,0x04,0x03,0x13,0x0c,
-    'I','S','R','G',' ','R','o','o','t',' ','X','2'
-};
+/* Trust store generated from the system CA bundle by scripts/gen-trust-anchors.sh. */
+extern "C" const br_x509_trust_anchor *const tls_trust_anchors;
+extern "C" const size_t tls_trust_anchors_num;
 
-static unsigned char x2_q[] = {
-    0x04,
-    0xcd,0x9b,0xd5,0x9f,0x80,0x83,0x0a,0xec,0x09,0x4a,0xf3,0x16,0x4a,0x3e,0x5c,0xcf,
-    0x77,0xac,0xde,0x67,0x05,0x0d,0x1d,0x07,0xb6,0xdc,0x16,0xfb,0x5a,0x8b,0x14,0xdb,
-    0xe2,0x71,0x60,0xc4,0xba,0x45,0x95,0x11,0x89,0x8e,0xea,0x06,0xdf,0xf7,0x2a,0x16,
-    0x1c,0xa4,0xb9,0xc5,0xc5,0x32,0xe0,0x03,0xe0,0x1e,0x82,0x18,0x38,0x8b,0xd7,0x45,
-    0xd8,0x0a,0x6a,0x6e,0xe6,0x00,0x77,0xfb,0x02,0x51,0x7d,0x22,0xd8,0x0a,0x6e,0x9a,
-    0x5b,0x77,0xdf,0xf0,0xfa,0x41,0xec,0x39,0xdc,0x75,0xca,0x68,0x07,0x0c,0x1f,0xea
-};
+/* Certificate validity is checked against the CMOS clock. If it is unreadable or
+ * set earlier than the build date (a flat CMOS battery, say), use the build date,
+ * which is at least a lower bound on the real date. */
+static void tls_validation_time(uint32_t *days, uint32_t *seconds) {
+    unsigned y, m, d;
+    build_date(&y, &m, &d);
+    *days = days_from_year_month_day(y, m, d);
+    *seconds = 12 * 3600;
 
-static br_x509_trust_anchor x2_ta;
-
-static void init_trust_anchor(void) {
-    x2_ta.dn.data = x2_dn;
-    x2_ta.dn.len = sizeof(x2_dn);
-    x2_ta.flags = BR_X509_TA_CA;
-    x2_ta.pkey.key_type = BR_KEYTYPE_EC;
-    x2_ta.pkey.key.ec.curve = BR_EC_secp384r1;
-    x2_ta.pkey.key.ec.q = x2_q;
-    x2_ta.pkey.key.ec.qlen = sizeof(x2_q);
+    rtc_time_t now;
+    if (rtc_read(&now) != 0) return;
+    uint32_t rtc_days = days_from_year_month_day(now.year, now.month, now.day);
+    if (rtc_days < *days) return;
+    *days = rtc_days;
+    *seconds = (uint32_t)now.hour * 3600u + (uint32_t)now.minute * 60u + now.second;
 }
 
 static int fill_entropy(unsigned char out[64]) {
@@ -106,9 +99,44 @@ static int parse_status(const unsigned char *p, uint32_t n) {
     return (p[9]-'0')*100+(p[10]-'0')*10+(p[11]-'0');
 }
 
+static uint32_t parse_content_length(const unsigned char *p, uint32_t n) {
+    uint32_t pos = 0;
+    while (pos < n) {
+        uint32_t end = pos;
+        while (end + 1 < n && !(p[end] == '\r' && p[end + 1] == '\n')) end++;
+        if (end + 1 >= n) break;
+        static const char name[] = "content-length";
+        uint32_t i = 0;
+        while (i < sizeof(name) - 1 && pos + i < end) {
+            unsigned char c = p[pos + i];
+            if (c >= 'A' && c <= 'Z') c = (unsigned char)(c - 'A' + 'a');
+            if (c != (unsigned char)name[i]) break;
+            i++;
+        }
+        if (i == sizeof(name) - 1 && pos + i < end && p[pos + i] == ':') {
+            i++;
+            while (pos + i < end && (p[pos + i] == ' ' || p[pos + i] == '\t')) i++;
+            uint32_t value = 0;
+            int digits = 0;
+            while (pos + i < end && p[pos + i] >= '0' && p[pos + i] <= '9') {
+                uint32_t digit = p[pos + i] - '0';
+                if (value > (0xFFFFFFFFu - digit) / 10u) return 0;
+                value = value * 10u + digit;
+                i++;
+                digits = 1;
+            }
+            while (pos + i < end && (p[pos + i] == ' ' || p[pos + i] == '\t')) i++;
+            return digits && pos + i == end ? value : 0;
+        }
+        pos = end + 2;
+    }
+    return 0;
+}
+
 static int append_http_bytes(const unsigned char *src, uint32_t n,
                              unsigned char *body, uint32_t max, uint32_t *body_len,
-                             unsigned char *hdr, uint32_t *hdr_len, int *headers_done, int *status) {
+                             unsigned char *hdr, uint32_t *hdr_len, int *headers_done, int *status,
+                             uint32_t *content_length) {
     if (!*headers_done) {
         uint32_t copy = n;
         if (*hdr_len + copy > 8191) copy = 8191 - *hdr_len;
@@ -117,6 +145,7 @@ static int append_http_bytes(const unsigned char *src, uint32_t n,
         if (off >= 0) {
             *headers_done = 1;
             *status = parse_status(hdr, *hdr_len);
+            *content_length = parse_content_length(hdr, *hdr_len);
             uint32_t bn = *hdr_len - (uint32_t)off;
             if (*body_len + bn > max) return -2;
             memcpy(body + *body_len, hdr + off, bn); *body_len += bn;
@@ -133,22 +162,52 @@ static int append_http_bytes(const unsigned char *src, uint32_t n,
     return 0;
 }
 
+static int tls_engine_error;
+static int tls_http_status;
+
+extern "C" int tls_last_error(void) {
+    return tls_engine_error;
+}
+
+extern "C" int tls_last_http_status(void) {
+    return tls_http_status;
+}
+
+/* The TLS state and buffers total roughly 40 KiB, more than fits on the 32 KiB
+ * boot stack, so they live in .bss. Downloads never run concurrently. */
+static br_ssl_client_context tls_sc;
+static br_x509_minimal_context tls_xc;
+static br_sslio_context tls_io;
+static unsigned char tls_iobuf[BR_SSL_BUFSIZE_MONO];
+static unsigned char tls_hdr[8192];
+static unsigned char tls_buf[2048];
+
+static int https_download(const char *host, const char *path,
+                          uint8_t *body, uint32_t body_max, uint32_t *body_len);
+
 extern "C" int tls_https_download(const char *host, const char *path,
                                     uint8_t *body, uint32_t body_max, uint32_t *body_len) {
-    br_ssl_client_context sc;
-    br_x509_minimal_context xc;
-    br_sslio_context io;
-    unsigned char iobuf[4096];
-    unsigned char entropy[64];
-    unsigned y, m, d;
-    build_date(&y, &m, &d);
+    tls_engine_error = 0;
+    tls_http_status = 0;
+    int rc = https_download(host, path, body, body_max, body_len);
+    if (rc != 0) tls_engine_error = br_ssl_engine_last_error(&tls_sc.eng);
+    return rc;
+}
 
-    init_trust_anchor();
-    br_ssl_client_init_full(&sc, &xc, &x2_ta, 1);
-    br_ssl_engine_set_buffer(&sc.eng, iobuf, sizeof(iobuf), 0);
+static int https_download(const char *host, const char *path,
+                          uint8_t *body, uint32_t body_max, uint32_t *body_len) {
+    br_ssl_client_context &sc = tls_sc;
+    br_x509_minimal_context &xc = tls_xc;
+    br_sslio_context &io = tls_io;
+    unsigned char entropy[64];
+    uint32_t days, seconds;
+    tls_validation_time(&days, &seconds);
+
+    br_ssl_client_init_full(&sc, &xc, tls_trust_anchors, tls_trust_anchors_num);
+    br_ssl_engine_set_buffer(&sc.eng, tls_iobuf, sizeof(tls_iobuf), 0);
     if (!fill_entropy(entropy)) return -7;
     br_ssl_engine_inject_entropy(&sc.eng, entropy, sizeof(entropy));
-    br_x509_minimal_set_time(&xc, days_from_year_month_day(y, m, d), 12 * 3600);
+    br_x509_minimal_set_time(&xc, days, seconds);
     br_ssl_engine_add_flags(&sc.eng, BR_OPT_NO_RENEGOTIATION);
     if (!br_ssl_client_reset(&sc, host, 0)) return -1;
 
@@ -165,24 +224,21 @@ extern "C" int tls_https_download(const char *host, const char *path,
     req[rn] = 0;
     if (br_sslio_write_all(&io, req, rn) < 0 || br_sslio_flush(&io) < 0) return -2;
 
-    unsigned char hdr[8192];
-    uint32_t hdr_len = 0, total = 0;
+    unsigned char *hdr = tls_hdr;
+    uint32_t hdr_len = 0, total = 0, content_length = 0;
     int headers_done = 0, status = 0;
-    unsigned char buf[2048];
     for (;;) {
-        int n = br_sslio_read(&io, buf, sizeof(buf));
-        if (n < 0) {
-            if (headers_done && status == 200) break;
-            return -3;
-        }
-        if (n == 0) {
-            if (headers_done && status == 200) break;
-            return -3;
-        }
-        if (append_http_bytes(buf, (uint32_t)n, body, body_max, &total,
-                              hdr, &hdr_len, &headers_done, &status) < 0) return -4;
+        int n = br_sslio_read(&io, tls_buf, sizeof(tls_buf));
+        if (n <= 0) break;
+        if (append_http_bytes(tls_buf, (uint32_t)n, body, body_max, &total,
+                              hdr, &hdr_len, &headers_done, &status, &content_length) < 0) return -4;
+        if (headers_done && total) net_download_progress(total, content_length);
+        if (headers_done && content_length && total >= content_length) break;
     }
     *body_len = total;
-    if (!headers_done || status != 200) return status ? -5 : -6;
+    tls_http_status = status;
+    if (!headers_done) return -3;
+    if (status != 200) return status ? -5 : -6;
+    if (content_length && total < content_length) return -8;
     return 0;
 }

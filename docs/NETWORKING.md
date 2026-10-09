@@ -55,11 +55,21 @@ In QEMU user networking, `ping 10.0.2.2` and `ping 10.0.2.3` always work. Pingin
 * Received frames are handled in interrupt context, so protocol handlers must stay short and
   must not call `kprintf` unless `netdebug` is on.
 
+## Download progress
+
+While a transfer is in progress, the shell displays a live progress bar, activity indicator, and the number of body bytes received. When the server provides a valid `Content-Length`, the bar shows a percentage; otherwise it animates while reporting received bytes.
+
 ## HTTPS download
 
 `download` accepts both `http://` and `https://` URLs. HTTPS uses the BearSSL TLS 1.2 client through the existing TCP transport. The build Docker image fetches the upstream BearSSL source into `/root/bearssl` and builds its static library for the kernel.
 
-The initial trust store contains ISRG Root X2, so current Let's Encrypt ECDSA chains rooted at X2 can be verified. Secure entropy requires a CPU with RDRAND; QEMU is launched with `-cpu max` to expose that instruction. The OS currently has no RTC; certificate validity is checked against the build date embedded by the compiler. A broader CA store and a hardware/firmware-backed wall clock are future work.
+The trust store (`tls/trust_anchors.c`, about 150 public root CAs) is generated from the build image's system CA bundle by `scripts/gen-trust-anchors.sh`; rerun it to refresh the roots:
+
+```text
+docker run --rm -v "${PWD}:/root/env" myos-buildenv sh scripts/gen-trust-anchors.sh
+```
+
+The TLS buffer is full record size (`BR_SSL_BUFSIZE_MONO`) and lives in `.bss`, not on the 32 KiB boot stack. In TLS mode the TCP receive window advertises the free space in the 32 KiB receive ring, so fast servers cannot overflow it. A failed handshake prints BearSSL's error code (`BR_ERR_*` in `bearssl_ssl.h`/`bearssl_x509.h`; 62 means the certificate chain is not trusted), and a non-200 response prints the HTTP status. Secure entropy requires a CPU with RDRAND; QEMU is launched with `-cpu max` to expose that instruction. Certificate validity is checked against the CMOS real-time clock (`drivers/rtc.c`, read as UTC; the `date` command shows it). If the clock is unreadable or set earlier than the build date, the build date is used instead. A clock set too far ahead makes valid certificates look expired (BearSSL error 54).
 
 Example:
 
