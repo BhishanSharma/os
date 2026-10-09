@@ -62,7 +62,7 @@ docker run --rm -v ${PWD}:/root/env myos-buildenv make build-x86_64
 # once: create the FAT32 test disk (no mount/root needed)
 docker run --rm -v ${PWD}:/w debian:stable-slim sh -c "apt-get update -qq && apt-get install -y -qq dosfstools mtools && cd /w && sh scripts/mkdisk.sh disk.img"
 
-qemu-system-x86_64 -cpu max -cdrom dist\x86_64\kernel.iso `
+qemu-system-x86_64 -cpu max -m 512M -cdrom dist\x86_64\kernel.iso `
   -drive file=disk.img,format=raw,index=0,media=disk -boot d `
   -device rtl8139,netdev=n0 -netdev user,id=n0
 ```

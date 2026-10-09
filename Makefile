@@ -39,6 +39,11 @@ KERNEL_ISO := $(DIST)/kernel.iso
 
 DISK_IMG   ?= disk.img
 
+# FAT32 image GRUB loads into RAM at boot (files for PCs without an IDE disk).
+RAMDISK_DIR := targets/x86_64/ramdisk
+RAMDISK_MB  ?= 40
+RAMDISK_GZ  := $(BUILD)/ramdisk.img.gz
+
 # ---- Flags ----------------------------------------------------------------
 #
 # -ffreestanding:
@@ -127,7 +132,7 @@ help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*## ' $(THIS_MAKEFILE) | \
 		awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
 	@echo ""
-	@echo "Options: DEBUG=1  WERROR=1  CROSS=<prefix>  DISK_IMG=<file>"
+	@echo "Options: DEBUG=1  WERROR=1  CROSS=<prefix>  DISK_IMG=<file>  RAMDISK_MB=<n>"
 
 all: build-x86_64 ## Alias for build-x86_64
 
@@ -183,12 +188,16 @@ $(KERNEL_BIN): $(objects) $(BEARSSL_LIB) $(LINKER_LD)
 
 # ---- ISO ------------------------------------------------------------------
 
-$(KERNEL_ISO): $(KERNEL_BIN) $(ISO_SRC)/boot/grub/grub.cfg
+$(RAMDISK_GZ): scripts/mkramdisk.sh $(wildcard $(RAMDISK_DIR)/*) $(THIS_MAKEFILE)
+	sh scripts/mkramdisk.sh $(RAMDISK_DIR) $(RAMDISK_MB) $@
+
+$(KERNEL_ISO): $(KERNEL_BIN) $(RAMDISK_GZ) $(ISO_SRC)/boot/grub/grub.cfg
 	rm -rf $(ISO_STAGE)
 	mkdir -p $(ISO_STAGE)
 	cp -r $(ISO_SRC)/. $(ISO_STAGE)/
 	mkdir -p $(ISO_STAGE)/boot
 	cp $(KERNEL_BIN) $(ISO_STAGE)/boot/kernel.bin
+	cp $(RAMDISK_GZ) $(ISO_STAGE)/boot/ramdisk.img.gz
 	grub-mkrescue -o $@ $(ISO_STAGE)   # BIOS + UEFI (all installed GRUB platforms)
 
 
@@ -214,7 +223,7 @@ run: ## Boot the ISO in QEMU with disk + NIC (host-side; build first)
 		echo "No $(KERNEL_ISO): run 'make build-x86_64' (in Docker) first"; \
 		exit 1; \
 	}
-	$(QEMU) -cpu max -cdrom $(KERNEL_ISO) \
+	$(QEMU) -cpu max -m 512M -cdrom $(KERNEL_ISO) \
 	    -drive file=$(DISK_IMG),format=raw,index=0,media=disk -boot d \
 	    -device rtl8139,netdev=n0 -netdev user,id=n0 -serial stdio
 
@@ -224,7 +233,7 @@ run-nodisk: ## Boot the ISO in QEMU without a disk (host-side)
 		echo "No $(KERNEL_ISO): run 'make build-x86_64' (in Docker) first"; \
 		exit 1; \
 	}
-	$(QEMU) -cpu max -cdrom $(KERNEL_ISO) -boot d -serial stdio
+	$(QEMU) -cpu max -m 512M -cdrom $(KERNEL_ISO) -boot d -serial stdio
 
 
 debug: ## Boot paused with a gdb server on :1234
@@ -232,7 +241,7 @@ debug: ## Boot paused with a gdb server on :1234
 		echo "No $(KERNEL_ISO): run 'make DEBUG=1 build-x86_64' (in Docker) first"; \
 		exit 1; \
 	}
-	$(QEMU) -cpu max -cdrom $(KERNEL_ISO) \
+	$(QEMU) -cpu max -m 512M -cdrom $(KERNEL_ISO) \
 	    -drive file=$(DISK_IMG),format=raw,index=0,media=disk -boot d \
 	    -device rtl8139,netdev=n0 -netdev user,id=n0 \
 	    -serial stdio -s -S

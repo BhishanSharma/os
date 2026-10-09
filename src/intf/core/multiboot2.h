@@ -20,4 +20,8 @@ typedef struct {
  * number copied, or -1 if the bootloader gave no memory map. */
 int mb2_get_memory_map(mb2_region_t *out, int max);
 
+/* First boot module (grub.cfg `module2`) whose command line is `name`. Returns
+ * 0 and its physical range [start, end), or -1 if there is no such module. */
+int mb2_get_module(const char *name, uint64_t *start, uint64_t *end);
+
 #endif

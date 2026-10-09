@@ -66,8 +66,10 @@ if (-not (Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue)) {
     Fail "qemu-system-x86_64 not on PATH. Add C:\Program Files\qemu to PATH and reopen the terminal."
 }
 
+# 512 MB: under UEFI, GRUB needs more than QEMU's default 128 MB to load the RAM disk.
 $qemuArgs = @(
     "-cpu", "max",
+    "-m", "512M",
     "-cdrom", "dist\x86_64\kernel.iso",
     "-drive", "file=disk.img,format=raw,index=0,media=disk",
     "-boot", "d",

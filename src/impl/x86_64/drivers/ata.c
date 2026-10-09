@@ -33,34 +33,47 @@ extern void outb(uint16_t port, uint8_t val);
 extern uint16_t inw(uint16_t port);
 extern void outw(uint16_t port, uint16_t val);
 
-static void ata_wait_busy(void) {
-    while (inb(ATA_PRIMARY_IO + ATA_REG_STATUS) & ATA_SR_BSY);
+// Each status read is an I/O port access (about a microsecond), so this is
+// roughly a second. Without a limit a missing controller (status 0xFF, BSY
+// always set) would hang the boot.
+#define ATA_TIMEOUT 1000000
+
+static int ata_wait_busy(void) {
+    for (int i = 0; i < ATA_TIMEOUT; i++)
+        if (!(inb(ATA_PRIMARY_IO + ATA_REG_STATUS) & ATA_SR_BSY)) return 0;
+    return -1;
 }
 
-static void ata_wait_drq(void) {
-    while (!(inb(ATA_PRIMARY_IO + ATA_REG_STATUS) & ATA_SR_DRQ));
+static int ata_wait_drq(void) {
+    for (int i = 0; i < ATA_TIMEOUT; i++) {
+        uint8_t status = inb(ATA_PRIMARY_IO + ATA_REG_STATUS);
+        if (status & ATA_SR_ERR) return -1;
+        if (!(status & ATA_SR_BSY) && (status & ATA_SR_DRQ)) return 0;
+    }
+    return -1;
 }
 
 int ata_init(void) {
-    // Simple init - just check if drive is present
+    // A floating bus (no controller or no drive) reads as 0xFF.
+    if (inb(ATA_PRIMARY_IO + ATA_REG_STATUS) == 0xFF) return -1;
     outb(ATA_PRIMARY_IO + ATA_REG_DRIVE, 0xA0);  // Select master drive
-    ata_wait_busy();
-    
+    if (ata_wait_busy() != 0) return -1;
+
     uint8_t status = inb(ATA_PRIMARY_IO + ATA_REG_STATUS);
-    if (status == 0xFF) {
+    if (status == 0xFF || status == 0x00) {
         return -1;  // No drive
     }
-    
+
     return 0;
 }
 
-int disk_read_sectors(uint32_t lba, uint32_t count, uint8_t* buffer) {
+int ata_read_sectors(uint32_t lba, uint32_t count, uint8_t* buffer) {
     if (count == 0 || count > 256) {
         return -1;
     }
     
-    ata_wait_busy();
-    
+    if (ata_wait_busy() != 0) return -3;
+
     // Select drive and set LBA mode
     outb(ATA_PRIMARY_IO + ATA_REG_DRIVE, 0xE0 | ((lba >> 24) & 0x0F));
     outb(ATA_PRIMARY_IO + ATA_REG_SECCOUNT, (uint8_t)count);
@@ -70,14 +83,7 @@ int disk_read_sectors(uint32_t lba, uint32_t count, uint8_t* buffer) {
     outb(ATA_PRIMARY_IO + ATA_REG_COMMAND, ATA_CMD_READ_SECTORS);
     
     for (uint32_t sector = 0; sector < count; sector++) {
-        ata_wait_busy();
-        ata_wait_drq();
-        
-        // Check for errors
-        uint8_t status = inb(ATA_PRIMARY_IO + ATA_REG_STATUS);
-        if (status & ATA_SR_ERR) {
-            return -2;
-        }
+        if (ata_wait_drq() != 0) return -2;
         
         // Read 512 bytes (256 words)
         uint16_t* buf16 = (uint16_t*)(buffer + sector * 512);
@@ -89,13 +95,13 @@ int disk_read_sectors(uint32_t lba, uint32_t count, uint8_t* buffer) {
     return 0;
 }
 
-int disk_write_sectors(uint32_t lba, uint32_t count, uint8_t* buffer) {
+int ata_write_sectors(uint32_t lba, uint32_t count, uint8_t* buffer) {
     if (count == 0 || count > 256) {
         return -1;
     }
     
-    ata_wait_busy();
-    
+    if (ata_wait_busy() != 0) return -3;
+
     outb(ATA_PRIMARY_IO + ATA_REG_DRIVE, 0xE0 | ((lba >> 24) & 0x0F));
     outb(ATA_PRIMARY_IO + ATA_REG_SECCOUNT, (uint8_t)count);
     outb(ATA_PRIMARY_IO + ATA_REG_LBA_LOW, (uint8_t)lba);
@@ -104,9 +110,8 @@ int disk_write_sectors(uint32_t lba, uint32_t count, uint8_t* buffer) {
     outb(ATA_PRIMARY_IO + ATA_REG_COMMAND, ATA_CMD_WRITE_SECTORS);
     
     for (uint32_t sector = 0; sector < count; sector++) {
-        ata_wait_busy();
-        ata_wait_drq();
-        
+        if (ata_wait_drq() != 0) return -2;
+
         uint16_t* buf16 = (uint16_t*)(buffer + sector * 512);
         for (int i = 0; i < 256; i++) {
             outw(ATA_PRIMARY_IO + ATA_REG_DATA, buf16[i]);
@@ -114,7 +119,7 @@ int disk_write_sectors(uint32_t lba, uint32_t count, uint8_t* buffer) {
         
         // Flush cache
         outb(ATA_PRIMARY_IO + ATA_REG_COMMAND, 0xE7);
-        ata_wait_busy();
+        if (ata_wait_busy() != 0) return -3;
     }
     
     return 0;

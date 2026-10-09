@@ -10,6 +10,10 @@
  * be overwritten). Returns the number of usable RAM regions, -1 if none. */
 int memory_init(void);
 
+/* Remove [start, end) from usable RAM so the heap is never placed there
+ * (e.g. a boot module that is still in use). */
+void memory_reserve(uint64_t start, uint64_t end);
+
 /* 1 if [start, end) lies entirely in usable RAM. */
 int memory_range_usable(uint64_t start, uint64_t end);
 

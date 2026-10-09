@@ -7,6 +7,7 @@
 #include "drivers/timer.h"
 #include "drivers/heap.h"
 #include "sys/editor.h"
+#include "drivers/disk.h"
 #include "drivers/ata.h"
 #include "lib/string_utils.h"
 #include "sys/system.h"
@@ -27,6 +28,7 @@ static void cmd_ping(const char *args);
 static void cmd_download(const char *args);
 static void cmd_ls(void);
 static void cmd_cat(const char *filename);
+static void cmd_mount(const char *which);
 int shell_execute_command(const char* line);
 
 void shell_run(void)
@@ -80,7 +82,8 @@ static void cmd_help(void)
     print_str("free               - free last test allocation\n");
     print_str("freeidx <n>        - free n-th test allocation\n");
     print_str("listptr            - list test allocations\n");
-    print_str("diskinfo           - ATA disk information\n");
+    print_str("mount [ata|ram]    - show or switch the disk the files live on\n");
+    print_str("diskinfo           - boot sector of the current disk\n");
     print_str("readsector <lba>   - dump a raw sector\n");
     print_str("fat32info          - FAT32 volume parameters\n");
     print_str("crash <kind>       - trigger a CPU exception on purpose\n");
@@ -135,6 +138,52 @@ static void cmd_ls(void)
         }
     }
     kfree(files);
+}
+
+static void cmd_mount(const char *which)
+{
+    while (*which == ' ') which++;
+    if (!*which)
+    {
+        kprintf("Files are on: %s\n", disk_name());
+        if (disk_ramdisk_size())
+            kprintf("RAM disk loaded: %u MiB (changes are lost at reboot)\n",
+                    (uint32_t)(disk_ramdisk_size() >> 20));
+        else
+            print_str("No RAM disk loaded\n");
+        return;
+    }
+    disk_kind_t kind;
+    if (strcmp(which, "ata") == 0)
+        kind = DISK_ATA;
+    else if (strcmp(which, "ram") == 0)
+        kind = DISK_RAM;
+    else
+    {
+        print_str("Usage: mount [ata|ram]\n");
+        return;
+    }
+    if (kind == DISK_RAM && !disk_ramdisk_size())
+    {
+        print_error("No RAM disk was loaded at boot");
+        return;
+    }
+    if (kind == DISK_ATA && ata_init() != 0)
+    {
+        print_error("No ATA disk found");
+        return;
+    }
+    disk_kind_t old = disk_selected();
+    disk_select(kind);
+    if (fat32_init(0) != 0)
+    {
+        print_error("No FAT32 volume on that disk; keeping the old one");
+        disk_select(old);
+        if (old != DISK_NONE) fat32_init(0);
+        return;
+    }
+    fat32_change_directory("/");
+    kprintf("Files are now on: %s\n", disk_name());
 }
 
 #define CAT_MAX   (1024 * 1024)   // largest file `cat` will show
@@ -492,6 +541,10 @@ int shell_execute_command(const char* line) {
             kprintf("Size: %u bytes (%u KB)\n", size, size / 1024);
         }
     }
+    else if (strcmp(line, "mount") == 0 || strncmp(line, "mount ", 6) == 0)
+    {
+        cmd_mount(line[5] ? line + 6 : "");
+    }
     else if (strcmp(line, "diskinfo") == 0)
     {
         uint8_t *buffer = kmalloc(512);
@@ -636,6 +689,7 @@ int shell_execute_command(const char* line) {
             const char *filename = line + 6;
             const char *content = space + 1;
 
+            fat32_create_file(filename);   // fails harmlessly if it already exists
             int result = fat32_write_file(filename, (uint8_t *)content, strlen(content));
             if (result < 0)
             {

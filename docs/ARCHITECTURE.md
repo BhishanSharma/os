@@ -7,9 +7,11 @@ buildenv/Dockerfile            Build container (cross-gcc, nasm, grub, xorriso)
 Makefile                       Build system  (`make help`)
 build.ps1                      Windows one-shot: build + disk + QEMU
 scripts/mkdisk.sh              Creates a FAT32 test disk without root
+scripts/mkramdisk.sh           Builds the gzipped FAT32 RAM disk image (boot/ramdisk.img.gz)
 targets/x86_64/
   linker.ld                    Kernel linked at 1 MiB, entry symbol `start`, exports kernel_start/kernel_end
-  iso/boot/grub/grub.cfg       GRUB menu: multiboot2 /boot/kernel.bin
+  iso/boot/grub/grub.cfg       GRUB menu: multiboot2 /boot/kernel.bin, module2 /boot/ramdisk.img.gz
+  ramdisk/                     Files copied into the RAM disk image
 src/
   intf/                        Public headers  (-I src/intf, include as "drivers/fat32.h")
     core/  drivers/  lib/  sys/
@@ -56,7 +58,9 @@ BIOS or UEFI -> GRUB -> loads /boot/kernel.bin at 1 MiB (Multiboot2, header.asm)
 4. `paging_init()` builds a **new** set of page tables (identity map of the kernel image `kernel_start`..`kernel_end`, heap, page tables, VGA memory and the framebuffer, if any) and switches to them. With a framebuffer, `fbcon_init()` then starts the console (`lib/fbcon.c`, font from `scripts/gen-font.py`). Then `heap_init()`.
 5. `expand_scrollback()`: grows the scrollback buffer to 2000 lines.
 6. `nic_probe_init()`: RTL8139 or RTL8168; installs its IRQ handler if it has a PIC line.
-7. `ata_init()` then `fat32_init(0)` and `cd /`.
+7. `mount_filesystem()`: FAT32 from the ATA disk if `ata_init()` finds one with a FAT32 volume,
+   otherwise from the RAM disk; then `cd /`. Both go through `drivers/disk.c`, which routes
+   `disk_read_sectors`/`disk_write_sectors` to the ATA driver or to the RAM disk in memory.
 8. `sti` (enable interrupts), DHCP (`net_configure()`), then `shell_run()`, which never returns.
 
 ## Memory map (physical == virtual, identity mapped)
@@ -66,6 +70,7 @@ BIOS or UEFI -> GRUB -> loads /boot/kernel.bin at 1 MiB (Multiboot2, header.asm)
 | `0x000B8000`             | VGA text buffer                                             |
 | `0x00100000`-`kernel_end` | Kernel image (text/rodata/data/bss, 32 KiB boot stack with a guard page below it); `kernel_end` comes from `linker.ld`, currently about `0x126000` |
 | `0x00200000`-`0x00400000`| Page-table pool for `paging_init()` (`PAGE_TABLE_AREA`..`PAGE_TABLE_END`) |
+| start of the heap region | RAM disk: GRUB loads `ramdisk.img.gz` (unpacked) wherever it likes; `kernel_main()` keeps the heap out of that range (`memory_reserve`), copies the image to the bottom of the chosen region and starts the heap at the next 2 MiB boundary |
 | largest RAM region in 4 MiB-4 GiB | Kernel heap (`kmalloc`), 2 MiB aligned, at most 1 GiB, mapped with 2 MiB pages; falls back to 1 MiB at `0x400000` without a memory map |
 
 The kernel image is mapped from the linker-provided `kernel_start`/`kernel_end`, so it can grow
@@ -120,7 +125,8 @@ use `build.ps1 -Log` for those.
 | Paging     | `drivers/paging.c`         | 4-level tables, 4 KiB pages, identity mapping                   |
 | Frames     | `drivers/memory.c`         | Bitmap physical-frame allocator (barely used)                   |
 | Heap       | `drivers/heap.c`           | First-fit free list, 8-byte alignment, `kmalloc`/`kfree`        |
-| ATA        | `drivers/ata.c`            | PIO, LBA28, primary bus master drive, polling (no timeouts)     |
+| Disk       | `drivers/disk.c`           | Sector I/O for FAT32: the ATA disk or the RAM disk (`mount`)    |
+| ATA        | `drivers/ata.c`            | PIO, LBA28, primary bus master drive, polling with ~1 s timeouts |
 | FAT32      | `drivers/fat32.c`          | Short (8.3) names only; long-name entries are skipped           |
 | PCI        | `drivers/pci.c`            | Config-space access via ports `0xCF8`/`0xCFC`, device lookup    |
 | RTL8139    | `drivers/rtl8139.c`        | Init, RX ring, interrupts; logs received packet lengths; no TX  |

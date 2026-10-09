@@ -40,7 +40,8 @@ Up/Down arrows browse command history; Shift+Up/Down scroll the screen.
 | `malloc <bytes>`           | Allocate heap memory in a test slot                      |
 | `free` / `freeidx <n>`     | Free the last / the n-th test allocation                 |
 | `listptr`                  | List test allocations                                    |
-| `diskinfo`                 | ATA disk information                                     |
+| `mount [ata\|ram]`         | Show which disk the files are on, or switch to the ATA disk / RAM disk |
+| `diskinfo`                 | Boot sector of the current disk                          |
 | `readsector <lba>`         | Dump a raw sector                                        |
 | `fat32info`                | FAT32 volume parameters                                  |
 | `crash <kind>`             | Trigger a CPU exception on purpose: `div0 ud gp pf null stack int3 irq panic` |
@@ -60,6 +61,9 @@ Up/Down arrows browse command history; Shift+Up/Down scroll the screen.
 `monokai`, `gruvbox`, `solarized`, `matrix`, `cyberpunk`. `demo` shows the
 message styles.
 
+> Files live on the ATA disk when there is one (QEMU's `disk.img`), otherwise on the
+> **RAM disk** GRUB loads from the boot medium. RAM disk changes are lost at reboot.
+>
 > Filenames are FAT32 short names (8.3). The disk stores them upper-case, so
 > `test.txt` is listed as `TEST.TXT`.
 

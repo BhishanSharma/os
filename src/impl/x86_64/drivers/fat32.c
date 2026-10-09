@@ -6,8 +6,7 @@
 extern void* kmalloc(uint64_t size);
 extern void kfree(void* ptr);
 
-extern int disk_read_sectors(uint32_t lba, uint32_t count, uint8_t* buffer);
-extern int disk_write_sectors(uint32_t lba, uint32_t count, uint8_t* buffer);
+#include "drivers/disk.h"
 
 static uint32_t current_directory_cluster = 0;
 static char current_path[FAT32_MAX_PATH] = "/";
@@ -98,11 +97,20 @@ static void fat32_repair_reserved_entries(void) {
 int fat32_init(uint32_t partition_lba) {
     partition_start_lba = partition_lba;
     
-    if (disk_read_sectors(partition_lba, 1, (uint8_t*)&boot_sector) != 0) {
+    // The sector is 512 bytes; the struct only covers its first 90.
+    uint8_t sector[FAT32_SECTOR_SIZE];
+    if (disk_read_sectors(partition_lba, 1, sector) != 0) {
         return -1;
     }
-    
-    if (boot_sector.bytes_per_sector != 512) {
+    memcpy(&boot_sector, sector, sizeof(boot_sector));
+
+    // Refuse anything that is not a FAT32 volume (blank or foreign disk).
+    uint8_t spc = boot_sector.sectors_per_cluster;
+    if (sector[510] != 0x55 || sector[511] != 0xAA ||
+        boot_sector.bytes_per_sector != 512 ||
+        spc == 0 || (spc & (spc - 1)) != 0 ||
+        boot_sector.num_fats == 0 || boot_sector.fat_size_32 == 0 ||
+        boot_sector.root_cluster < 2) {
         return -2;
     }
     

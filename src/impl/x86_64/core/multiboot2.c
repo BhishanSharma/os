@@ -2,17 +2,20 @@
 #include <stdint.h>
 
 #define MB2_TAG_END         0
+#define MB2_TAG_MODULE      3
 #define MB2_TAG_MMAP        6
 #define MB2_TAG_FRAMEBUFFER 8
 #define MB2_FB_TYPE_RGB     1
 #define MB2_MEMORY_AVAILABLE 1
 
-/* First tag of `type`, or 0. Tags follow an 8-byte header and are 8-byte aligned. */
-static const uint8_t *find_tag(uint32_t want) {
+/* Next tag of `type` after `prev` (0: from the start), or 0. Tags follow an
+ * 8-byte header and are 8-byte aligned. */
+static const uint8_t *find_next_tag(uint32_t want, const uint8_t *prev) {
     if (!multiboot_info) return 0;
     const uint8_t *base = (const uint8_t *)(uintptr_t)multiboot_info;
     uint32_t total = *(const uint32_t *)base;
     uint32_t off = 8;
+    if (prev) off = (uint32_t)(prev - base) + ((*(const uint32_t *)(prev + 4) + 7) & ~7u);
     while (off + 8 <= total) {
         const uint8_t *tag = base + off;
         uint32_t type = *(const uint32_t *)tag, size = *(const uint32_t *)(tag + 4);
@@ -22,6 +25,8 @@ static const uint8_t *find_tag(uint32_t want) {
     }
     return 0;
 }
+
+static const uint8_t *find_tag(uint32_t want) { return find_next_tag(want, 0); }
 
 int mb2_get_framebuffer(fb_info_t *out) {
     const uint8_t *tag = find_tag(MB2_TAG_FRAMEBUFFER);
@@ -52,4 +57,19 @@ int mb2_get_memory_map(mb2_region_t *out, int max) {
         n++;
     }
     return n;
+}
+
+int mb2_get_module(const char *name, uint64_t *start, uint64_t *end) {
+    for (const uint8_t *tag = find_next_tag(MB2_TAG_MODULE, 0); tag;
+         tag = find_next_tag(MB2_TAG_MODULE, tag)) {
+        if (*(const uint32_t *)(tag + 4) < 17) continue;
+        const char *cmdline = (const char *)(tag + 16);
+        int i = 0;
+        while (name[i] && cmdline[i] == name[i]) i++;
+        if (name[i] || (cmdline[i] && cmdline[i] != ' ')) continue;
+        *start = *(const uint32_t *)(tag + 8);
+        *end = *(const uint32_t *)(tag + 12);
+        return *end > *start ? 0 : -1;
+    }
+    return -1;
 }

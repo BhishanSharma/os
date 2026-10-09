@@ -50,7 +50,7 @@ That's a fault before `idt_init()` runs (very early boot) or a failure inside th
 itself. Ask QEMU to say what happened:
 
 ```powershell
-qemu-system-x86_64 -cdrom dist\x86_64\kernel.iso -drive file=disk.img,format=raw,index=0,media=disk -boot d `
+qemu-system-x86_64 -m 512M -cdrom dist\x86_64\kernel.iso -drive file=disk.img,format=raw,index=0,media=disk -boot d `
   -no-reboot -d int,cpu_reset -D qemu.log
 ```
 
@@ -141,7 +141,7 @@ ask for the changes to be re-applied to your latest sources.
 The changes were compiled and linked but not run. Boot once and check:
 
 1. The boot log still shows keyboard, timer, `[NET] ... init complete`, `[NET] NIC driver installed`,
-   `ATA disk detected`, `FAT32 filesystem mounted`, `Boot complete!`.
+   `[OK] FAT32 mounted from the ATA disk` (or `... from the RAM disk` without one), `Boot complete!`.
 2. The shell responds to keys, `ls` lists `TEST.TXT`/`README.TXT`, `cat test.txt` works.
 3. `uptime` increases (timer interrupts still work); `sleep 2` returns.
 4. The NIC receive interrupt can't easily be triggered yet (the OS never transmits,

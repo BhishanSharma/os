@@ -23,6 +23,27 @@ int memory_init(void) {
     return region_count;
 }
 
+void memory_reserve(uint64_t start, uint64_t end) {
+    for (int i = 0; i < region_count; i++) {
+        uint64_t s = regions[i].base, e = s + regions[i].length;
+        if (end <= s || start >= e) continue;
+        if (start > s && end < e && region_count < MAX_REGIONS) {
+            // Split: keep [s, start) here, append [end, e).
+            regions[region_count].base = end;
+            regions[region_count].length = e - end;
+            region_count++;
+            regions[i].length = start - s;
+        } else if (start > s) {
+            regions[i].length = start - s;
+        } else if (end < e) {
+            regions[i].base = end;
+            regions[i].length = e - end;
+        } else {
+            regions[i].length = 0;
+        }
+    }
+}
+
 int memory_range_usable(uint64_t start, uint64_t end) {
     for (int i = 0; i < region_count; i++)
         if (start >= regions[i].base && end <= regions[i].base + regions[i].length) return 1;

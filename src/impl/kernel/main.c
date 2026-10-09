@@ -9,6 +9,7 @@
 #include "drivers/heap.h"
 #include "drivers/fat32.h"
 #include "drivers/ata.h"
+#include "drivers/disk.h"
 #include "sys/editor.h"
 #include "sys/shell.h"
 #include "drivers/pic.h"
@@ -37,6 +38,32 @@ extern char kernel_end[];
 #define HEAP_HIGH      0x100000000ULL
 #define HEAP_MAX       (1024ULL * 1024 * 1024)
 #define HEAP_FALLBACK  (1024 * 1024)      // no memory map: assume 1 MiB at 4 MiB
+#define HEAP_MIN       (8ULL * 1024 * 1024) // heap left after carving out the RAM disk
+
+// Mount FAT32 from the ATA disk if there is one with a FAT32 volume, else from
+// the RAM disk (machines without IDE, e.g. NVMe laptops booted from USB).
+static void mount_filesystem(void) {
+    if (ata_init() == 0) {
+        disk_select(DISK_ATA);
+        if (fat32_init(0) == 0) {
+            print_str("[OK] FAT32 mounted from the ATA disk\n");
+            if (disk_ramdisk_size()) print_str("     (RAM disk also loaded: `mount ram` switches to it)\n");
+            return;
+        }
+        print_warning("ATA disk has no FAT32 volume");
+    }
+    if (disk_ramdisk_size()) {
+        disk_select(DISK_RAM);
+        if (fat32_init(0) == 0) {
+            kprintf("[OK] FAT32 mounted from the RAM disk (%u MiB, changes are lost at reboot)\n",
+                    (uint32_t)(disk_ramdisk_size() >> 20));
+            return;
+        }
+        print_warning("RAM disk is not a FAT32 image");
+    }
+    disk_select(DISK_NONE);
+    print_warning("No filesystem: file commands will not work");
+}
 
 void kernel_main() {
     serial_init();      // mirror all output to COM1 from the very first line
@@ -54,7 +81,30 @@ void kernel_main() {
     // The memory map is in the multiboot info, which the heap may overwrite.
     int mem_regions = memory_init();
     uint64_t heap_start = HEAP_LOW, heap_size = HEAP_FALLBACK;
-    if (mem_regions > 0) memory_pick_heap(HEAP_LOW, HEAP_HIGH, HEAP_MAX, &heap_start, &heap_size);
+
+    // GRUB loads the RAM disk image (grub.cfg `module2 ... ramdisk`) wherever it
+    // likes. Keep the heap away from it and use it in place, unless it sits in
+    // the first 4 MiB (kernel image, page-table pool): then copy it to the
+    // bottom of the heap region and start the heap after it.
+    uint64_t rd_start = 0, rd_end = 0, rd_span = 0;
+    int have_rd = mem_regions > 0 && mb2_get_module("ramdisk", &rd_start, &rd_end) == 0;
+    int rd_copy = have_rd && rd_start < HEAP_LOW;
+    if (have_rd) {
+        memory_reserve(rd_start, rd_end);
+        if (rd_copy) rd_span = (rd_end - rd_start + LARGE_PAGE - 1) & ~(LARGE_PAGE - 1);
+    }
+    if (mem_regions > 0) memory_pick_heap(HEAP_LOW, HEAP_HIGH, HEAP_MAX + rd_span, &heap_start, &heap_size);
+    if (have_rd && !rd_copy) {
+        disk_set_ramdisk((uint8_t *)rd_start, rd_end - rd_start);
+        paging_add_identity_region(rd_start, rd_end - rd_start);
+    } else if (rd_copy && heap_size >= rd_span + HEAP_MIN) {
+        memcpy((void *)heap_start, (const void *)rd_start, rd_end - rd_start);
+        disk_set_ramdisk((uint8_t *)heap_start, rd_end - rd_start);
+        paging_add_identity_region(heap_start, rd_end - rd_start);
+        heap_start += rd_span;
+        heap_size -= rd_span;
+    }
+    if (heap_size > HEAP_MAX) heap_size = HEAP_MAX;
 
     gdt_init();         // GDT + TSS (own stack for double faults)
 
@@ -106,18 +156,7 @@ void kernel_main() {
         net_init();
     }
 
-    if (ata_init() == 0) {
-        print_str("ATA disk detected\n");
-    } else {
-        print_str("No ATA disk found\n");
-    }
-    
-    // After the disk read test, add:
-    if (fat32_init(0) == 0) {
-        print_str("FAT32 filesystem mounted\n");
-    } else {
-        print_str("Failed to mount FAT32\n");
-    }
+    mount_filesystem();
     
     fat32_change_directory("/");
 
