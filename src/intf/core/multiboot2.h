@@ -24,4 +24,7 @@ int mb2_get_memory_map(mb2_region_t *out, int max);
  * 0 and its physical range [start, end), or -1 if there is no such module. */
 int mb2_get_module(const char *name, uint64_t *start, uint64_t *end);
 
+/* 1 if the firmware was UEFI, 0 for BIOS. */
+int mb2_booted_from_uefi(void);
+
 #endif

@@ -1,6 +1,7 @@
 #include <stddef.h> // for size_t
 #include <stdint.h>
 #include <stdarg.h>
+#include "lib/string.h"
 
 int strcmp(const char* s1, const char* s2) {
     while (*s1 && *s2) {
@@ -30,72 +31,114 @@ size_t strlen(const char* str) {
     return len;
 }
 
-int k_snprintf(char* buffer, size_t size, const char* fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
+/* One number: `base` 10 or 16, padded to `width` with `pad` ('0' or ' '); a
+ * minus sign goes before zero padding, as in printf. */
+static void fmt_number(k_putc_fn put, void *ctx, uint64_t value, int negative,
+                       unsigned base, int upper, int width, char pad) {
+    const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+    char tmp[24];
+    int n = 0;
+    do {
+        tmp[n++] = digits[value % base];
+        value /= base;
+    } while (value);
+    int len = n + negative;
+    if (negative && pad == '0') put('-', ctx);
+    for (; len < width; len++) put(pad, ctx);
+    if (negative && pad != '0') put('-', ctx);
+    while (n) put(tmp[--n], ctx);
+}
 
-    size_t pos = 0;
-
-    for (const char* p = fmt; *p && pos < size - 1; p++) {
-        if (*p != '%') {
-            buffer[pos++] = *p;
+void k_vformat(k_putc_fn put, void *ctx, const char *fmt, va_list args) {
+    for (; *fmt; fmt++) {
+        if (*fmt != '%') {
+            put(*fmt, ctx);
             continue;
         }
-
-        p++; // skip '%'
-
-        if (*p == 'c') {
-            char c = (char)va_arg(args, int);
-            if (pos < size - 1) buffer[pos++] = c;
-        } else if (*p == 's') {
-            const char* s = va_arg(args, const char*);
-            while (*s && pos < size - 1) buffer[pos++] = *s++;
-        } else if (*p == 'd' || *p == 'i') {
-            int val = va_arg(args, int);
-            char temp[12];
-            int neg = 0;
-            int tpos = 0;
-
-            if (val < 0) {
-                neg = 1;
-                val = -val;
+        fmt++;
+        char pad = ' ';
+        int width = 0, left = 0, is_long = 0;
+        if (*fmt == '-') { left = 1; fmt++; }
+        if (*fmt == '0') { pad = '0'; fmt++; }
+        while (*fmt >= '0' && *fmt <= '9') width = width * 10 + (*fmt++ - '0');
+        if (*fmt == 'l') { is_long = 1; fmt++; }
+        switch (*fmt) {
+            case 'd':
+            case 'i': {
+                int64_t val = is_long ? va_arg(args, int64_t) : va_arg(args, int);
+                uint64_t mag = val < 0 ? (uint64_t)0 - (uint64_t)val : (uint64_t)val;
+                fmt_number(put, ctx, mag, val < 0, 10, 0, width, pad);
+                break;
             }
-
-            // Convert number to string
-            do {
-                temp[tpos++] = '0' + (val % 10);
-                val /= 10;
-            } while (val && tpos < sizeof(temp));
-
-            if (neg && tpos < sizeof(temp)) temp[tpos++] = '-';
-
-            // Reverse string
-            for (int i = tpos - 1; i >= 0 && pos < size - 1; i--) {
-                buffer[pos++] = temp[i];
+            case 'u': {
+                uint64_t val = is_long ? va_arg(args, uint64_t) : va_arg(args, uint32_t);
+                fmt_number(put, ctx, val, 0, 10, 0, width, pad);
+                break;
             }
-        } else if (*p == 'x' || *p == 'X') {
-            unsigned int val = va_arg(args, unsigned int);
-            char temp[9];
-            int tpos = 0;
-            const char* hex = (*p == 'x') ? "0123456789abcdef" : "0123456789ABCDEF";
-
-            do {
-                temp[tpos++] = hex[val & 0xF];
-                val >>= 4;
-            } while (val && tpos < sizeof(temp));
-
-            // Reverse string
-            for (int i = tpos - 1; i >= 0 && pos < size - 1; i--) {
-                buffer[pos++] = temp[i];
+            case 'x':
+            case 'X': {
+                uint64_t val = is_long ? va_arg(args, uint64_t) : va_arg(args, uint32_t);
+                fmt_number(put, ctx, val, 0, 16, *fmt == 'X', width, pad);
+                break;
             }
-        } else if (*p == '%') {
-            buffer[pos++] = '%';
+            case 'b': {
+                uint32_t val = va_arg(args, uint32_t);
+                put('0', ctx); put('b', ctx);
+                for (int i = 31; i >= 0; i--) {
+                    put((val & (1u << i)) ? '1' : '0', ctx);
+                    if (i % 8 == 0 && i != 0) put('_', ctx);
+                }
+                break;
+            }
+            case 's': {
+                const char *s = va_arg(args, const char *);
+                if (!s) s = "(null)";
+                int len = (int)strlen(s);
+                if (!left) for (int i = len; i < width; i++) put(' ', ctx);
+                while (*s) put(*s++, ctx);
+                if (left) for (int i = len; i < width; i++) put(' ', ctx);
+                break;
+            }
+            case 'c':
+                put((char)va_arg(args, int), ctx);
+                break;
+            case '%':
+                put('%', ctx);
+                break;
+            case 0:
+                return;
+            default:
+                put('%', ctx);
+                put(*fmt, ctx);
+                break;
         }
     }
+}
 
-    buffer[pos] = '\0';
+struct snprintf_ctx {
+    char *buffer;
+    size_t size, pos;
+};
+
+static void snprintf_put(char c, void *p) {
+    struct snprintf_ctx *ctx = p;
+    if (ctx->pos + 1 < ctx->size) ctx->buffer[ctx->pos] = c;
+    ctx->pos++;
+}
+
+int k_vsnprintf(char *buffer, size_t size, const char *fmt, va_list args) {
+    struct snprintf_ctx ctx = { buffer, size, 0 };
+    k_vformat(snprintf_put, &ctx, fmt, args);
+    if (size) buffer[ctx.pos < size ? ctx.pos : size - 1] = 0;
+    return (int)ctx.pos;
+}
+
+int k_snprintf(char *buffer, size_t size, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    int n = k_vsnprintf(buffer, size, fmt, args);
     va_end(args);
-    return (int)pos;
+    return n;
 }
 
 // strncpy replacement

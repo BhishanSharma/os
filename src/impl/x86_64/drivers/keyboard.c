@@ -139,6 +139,17 @@ void init_keyboard() {
     enable_irq(1);
 }
 
+static void (*idle_hook)(void);
+
+void keyboard_set_idle_hook(void (*hook)(void)) {
+    idle_hook = hook;
+}
+
+void keyboard_idle(void) {
+    if (idle_hook) idle_hook();
+    __asm__ volatile("hlt");
+}
+
 int get_char() {
     if (buffer_index == 0) return 0;
     int c = key_buffer[0];
@@ -210,7 +221,7 @@ void get_line(char* buffer, size_t max_len) {
     while (1) {
         int c = get_char();
         if (!c) {
-            __asm__ volatile("hlt");
+            keyboard_idle();
             continue;
         }
 

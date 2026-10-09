@@ -19,6 +19,8 @@
 #include "net/net.h"
 #include "core/multiboot2.h"
 #include "lib/fbcon.h"
+#include "drivers/rtc.h"
+#include "sys/sysinfo.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
@@ -46,23 +48,38 @@ static void mount_filesystem(void) {
     if (ata_init() == 0) {
         disk_select(DISK_ATA);
         if (fat32_init(0) == 0) {
-            print_str("[OK] FAT32 mounted from the ATA disk\n");
-            if (disk_ramdisk_size()) print_str("     (RAM disk also loaded: `mount ram` switches to it)\n");
+            print_boot_status(BOOT_OK, "Storage", "FAT32 on ATA disk%s",
+                              disk_ramdisk_size() ? " (RAM disk also loaded: `mount ram`)" : "");
             return;
         }
-        print_warning("ATA disk has no FAT32 volume");
+        kprintf("ATA disk has no FAT32 volume\n");
     }
     if (disk_ramdisk_size()) {
         disk_select(DISK_RAM);
         if (fat32_init(0) == 0) {
-            kprintf("[OK] FAT32 mounted from the RAM disk (%u MiB, changes are lost at reboot)\n",
-                    (uint32_t)(disk_ramdisk_size() >> 20));
+            print_boot_status(BOOT_OK, "Storage", "FAT32 on RAM disk, %u MiB (changes are lost at reboot)",
+                              (uint32_t)(disk_ramdisk_size() >> 20));
             return;
         }
-        print_warning("RAM disk is not a FAT32 image");
+        kprintf("RAM disk is not a FAT32 image\n");
     }
     disk_select(DISK_NONE);
-    print_warning("No filesystem: file commands will not work");
+    print_boot_status(BOOT_FAIL, "Storage", "no disk with a FAT32 volume: file commands will not work");
+}
+
+static void report_clock(void) {
+    rtc_time_t t;
+    if (rtc_read(&t) != 0) {
+        print_boot_status(BOOT_WARN, "Clock", "RTC holds an invalid time");
+        return;
+    }
+    rtc_add_minutes(&t, RTC_LOCAL_OFFSET_MIN);
+    print_boot_status(BOOT_OK, "Clock", "%u-%02u-%02u %02u:%02u %s", t.year, t.month, t.day,
+                      t.hour, t.minute, RTC_LOCAL_TZ_NAME);
+}
+
+static void statusbar_idle(void) {
+    statusbar_update(0);
 }
 
 void kernel_main() {
@@ -78,6 +95,7 @@ void kernel_main() {
         print_use_shadow_buffer(cols, rows);
         paging_add_identity_region(fb.addr, (uint64_t)fb.pitch * fb.height);
     }
+    boot_info.uefi = mb2_booted_from_uefi();
     // The memory map is in the multiboot info, which the heap may overwrite.
     int mem_regions = memory_init();
     uint64_t heap_start = HEAP_LOW, heap_size = HEAP_FALLBACK;
@@ -108,12 +126,14 @@ void kernel_main() {
 
     gdt_init();         // GDT + TSS (own stack for double faults)
 
+    // Screen: status bar on the top row, logo, then one status line per
+    // subsystem. Driver chatter goes to serial and the boot log (`dmesg`).
+    print_reserve_status_line();
     print_set_theme(THEME_CYBERPUNK);
-    print_clear();
+    sysinfo_print_logo();
+    print_set_muted(1);
 
-    print_line();
-    print_centered("=== Welcome to Terminmal OS ===");
-    print_line();
+    print_boot_status(BOOT_OK, "CPU", "%s", sysinfo_cpu_name());
 
     // Initialize IDT (installs the CPU exception handlers) and PIC
     idt_init();
@@ -128,44 +148,74 @@ void kernel_main() {
     timer_init();
 
     paging_init((uint64_t)kernel_start, (uint64_t)kernel_end, heap_start, heap_size);
+    heap_init(heap_start, heap_size);
+    if (mem_regions > 0) {
+        print_boot_status(BOOT_OK, "Memory", "%u MiB RAM, %u MiB kernel heap",
+                          (uint32_t)(get_total_memory() >> 20), (uint32_t)(heap_size >> 20));
+        kprintf("Heap at %u MiB\n", (uint32_t)(heap_start >> 20));
+        if (!memory_range_usable(0x100000, HEAP_LOW))
+            kprintf("Note: RAM at 1-4 MiB (kernel, page tables) is not listed as usable\n");
+    } else {
+        print_boot_status(BOOT_WARN, "Memory", "no memory map from the bootloader: 1 MiB heap");
+    }
     if (have_fb) {
         if (fbcon_init(&fb) == 0) {
-            print_flush();
-            kprintf("[OK] Framebuffer console %ux%u, %u bpp, %ux%u characters\n", fb.width, fb.height,
-                    (uint32_t)fb.bpp, (uint32_t)print_get_cols(), (uint32_t)print_get_rows());
+            boot_info.fb_width = fb.width;
+            boot_info.fb_height = fb.height;
+            boot_info.fb_bpp = fb.bpp;
+            print_boot_status(BOOT_OK, "Display", "%ux%u framebuffer, %ux%u text, Terminus font",
+                              fb.width, fb.height, (uint32_t)print_get_cols(), (uint32_t)print_get_rows() + 1);
         } else {
             serial_puts("[ERR] Unsupported framebuffer format; output on serial only\n");
         }
-    }
-    heap_init(heap_start, heap_size);
-    if (mem_regions > 0) {
-        kprintf("[OK] Memory: %u MiB usable, heap %u MiB at %u MiB\n",
-                (uint32_t)(get_total_memory() >> 20), (uint32_t)(heap_size >> 20), (uint32_t)(heap_start >> 20));
-        if (!memory_range_usable(0x100000, HEAP_LOW))
-            print_warning("RAM at 1-4 MiB (kernel, page tables) is not listed as usable");
     } else {
-        print_warning("No memory map from the bootloader: using a 1 MiB heap");
+        print_boot_status(BOOT_OK, "Display", "VGA text mode, %ux%u",
+                          (uint32_t)print_get_cols(), (uint32_t)print_get_rows() + 1);
     }
 
     expand_scrollback();
-    
+    print_boot_status(BOOT_OK, "Interrupts", "IDT, 8259 PIC, PIT timer at 100 Hz");
+    print_boot_status(BOOT_OK, "Keyboard", "PS/2, US layout");
+
     if (nic_probe_init() == 0) {
         if (nic_get_irq() != NIC_IRQ_NONE)
             idt_set_entry(0x20 + nic_get_irq(), irq_nic_stub, 0x8E);
-        print_str("[NET] NIC driver installed\n");
         net_init();
+        char mac[18];
+        net_fmt_mac(mac, net_get_config()->mac);
+        print_boot_status(BOOT_OK, "Network", "%s, MAC %s", nic_name(), mac);
+    } else {
+        print_boot_status(BOOT_WARN, "Network", "no supported network card (RTL8139, RTL8168)");
     }
 
     mount_filesystem();
-    
     fat32_change_directory("/");
-
-    print_str("Boot complete!\n");
+    report_clock();
 
     __asm__ volatile("sti");
 
     // DHCP needs the timer and NIC interrupts, so it runs after sti.
-    if (net_is_up()) net_configure();
+    if (net_is_up()) {
+        char ip[16], gw[16];
+        int ok = net_configure() == 0;
+        net_fmt_ip(ip, net_get_config()->ip);
+        net_fmt_ip(gw, net_get_config()->gateway);
+        if (ok)
+            print_boot_status(BOOT_OK, "DHCP", "%s, gateway %s", ip, gw);
+        else
+            print_boot_status(BOOT_WARN, "DHCP", "no answer, using %s", ip);
+    }
+
+    print_set_muted(0);
+    print_bootlog_stop();
+    kprintf("\n  Welcome to %s %s. Type ", OS_NAME, OS_VERSION);
+    print_accent("help");
+    print_str(" for commands, ");
+    print_accent("sysinfo");
+    print_str(" for this machine.\n\n");
+
+    statusbar_update(1);
+    keyboard_set_idle_hook(statusbar_idle);
 
     shell_run();
 }

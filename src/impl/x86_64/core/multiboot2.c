@@ -73,3 +73,9 @@ int mb2_get_module(const char *name, uint64_t *start, uint64_t *end) {
     }
     return -1;
 }
+
+/* GRUB passes the EFI system table (tag 11 for 32-bit, 12 for 64-bit EFI)
+ * only when the firmware is UEFI. */
+int mb2_booted_from_uefi(void) {
+    return find_tag(11) != 0 || find_tag(12) != 0;
+}

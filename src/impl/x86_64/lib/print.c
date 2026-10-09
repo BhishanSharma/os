@@ -71,6 +71,20 @@ static int drawn_cursor = -1;
 static int cursor_hidden = 0;
 static int flush_deferred = 0;   // >0 while print_str/kprintf run: redraw once at the end
 
+/* Rows reserved at the top for the status bar (print_reserve_status_line).
+ * `buffer` and num_rows describe only the text area below them; `screen` is
+ * the whole grid, status rows included. */
+static struct Char *screen = (struct Char *)0xb8000;
+static int status_rows = 0;
+
+/* Quiet boot: while muted, output goes only to serial and the boot log. The
+ * boot log keeps everything printed until print_bootlog_stop() (`dmesg`). */
+static int console_muted = 0;
+#define BOOTLOG_SIZE 16384
+static char bootlog[BOOTLOG_SIZE];
+static size_t bootlog_len = 0;
+static int bootlog_on = 1;
+
 void print_batch_begin(void) {
     flush_deferred++;
 }
@@ -90,6 +104,7 @@ void print_use_shadow_buffer(size_t cols, size_t rows) {
     for (int i = 0; i < VISIBLE_ROWS * VISIBLE_COLS; i++)
         shadow[i] = (struct Char){ .character = ' ', .color = color };
     buffer = shadow;
+    screen = shadow;
 }
 
 volatile uint16_t* print_text_cells(void) {
@@ -97,9 +112,9 @@ volatile uint16_t* print_text_cells(void) {
 }
 
 void print_flush(void) {
-    if (buffer != shadow || !fbcon_active()) return;
-    int cursor = (!cursor_hidden && col < NUM_COLS) ? (int)(row * NUM_COLS + col) : -1;
-    for (int i = 0; i < VISIBLE_ROWS * VISIBLE_COLS; i++) {
+    if (screen != shadow || !fbcon_active()) return;
+    int cursor = (!cursor_hidden && col < NUM_COLS) ? (int)((row + status_rows) * NUM_COLS + col) : -1;
+    for (int i = 0; i < (VISIBLE_ROWS + status_rows) * VISIBLE_COLS; i++) {
         int changed = !drawn_valid || shadow[i].character != drawn[i].character ||
                       shadow[i].color != drawn[i].color || i == cursor || i == drawn_cursor;
         if (!changed) continue;
@@ -255,6 +270,8 @@ void print_newLine() {
 
 void print_char(char character) {
     serial_putc(character);   // mirror everything to COM1 (survives crashes)
+    if (bootlog_on && bootlog_len < BOOTLOG_SIZE) bootlog[bootlog_len++] = character;
+    if (console_muted) return;
 
     if (character == '\n') {
         print_newLine();
@@ -486,83 +503,32 @@ void print_box(const char* title, const char* content) {
     print_str("+\n");
 }
 
-void kprintf(const char* fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
+static void kprintf_put(char c, void *ctx) {
+    (void)ctx;
+    print_char(c);
+}
+
+void vkprintf(const char* fmt, va_list args) {
     flush_deferred++;
-
-    while (*fmt) {
-        if (*fmt == '%') {
-            fmt++;
-            switch (*fmt) {
-                case 'd': {
-                    int val = va_arg(args, int);
-                    print_int(val);
-                    break;
-                }
-                case 'u': {
-                    uint32_t val = va_arg(args, uint32_t);
-                    print_uint(val);
-                    break;
-                }
-                case 'l': {
-                    fmt++;
-                    if (*fmt == 'u') {
-                        uint64_t val = va_arg(args, uint64_t);
-                        print_uint64(val);
-                    } else if (*fmt == 'x') {
-                        uint64_t val = va_arg(args, uint64_t);
-                        print_hex64(val);
-                    }
-                    break;
-                }
-                case 'x': {
-                    uint32_t val = va_arg(args, uint32_t);
-                    print_hex(val);
-                    break;
-                }
-                case 'b': {
-                    uint32_t val = va_arg(args, uint32_t);
-                    print_bin(val);
-                    break;
-                }
-                case 's': {
-                    char* str = va_arg(args, char*);
-                    print_str(str);
-                    break;
-                }
-                case 'c': {
-                    char c = (char)va_arg(args, int);
-                    print_char(c);
-                    break;
-                }
-                case '%': {
-                    print_char('%');
-                    break;
-                }
-                default: {
-                    print_char('%');
-                    print_char(*fmt);
-                    break;
-                }
-            }
-        } else {
-            print_char(*fmt);
-        }
-        fmt++;
-    }
-
-    va_end(args);
+    k_vformat(kprintf_put, 0, fmt, args);
     flush_deferred--;
     move_cursor();
 }
 
+/* printf-style; see k_vformat in lib/string.h for the supported formats. */
+void kprintf(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    vkprintf(fmt, args);
+    va_end(args);
+}
+
 static void move_cursor(void) {
-    if (buffer == shadow) {      /* framebuffer console: no VGA cursor registers */
+    if (screen == shadow) {      /* framebuffer console: no VGA cursor registers */
         if (!flush_deferred) print_flush();
         return;
     }
-    uint16_t pos = row * NUM_COLS + col;
+    uint16_t pos = (row + status_rows) * NUM_COLS + col;
 
     outb(VGA_CTRL_REGISTER, 0x0F);
     outb(VGA_DATA_REGISTER, (uint8_t)(pos & 0xFF));
@@ -804,4 +770,101 @@ void get_scrollback_info(int* capacity, int* total_lines, int* view_offset) {
     if (capacity) *capacity = scrollback_capacity;
     if (total_lines) *total_lines = scrollback_total_lines;
     if (view_offset) *view_offset = scrollback_view_offset;
+}
+
+/* ---- Status bar, quiet boot, styled output ------------------------------- */
+
+void print_reserve_status_line(void) {
+    if (status_rows) return;
+    screen = buffer;
+    status_rows = 1;
+    num_rows -= 1;
+    buffer = screen + num_cols;
+    if (row >= num_rows) row = num_rows - 1;
+}
+
+void print_status_line(const char *left, const char *right) {
+    if (!status_rows) return;
+    uint8_t bg = theme_accent;
+    if (screen != shadow) bg &= 7;   // VGA text mode: bit 3 of the background means blink
+    uint8_t attr = PRINT_COLOR_BLACK | (bg << 4);
+    size_t left_len = strlen(left), right_len = strlen(right);
+    for (size_t c = 0; c < num_cols; c++) {
+        char ch = ' ';
+        if (c < left_len) ch = left[c];
+        else if (right_len <= num_cols && c >= num_cols - right_len && num_cols - right_len >= left_len)
+            ch = right[c - (num_cols - right_len)];
+        screen[c] = (struct Char){ .character = (uint8_t)ch, .color = attr };
+    }
+    if (!flush_deferred) print_flush();
+}
+
+void print_set_muted(int muted) {
+    console_muted = muted;
+    if (!muted) move_cursor();
+}
+
+const char *print_get_bootlog(size_t *len) {
+    *len = bootlog_len;
+    return bootlog;
+}
+
+void print_bootlog_stop(void) {
+    bootlog_on = 0;
+}
+
+static void print_colored(uint8_t fg, const char *text) {
+    uint8_t old_color = color;
+    print_set_color(fg, theme_bg);
+    print_str(text);
+    color = old_color;
+}
+
+void print_accent(const char *text) {
+    print_colored(theme_accent, text);
+}
+
+void print_highlight(const char *text) {
+    print_colored(theme_success, text);
+}
+
+void print_shell_prompt(const char *user_host, const char *path) {
+    flush_deferred++;
+    print_colored(theme_success, user_host);
+    print_str(":");
+    print_colored(theme_accent, path);
+    print_str("# ");
+    flush_deferred--;
+    move_cursor();
+}
+
+void print_boot_status(boot_state_t state, const char *label, const char *fmt, ...) {
+    int was_muted = console_muted;
+    console_muted = 0;
+    flush_deferred++;
+
+    print_str("  [");
+    switch (state) {
+        case BOOT_OK:   print_colored(theme_success, "  OK  "); break;
+        case BOOT_WARN: print_colored(theme_warning, " WARN "); break;
+        default:        print_colored(theme_error,   " FAIL "); break;
+    }
+    print_str("] ");
+    char padded[16];
+    k_snprintf(padded, sizeof(padded), "%-12s", label);
+    print_colored(theme_accent, padded);
+
+    va_list args;
+    va_start(args, fmt);
+    vkprintf(fmt, args);
+    va_end(args);
+    print_char('\n');
+
+    flush_deferred--;
+    console_muted = was_muted;
+    move_cursor();
+}
+
+void print_set_theme_colors(void) {
+    color = theme_fg | (theme_bg << 4);
 }

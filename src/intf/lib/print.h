@@ -2,6 +2,7 @@
 #define PRINT_H
 
 #include <stdint.h>
+#include <stdarg.h>
 #include <stddef.h>
 
 // VGA colors
@@ -44,6 +45,7 @@ void print_int(int value);
 void print_hex(uint32_t value);
 void print_newLine(void);
 void kprintf(const char* fmt, ...);
+void vkprintf(const char* fmt, va_list args);
 
 /* Framebuffer console support (see lib/fbcon.h). Call print_use_shadow_buffer()
  * before printing anything when the screen is a framebuffer; the text grid
@@ -90,5 +92,23 @@ void scroll_to_bottom(void);
 void scroll_to_top(void);
 int is_at_bottom(void);
 void get_scrollback_info(int* capacity, int* total_lines, int* view_offset);
+
+/* Status bar: reserve the top screen row (call once, before print_clear), then
+ * draw `left` and right-aligned `right` into it in the theme's accent colour. */
+void print_reserve_status_line(void);
+void print_status_line(const char *left, const char *right);
+
+/* Quiet boot: while muted, output goes only to serial and the boot log. */
+void print_set_muted(int muted);
+const char *print_get_bootlog(size_t *len);   /* everything printed during boot */
+void print_bootlog_stop(void);                /* stop recording (boot finished) */
+
+typedef enum { BOOT_OK, BOOT_WARN, BOOT_FAIL } boot_state_t;
+/* "  [  OK  ] Label        detail" -- shown even while muted. */
+void print_boot_status(boot_state_t state, const char *label, const char *fmt, ...);
+void print_accent(const char *text);      /* theme accent colour */
+void print_highlight(const char *text);   /* theme success colour */
+void print_shell_prompt(const char *user_host, const char *path);
+void print_set_theme_colors(void);         /* back to the theme's text colours */
 
 #endif

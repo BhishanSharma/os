@@ -188,7 +188,7 @@ int rtl8168_probe_init(void) {
     w16(R_IMR, INT_MASK);
 
     ready = 1;
-    kprintf("[NET] RTL8168 IO base=%x IRQ=%s, link %s\n", io_base,
+    kprintf("[NET] RTL8168 IO base=0x%x IRQ=%s, link %s\n", io_base,
             irq_line == NIC_IRQ_NONE ? "none (polling)" : "PIC", rtl8168_link_up() ? "up" : "down");
     if (irq_line != NIC_IRQ_NONE) enable_irq(irq_line);
     return 0;

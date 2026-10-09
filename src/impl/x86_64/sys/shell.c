@@ -16,6 +16,7 @@
 #include "core/exceptions.h"
 #include "net/net.h"
 #include "drivers/rtc.h"
+#include "sys/sysinfo.h"
 
 #define MAX_TEST_ALLOCS 16
 static void *test_allocs[MAX_TEST_ALLOCS];
@@ -38,12 +39,13 @@ void shell_run(void)
     while (1)
     {
         char cwd[256];
+        cwd[0] = 0;
         fat32_get_current_directory(cwd, sizeof(cwd));
-        kprintf("%s\n", cwd);
-        print_prompt("> ");
+        if (print_get_col() != 0) print_str("\n");   // never start the prompt mid-line
+        statusbar_update(1);
+        print_shell_prompt(OS_USER "@" OS_HOSTNAME, cwd[0] ? cwd : "/");
         get_line(line, sizeof(line));
         shell_execute_command(line);
-        print_newLine();
     }
 }
 
@@ -68,6 +70,8 @@ static void cmd_help(void)
     print_str("compile <file>     - compile and run a C file (tiny subset)\n");
     print_str("\n=== System ===\n");
     print_str("help               - show this message\n");
+    print_str("sysinfo            - this machine at a glance (also: neofetch)\n");
+    print_str("dmesg              - full boot log, including driver messages\n");
     print_str("clear              - clear screen\n");
     print_str("echo <text>        - print text\n");
     print_str("uptime             - seconds since boot\n");
@@ -101,6 +105,17 @@ static void cmd_help(void)
     print_str("demo               - show themed message examples\n");
 }
 
+/* "71 B", "31.7 KiB", "2.4 MiB" */
+static void format_size(char *out, size_t size, uint32_t bytes)
+{
+    if (bytes < 1024)
+        k_snprintf(out, size, "%u B", bytes);
+    else if (bytes < 1024 * 1024)
+        k_snprintf(out, size, "%u.%u KiB", bytes / 1024, (bytes % 1024) * 10 / 1024);
+    else
+        k_snprintf(out, size, "%u.%u MiB", bytes >> 20, (bytes % (1024 * 1024)) * 10 / (1024 * 1024));
+}
+
 static void cmd_ls(void)
 {
     // fat32_file_info_t is 268 bytes: 32 of them must not live on the boot stack.
@@ -114,30 +129,55 @@ static void cmd_ls(void)
 
     if (count < 0)
     {
-        print_str("Failed to read directory\n");
+        print_error("Cannot read the directory (no filesystem mounted?)");
     }
     else if (count == 0)
     {
-        print_str("Empty directory\n");
+        print_str("(empty)\n");
     }
     else
     {
-        kprintf("Found %d files:\n", count);
-        print_line();
-
+        int dirs = 0, regular = 0;
+        uint32_t total = 0;
+        char size[16], name[20];
         for (int i = 0; i < count; i++)
         {
             if (files[i].is_directory)
             {
-                kprintf("[DIR]  %s\n", files[i].name);
+                k_snprintf(name, sizeof(name), "%s/", files[i].name);
+                print_accent("  ");
+                k_snprintf(size, sizeof(size), "%-16s", name);
+                print_accent(size);
+                print_str("     <DIR>\n");
+                dirs++;
             }
             else
             {
-                kprintf("[FILE] %s %u bytes\n", files[i].name, files[i].size);
+                format_size(size, sizeof(size), files[i].size);
+                kprintf("  %-16s%10s\n", files[i].name, size);
+                regular++;
+                total += files[i].size;
             }
         }
+        format_size(size, sizeof(size), total);
+        kprintf("\n  %d file%s, %d director%s, %s\n", regular, regular == 1 ? "" : "s",
+                dirs, dirs == 1 ? "y" : "ies", size);
     }
     kfree(files);
+}
+
+/* `dmesg`: everything the kernel printed during boot, including the driver
+ * messages the boot screen hides. */
+static void cmd_dmesg(void)
+{
+    size_t len;
+    const char *log = print_get_bootlog(&len);
+    print_batch_begin();
+    for (size_t i = 0; i < len; i++)
+        print_char(log[i]);
+    print_batch_end();
+    if (len && log[len - 1] != '\n')
+        print_str("\n");
 }
 
 static void cmd_mount(const char *which)
@@ -303,7 +343,12 @@ static void cmd_crash(const char *what)
 }
 
 int shell_execute_command(const char* line) {
-    if (strcmp(line, "help") == 0)
+    while (*line == ' ') line++;
+    if (*line == '\0')
+    {
+        return 0;   // empty line: just show a new prompt
+    }
+    else if (strcmp(line, "help") == 0)
     {
         cmd_help();
     }
@@ -314,6 +359,14 @@ int shell_execute_command(const char* line) {
     else if (strcmp(line, "clear") == 0)
     {
         print_clear();
+    }
+    else if (strcmp(line, "sysinfo") == 0 || strcmp(line, "neofetch") == 0)
+    {
+        sysinfo_print();
+    }
+    else if (strcmp(line, "dmesg") == 0)
+    {
+        cmd_dmesg();
     }
     else if (strcmp(line, "uptime") == 0)
     {
@@ -350,7 +403,7 @@ int shell_execute_command(const char* line) {
         void *frame = alloc_frame();
         if (frame)
         {
-            kprintf("Allocated frame at 0x%x\n", frame);
+            kprintf("Allocated frame at 0x%lx\n", (uint64_t)frame);
         }
         else
         {
@@ -375,8 +428,8 @@ int shell_execute_command(const char* line) {
             {
                 test_allocs[test_alloc_count] = ptr;
                 test_alloc_sizes[test_alloc_count] = size;
-                kprintf("Allocated %d bytes at 0x%x [slot %d]\n",
-                        size, ptr, test_alloc_count);
+                kprintf("Allocated %d bytes at 0x%lx [slot %d]\n",
+                        size, (uint64_t)ptr, test_alloc_count);
                 test_alloc_count++;
             }
             else
@@ -394,8 +447,8 @@ int shell_execute_command(const char* line) {
         else
         {
             test_alloc_count--;
-            kprintf("Freeing 0x%x [slot %d]\n",
-                    test_allocs[test_alloc_count], test_alloc_count);
+            kprintf("Freeing 0x%lx [slot %d]\n",
+                    (uint64_t)test_allocs[test_alloc_count], test_alloc_count);
             kfree(test_allocs[test_alloc_count]);
             test_allocs[test_alloc_count] = 0;
         }
@@ -413,7 +466,7 @@ int shell_execute_command(const char* line) {
         }
         else
         {
-            kprintf("Freeing 0x%x [slot %d]\n", test_allocs[idx], idx);
+            kprintf("Freeing 0x%lx [slot %d]\n", (uint64_t)test_allocs[idx], idx);
             kfree(test_allocs[idx]);
             test_allocs[idx] = 0;
         }
@@ -425,8 +478,8 @@ int shell_execute_command(const char* line) {
         {
             if (test_allocs[i])
             {
-                kprintf("[%d] 0x%x (%d bytes)\n",
-                        i, test_allocs[i], test_alloc_sizes[i]);
+                kprintf("[%d] 0x%lx (%d bytes)\n",
+                        i, (uint64_t)test_allocs[i], test_alloc_sizes[i]);
             }
             else
             {
@@ -495,13 +548,15 @@ int shell_execute_command(const char* line) {
 
                     for (int i = 0; i < bytes; i += 16)
                     {
-                        kprintf("%x: ", i);
+                        kprintf("%04x: ", i);
 
                         // Hex values
                         for (int j = 0; j < 16 && i + j < bytes; j++)
                         {
-                            kprintf("%x ", buffer[i + j]);
+                            kprintf("%02X ", buffer[i + j]);
                         }
+                        for (int j = bytes - i; j < 16; j++)
+                            print_str("   ");   // keep the text column aligned
 
                         print_str(" | ");
 
@@ -566,7 +621,7 @@ int shell_execute_command(const char* line) {
                 }
                 else
                 {
-                    kprintf("Invalid signature: %x %x\n", buffer[510], buffer[511]);
+                    kprintf("Invalid signature: 0x%02X 0x%02X\n", buffer[510], buffer[511]);
                 }
 
                 // Show OEM name
@@ -605,7 +660,7 @@ int shell_execute_command(const char* line) {
                 print_str("\nFirst 32 bytes:\n");
                 for (int i = 0; i < 32; i++)
                 {
-                    kprintf("%x ", buffer[i]);
+                    kprintf("%02X ", buffer[i]);
                     if ((i + 1) % 16 == 0)
                         print_str("\n");
                 }
@@ -635,7 +690,7 @@ int shell_execute_command(const char* line) {
                 print_str("Success! First 64 bytes:\n");
                 for (int i = 0; i < 64; i++)
                 {
-                    kprintf("%x ", buffer[i]);
+                    kprintf("%02X ", buffer[i]);
                     if ((i + 1) % 16 == 0)
                         print_str("\n");
                 }

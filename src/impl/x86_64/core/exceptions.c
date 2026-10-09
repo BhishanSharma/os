@@ -160,7 +160,7 @@ static void describe_gp(uint64_t err) {
 void exception_handler(struct exc_frame* f) {
     // Debug and breakpoint traps are not errors: report and resume.
     if (f->vector == 1 || f->vector == 3) {
-        kprintf("[EXC] %s at rip=%lx\n", exc_name[f->vector], f->rip);
+        kprintf("[EXC] %s at rip=0x%lx\n", exc_name[f->vector], f->rip);
         return;
     }
 

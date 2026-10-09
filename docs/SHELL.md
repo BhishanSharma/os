@@ -1,7 +1,15 @@
 # Using Terminal OS
 
-The prompt shows the current directory on one line and `>` on the next.
-Up/Down arrows browse command history; Shift+Up/Down scroll the screen.
+The prompt is `root@terminal-os:<directory>#`. Up/Down arrows browse command history;
+Shift+Up/Down scroll the screen.
+
+The top row is a status bar: OS version, IP address, kernel heap in use, the disk the files
+are on, uptime, and the date and time (IST). It updates every second while the shell or the
+editor waits for a key.
+
+At boot the screen shows the logo and one `[  OK  ]` / `[ WARN ]` / `[ FAIL ]` line per
+subsystem (CPU, memory, display, interrupts, keyboard, network, storage, clock, DHCP). The
+detailed driver messages go to the serial port and to the boot log: `dmesg` prints it.
 
 ## Commands
 
@@ -30,6 +38,8 @@ Up/Down arrows browse command history; Shift+Up/Down scroll the screen.
 | Command                    | Description                                              |
 | -------------------------- | -------------------------------------------------------- |
 | `help`                     | List every command                                       |
+| `sysinfo` / `neofetch`     | OS, boot mode (UEFI/BIOS), CPU model, memory, display, network, disk, theme, time |
+| `dmesg`                    | The full boot log, including the driver messages hidden at boot |
 | `clear`                    | Clear the screen                                         |
 | `echo <text>`              | Print text                                               |
 | `uptime`                   | Seconds since boot                                       |

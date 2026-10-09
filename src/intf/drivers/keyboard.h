@@ -27,4 +27,9 @@ void history_add(const char* cmd);
 const char* history_prev(void);
 const char* history_next(void);
 
+/* Waiting for a key: run the idle hook (e.g. redraw the status bar clock),
+ * then halt until the next interrupt. */
+void keyboard_set_idle_hook(void (*hook)(void));
+void keyboard_idle(void);
+
 #endif

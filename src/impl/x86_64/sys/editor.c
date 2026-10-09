@@ -244,7 +244,7 @@ void editor_open(const char* filename) {
     while (1) {
         int c = get_char();
         if (!c) {
-            __asm__ volatile("hlt");
+            keyboard_idle();
             continue;
         }
 
