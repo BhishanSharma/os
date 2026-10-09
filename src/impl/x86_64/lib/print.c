@@ -3,6 +3,7 @@
 #include <stdarg.h>
 #include "lib/string.h"
 #include "lib/serial.h"
+#include "lib/fbcon.h"
 
 #define VGA_CTRL_REGISTER 0x3D4
 #define VGA_DATA_REGISTER 0x3D5
@@ -10,9 +11,18 @@
 
 // Scrollback buffer configuration
 #define EARLY_SCROLLBACK_LINES 50   // Small buffer for early boot
-#define MAX_SCROLLBACK_LINES 2000   // After heap initialization
-#define VISIBLE_ROWS 25
-#define VISIBLE_COLS 80
+#define SCROLLBACK_CELLS (2000 * 80) // After heap initialization: 2000 lines at 80 columns
+
+// Screen grid: 80x25 in VGA text mode; on a framebuffer, whatever fits the screen
+// (print_use_shadow_buffer). Read through these macros everywhere.
+#define MAX_COLS 256
+#define MAX_ROWS 100
+static size_t num_cols = 80;
+static size_t num_rows = 25;
+#define VISIBLE_ROWS ((int)num_rows)
+#define VISIBLE_COLS ((int)num_cols)
+#define NUM_COLS num_cols
+#define NUM_ROWS num_rows
 
 extern void outb(uint16_t port, uint8_t val);
 static void move_cursor(void);
@@ -26,8 +36,6 @@ static uint8_t theme_error = PRINT_COLOR_LIGHT_RED;
 static uint8_t theme_success = PRINT_COLOR_LIGHT_GREEN;
 static uint8_t theme_warning = PRINT_COLOR_YELLOW;
 
-const static size_t NUM_COLS = VISIBLE_COLS;
-const static size_t NUM_ROWS = VISIBLE_ROWS;
 
 struct Char {
     uint8_t character;
@@ -35,10 +43,12 @@ struct Char {
 };
 
 // Small static buffer for early boot
-static struct Char early_buffer[EARLY_SCROLLBACK_LINES][VISIBLE_COLS];
+static struct Char early_buffer[EARLY_SCROLLBACK_LINES * MAX_COLS];
 
 // Pointer to current scrollback buffer (starts with early_buffer)
-static struct Char (*scrollback_buffer)[VISIBLE_COLS] = early_buffer;
+// Scrollback lines are num_cols cells wide; SB(line, col) addresses one cell.
+static struct Char *scrollback_buffer = early_buffer;
+#define SB(line, c) scrollback_buffer[(size_t)(line) * num_cols + (size_t)(c)]
 static int scrollback_capacity = EARLY_SCROLLBACK_LINES;
 static int scrollback_write_line = 0;
 static int scrollback_view_offset = 0;
@@ -49,6 +59,45 @@ struct Char* buffer = (struct Char*) 0xb8000;
 size_t col = 0;
 size_t row = 0;
 uint8_t color = PRINT_COLOR_WHITE | (PRINT_COLOR_BLUE << 4);
+
+/* Framebuffer mode: the 80x25 grid lives in RAM (`shadow`) and print_flush()
+ * draws the cells that changed since the last flush. `drawn` is what is on
+ * screen; `drawn_cursor` is the cell index the cursor was drawn in. */
+static struct Char shadow[MAX_ROWS * MAX_COLS];
+static struct Char drawn[MAX_ROWS * MAX_COLS];
+static int drawn_valid = 0;
+static int drawn_cursor = -1;
+static int cursor_hidden = 0;
+
+void print_hide_cursor(void) {
+    cursor_hidden = 1;
+}
+
+void print_use_shadow_buffer(size_t cols, size_t rows) {
+    num_cols = cols < 40 ? 40 : (cols > MAX_COLS ? MAX_COLS : cols);
+    num_rows = rows < 10 ? 10 : (rows > MAX_ROWS ? MAX_ROWS : rows);
+    for (int i = 0; i < VISIBLE_ROWS * VISIBLE_COLS; i++)
+        shadow[i] = (struct Char){ .character = ' ', .color = color };
+    buffer = shadow;
+}
+
+volatile uint16_t* print_text_cells(void) {
+    return (volatile uint16_t*)buffer;
+}
+
+void print_flush(void) {
+    if (buffer != shadow || !fbcon_active()) return;
+    int cursor = (!cursor_hidden && col < NUM_COLS) ? (int)(row * NUM_COLS + col) : -1;
+    for (int i = 0; i < VISIBLE_ROWS * VISIBLE_COLS; i++) {
+        int changed = !drawn_valid || shadow[i].character != drawn[i].character ||
+                      shadow[i].color != drawn[i].color || i == cursor || i == drawn_cursor;
+        if (!changed) continue;
+        fbcon_draw_cell(i % VISIBLE_COLS, i / VISIBLE_COLS, shadow[i].character, shadow[i].color, i == cursor);
+        drawn[i] = shadow[i];
+    }
+    drawn_valid = 1;
+    drawn_cursor = cursor;
+}
 
 void clear_row(int row) {
     struct Char empty = {
@@ -64,8 +113,8 @@ void clear_row(int row) {
 void init_scrollback(void) {
     for (int i = 0; i < scrollback_capacity; i++) {
         for (int j = 0; j < VISIBLE_COLS; j++) {
-            scrollback_buffer[i][j].character = ' ';
-            scrollback_buffer[i][j].color = color;
+            SB(i, j).character = ' ';
+            SB(i, j).color = color;
         }
     }
     scrollback_write_line = 0;
@@ -83,8 +132,9 @@ void expand_scrollback(void) {
     }
     
     // Allocate larger buffer from heap
-    size_t total_size = MAX_SCROLLBACK_LINES * VISIBLE_COLS * sizeof(struct Char);
-    struct Char (*new_buffer)[VISIBLE_COLS] = (struct Char (*)[VISIBLE_COLS])kmalloc(total_size);
+    int new_lines = (int)(SCROLLBACK_CELLS / num_cols);   // same memory budget at any width
+    size_t total_size = (size_t)new_lines * num_cols * sizeof(struct Char);
+    struct Char *new_buffer = (struct Char *)kmalloc(total_size);
     
     if (new_buffer == NULL) {
         print_warning("Failed to expand scrollback buffer - kmalloc returned NULL");
@@ -97,24 +147,32 @@ void expand_scrollback(void) {
     
     for (int i = 0; i < lines_to_copy; i++) {
         for (int j = 0; j < VISIBLE_COLS; j++) {
-            new_buffer[i][j] = scrollback_buffer[i][j];
+            new_buffer[(size_t)i * num_cols + j] = SB(i, j);
         }
     }
     
     // Initialize rest of new buffer
-    for (int i = lines_to_copy; i < MAX_SCROLLBACK_LINES; i++) {
+    for (int i = lines_to_copy; i < new_lines; i++) {
         for (int j = 0; j < VISIBLE_COLS; j++) {
-            new_buffer[i][j].character = ' ';
-            new_buffer[i][j].color = color;
+            new_buffer[(size_t)i * num_cols + j].character = ' ';
+            new_buffer[(size_t)i * num_cols + j].color = color;
         }
     }
     
     // Switch to new buffer
     scrollback_buffer = new_buffer;
-    scrollback_capacity = MAX_SCROLLBACK_LINES;
+    scrollback_capacity = new_lines;
     scrollback_expanded = 1;
-    
-    print_success("Scrollback expanded to 2000 lines");
+
+    char msg[48] = "Scrollback expanded to ";
+    size_t n = strlen(msg);
+    char digits[8]; int d = 0;
+    do { digits[d++] = (char)('0' + new_lines % 10); new_lines /= 10; } while (new_lines);
+    while (d) msg[n++] = digits[--d];
+    const char *tail = " lines";
+    while (*tail) msg[n++] = *tail++;
+    msg[n] = 0;
+    print_success(msg);
 }
 
 // Refresh the visible display from scrollback buffer
@@ -132,7 +190,7 @@ static void refresh_display(void) {
     for (int display_row = 0; display_row < VISIBLE_ROWS; display_row++) {
         int buffer_line = (start_line + display_row) % scrollback_capacity;
         for (int c = 0; c < VISIBLE_COLS; c++) {
-            buffer[c + VISIBLE_COLS * display_row] = scrollback_buffer[buffer_line][c];
+            buffer[c + VISIBLE_COLS * display_row] = SB(buffer_line, c);
         }
     }
     
@@ -152,7 +210,7 @@ void print_clear() {
 void print_newLine() {
     // Save current line to scrollback
     for (size_t c = 0; c < NUM_COLS; c++) {
-        scrollback_buffer[scrollback_write_line][c] = buffer[c + NUM_COLS * row];
+        SB(scrollback_write_line, c) = buffer[c + NUM_COLS * row];
     }
     
     // Move to next line in scrollback
@@ -341,6 +399,14 @@ void print_centered(const char* str) {
     print_newLine();
 }
 
+size_t print_get_cols(void) {
+    return num_cols;
+}
+
+size_t print_get_rows(void) {
+    return num_rows;
+}
+
 size_t print_get_row(void) {
     return row;
 }
@@ -471,6 +537,10 @@ void kprintf(const char* fmt, ...) {
 }
 
 static void move_cursor(void) {
+    if (buffer == shadow) {      /* framebuffer console: no VGA cursor registers */
+        print_flush();
+        return;
+    }
     uint16_t pos = row * NUM_COLS + col;
 
     outb(VGA_CTRL_REGISTER, 0x0F);

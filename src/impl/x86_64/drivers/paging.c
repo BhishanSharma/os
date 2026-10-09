@@ -11,6 +11,19 @@ static page_entry_t* pml4;
 #define PAGE_TABLE_AREA 0x300000
 static uint64_t next_table = PAGE_TABLE_AREA;
 
+/* Extra physical ranges (e.g. the framebuffer) to identity-map in paging_init. */
+#define MAX_EXTRA_REGIONS 4
+static struct { uint64_t base, size; } extra_regions[MAX_EXTRA_REGIONS];
+static int extra_count;
+
+void paging_add_identity_region(uint64_t base, uint64_t size) {
+    if (extra_count < MAX_EXTRA_REGIONS && size) {
+        extra_regions[extra_count].base = base;
+        extra_regions[extra_count].size = size;
+        extra_count++;
+    }
+}
+
 static void* alloc_table() {
     void* t = (void*)next_table;
     next_table += 0x1000;
@@ -47,6 +60,14 @@ void paging_init(uint64_t phys_base, uint64_t phys_end,
     // Identity map heap
     for (uint64_t addr = heap_start; addr < heap_start + heap_size; addr += PAGE_SIZE) {
         map_page(addr, addr, PAGE_PRESENT | PAGE_RW);
+    }
+
+    // Identity map registered device regions (framebuffer)
+    for (int i = 0; i < extra_count; i++) {
+        uint64_t start = extra_regions[i].base & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t end = extra_regions[i].base + extra_regions[i].size;
+        for (uint64_t addr = start; addr < end; addr += PAGE_SIZE)
+            map_page(addr, addr, PAGE_PRESENT | PAGE_RW);
     }
 
     // Identity map ALL page tables (including those we just allocated)

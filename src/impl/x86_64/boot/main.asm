@@ -5,6 +5,7 @@ section .text
     bits 32
 start:
     mov esp, stack_top
+    mov [multiboot_info], ebx   ; multiboot2 info (framebuffer etc.), read by kernel_main
 
     call check_multiboot
     call ckeck_cpuid
@@ -27,17 +28,26 @@ check_multiboot:
     mov al, "M"
     jmp error
 
+; Identity-map the first 4 GiB with 2 MiB pages (four page directories), so the
+; multiboot2 info and a UEFI framebuffer below 4 GiB are reachable before
+; paging_init() builds the real tables.
 setup_page_tables:
     mov eax, page_table_l3
     or eax, 0b11
     mov [page_table_l4], eax
 
-    mov eax, page_table_l2
-    or eax, 0b11
-    mov [page_table_l3], eax
-    
     mov ecx, 0
+.l3_loop:
+    mov eax, ecx
+    shl eax, 12                 ; page_table_l2 + ecx * 4096
+    add eax, page_table_l2
+    or eax, 0b11
+    mov [page_table_l3 + ecx * 8], eax
+    inc ecx
+    cmp ecx, 4
+    jne .l3_loop
 
+    mov ecx, 0
 .loop:
     mov eax, 0x200000
     mul ecx
@@ -45,7 +55,7 @@ setup_page_tables:
     mov [page_table_l2 + ecx * 8], eax
 
     inc ecx
-    cmp ecx, 512
+    cmp ecx, 2048
     jne .loop
     ret
     
@@ -111,6 +121,11 @@ check_long_mode:
     mov al, "L"
     jmp error
 
+section .data
+global multiboot_info
+multiboot_info:
+    dd 0
+
 section .bss
     align 4096
 page_table_l4:
@@ -118,7 +133,7 @@ page_table_l4:
 page_table_l3:
     resb 4096
 page_table_l2:
-    resb 4096
+    resb 4096 * 4
 ; One page that paging_init() leaves unmapped: running off the bottom of the
 ; stack then raises a page fault (-> double fault -> panic screen) instead of
 ; silently overwriting whatever lies below.

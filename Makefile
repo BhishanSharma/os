@@ -189,7 +189,7 @@ $(KERNEL_ISO): $(KERNEL_BIN) $(ISO_SRC)/boot/grub/grub.cfg
 	cp -r $(ISO_SRC)/. $(ISO_STAGE)/
 	mkdir -p $(ISO_STAGE)/boot
 	cp $(KERNEL_BIN) $(ISO_STAGE)/boot/kernel.bin
-	grub-mkrescue /usr/lib/grub/i386-pc -o $@ $(ISO_STAGE)
+	grub-mkrescue -o $@ $(ISO_STAGE)   # BIOS + UEFI (all installed GRUB platforms)
 
 
 # ---- Size -----------------------------------------------------------------

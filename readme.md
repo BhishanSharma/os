@@ -73,8 +73,15 @@ make test-net        host-side unit test of the ARP/IP/ICMP code (no QEMU needed
 
 ## Hardware (real or virtual)
 
-x86_64 CPU, BIOS boot (not UEFI), VGA text-mode display, PS/2 keyboard
-(QEMU provides one), and for storage an IDE/ATA disk. QEMU is the supported way to run it.
+x86_64 CPU, BIOS or UEFI boot, PS/2 keyboard (QEMU and most laptops provide one), and for
+storage an IDE/ATA disk. The ISO boots both ways; the console is drawn into the framebuffer GRUB
+provides (Terminus 8x16 font, scaled up on large screens, as many columns and rows as fit), falling
+back to 80x25 VGA text mode without one. Network: RTL8139 (QEMU) or RTL8168/8111 (most PCs; not yet tested on hardware).
+QEMU is the supported way to run it; `.\build.ps1 -Uefi` boots it with UEFI firmware.
+
+To try a real UEFI PC: write `dist\x86_64\kernel.iso` to a USB stick in DD/raw mode (e.g. Rufus
+"DD Image"), turn off Secure Boot (GRUB here is unsigned) and boot from USB. Without an
+IDE/ATA disk the shell starts without a filesystem.
 
 ---
 

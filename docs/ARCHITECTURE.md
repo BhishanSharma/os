@@ -32,10 +32,11 @@ included with a relative path.
 ## Boot flow
 
 ```
-BIOS -> GRUB -> loads /boot/kernel.bin at 1 MiB (Multiboot2, header.asm)
+BIOS or UEFI -> GRUB -> loads /boot/kernel.bin at 1 MiB (Multiboot2, header.asm)
   start            (main.asm, 32-bit)
+    save the multiboot2 info pointer (EBX) in `multiboot_info`
     check multiboot magic, CPUID, long-mode support   (error codes 'M', 'C', 'L' on screen)
-    build page tables: PML4 -> PDPT -> PD, 512 x 2 MiB pages = first 1 GiB identity-mapped
+    build page tables: PML4 -> PDPT -> 4 PDs, 2048 x 2 MiB pages = first 4 GiB identity-mapped
     enable PAE + long mode + paging, load a minimal GDT, far-jump
   long_mode_start  (main64.asm, 64-bit)
     zero the data segment registers, call kernel_main
@@ -44,15 +45,17 @@ BIOS -> GRUB -> loads /boot/kernel.bin at 1 MiB (Multiboot2, header.asm)
 
 `kernel_main` then, in order:
 
-0. `serial_init()` (all output is mirrored to COM1 from here on) and `gdt_init()` (GDT + TSS).
+0. `serial_init()` (all output is mirrored to COM1 from here on). If GRUB provided a graphics
+   framebuffer (header.asm asks for one; GRUB provides it under both UEFI and BIOS), the
+   text grid moves to RAM, sized to fill the screen (`fbcon_grid_size`), and the framebuffer is registered for paging. Then `gdt_init()`.
 1. Sets the colour theme, clears the screen, prints the banner.
 2. `idt_init()` (which also installs the CPU exception handlers), `pic_remap()`; installs the IRQ0 (timer) and IRQ1 (keyboard) stubs.
 3. `init_keyboard()`, `timer_init()` (PIT at 100 Hz), `memory_init()`.
-4. `paging_init()` builds a **new** set of page tables (identity map of the kernel image `kernel_start`..`kernel_end`, heap, page tables and VGA memory) and switches to them; then `heap_init()`.
+4. `paging_init()` builds a **new** set of page tables (identity map of the kernel image `kernel_start`..`kernel_end`, heap, page tables, VGA memory and the framebuffer, if any) and switches to them. With a framebuffer, `fbcon_init()` then starts the console (`lib/fbcon.c`, font from `scripts/gen-font.py`). Then `heap_init()`.
 5. `expand_scrollback()`: grows the scrollback buffer to 2000 lines.
-6. Probes for an RTL8139 NIC; if found, installs its IRQ handler.
+6. `nic_probe_init()`: RTL8139 or RTL8168; installs its IRQ handler if it has a PIC line.
 7. `ata_init()` then `fat32_init(0)` and `cd /`.
-8. `sti` (enable interrupts) and `shell_run()`, which never returns.
+8. `sti` (enable interrupts), DHCP (`net_configure()`), then `shell_run()`, which never returns.
 
 ## Memory map (physical == virtual, identity mapped)
 
@@ -107,7 +110,7 @@ use `build.ps1 -Log` for those.
 
 | Driver     | File                       | Notes                                                           |
 | ---------- | -------------------------- | --------------------------------------------------------------- |
-| Display    | `lib/print.c`              | VGA text mode, themes, scrollback, `kprintf` (mirrors to serial) |
+| Display    | `lib/print.c`, `lib/fbcon.c` | Text grid: 80x25 in VGA memory or, on a framebuffer, screen-sized in RAM and drawn by `fbcon`; themes, scrollback, `kprintf` (mirrors to serial) |
 | Serial     | `lib/serial.c`             | COM1 115200 8N1, polled; mirrors all kernel output              |
 | Keyboard   | `drivers/keyboard.c`       | Scancode set 1, line input with history, shift/ctrl             |
 | Timer      | `drivers/timer.c`          | PIT channel 0 at 100 Hz, `get_tick`, `sleep(ms)`                |

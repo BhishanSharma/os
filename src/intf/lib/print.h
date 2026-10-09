@@ -45,6 +45,15 @@ void print_hex(uint32_t value);
 void print_newLine(void);
 void kprintf(const char* fmt, ...);
 
+/* Framebuffer console support (see lib/fbcon.h). Call print_use_shadow_buffer()
+ * before printing anything when the screen is a framebuffer; the text grid
+ * then lives in RAM and print_flush() draws what changed. */
+void print_use_shadow_buffer(size_t cols, size_t rows);   /* grid size, see fbcon_grid_size */
+void print_flush(void);
+void print_hide_cursor(void);   /* framebuffer console: stop drawing the cursor (panic screen) */
+/* The active grid as VGA cells (character | attribute << 8), print_get_cols() wide. */
+volatile uint16_t* print_text_cells(void);
+
 void print_uint(uint32_t value);
 void print_uint64(uint64_t value);
 void print_hex64(uint64_t value);
@@ -57,6 +66,8 @@ void print_box(const char* title, const char* content);
 size_t print_get_row(void);
 size_t print_get_col(void);
 void print_set_pos(size_t col, size_t row);
+size_t print_get_cols(void);   /* text grid size: 80x25 in VGA text mode */
+size_t print_get_rows(void);
 
 // New theme functions
 void print_set_theme(color_theme_t theme);

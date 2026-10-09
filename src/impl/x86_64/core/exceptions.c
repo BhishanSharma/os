@@ -2,7 +2,8 @@
 //
 // The panic screen deliberately does NOT use kprintf/print.c, the heap or the
 // scrollback: the fault may well have been caused by one of them. It writes
-// straight to VGA memory (0xB8000) and to COM1.
+// straight to the screen's cell grid (VGA memory, or the RAM grid that
+// print_flush() draws on a framebuffer) and to COM1.
 
 #include "core/exceptions.h"
 #include "core/idt.h"
@@ -15,9 +16,9 @@ extern void* isr_stub_table[32];             // exc_stubs.asm
 extern char kernel_start[];
 extern char stack_guard[];                   // unmapped page below the boot stack
 
-#define VGA        ((volatile uint16_t*)0xB8000)
-#define COLS       80
-#define ROWS       25
+#define VGA        (print_text_cells())
+#define COLS       ((int)print_get_cols())   // 80x25, or larger on a framebuffer
+#define ROWS       ((int)print_get_rows())
 #define ATTR_PANIC 0x4F                      // white on red
 #define ATTR_TITLE 0xF4                      // red on white
 
@@ -49,6 +50,7 @@ static void out_char(char c) {
     if (cur_col >= COLS) { cur_col = 0; cur_row++; }
     if (cur_row < ROWS) VGA[cur_row * COLS + cur_col] = (uint16_t)((ATTR_PANIC << 8) | (uint8_t)c);
     cur_col++;
+    print_flush();
 }
 
 static void out_str(const char* s) { while (*s) out_char(*s++); }
@@ -68,6 +70,7 @@ static void out_reg(const char* name, uint64_t v) {
 }
 
 static void screen_begin(void) {
+    print_hide_cursor();
     for (int i = 0; i < COLS * ROWS; i++) VGA[i] = (uint16_t)((ATTR_PANIC << 8) | ' ');
     cur_row = 0; cur_col = 0;
     // Title bar
@@ -77,6 +80,7 @@ static void screen_begin(void) {
     for (int i = 0; i < COLS; i++) VGA[i] = (uint16_t)((ATTR_TITLE << 8) | ' ');
     for (int i = 0; title[i]; i++) VGA[start + i] = (uint16_t)((ATTR_TITLE << 8) | (uint8_t)title[i]);
     cur_row = 2;
+    print_flush();
 }
 
 static uint64_t read_cr(int n) {

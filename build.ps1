@@ -8,6 +8,7 @@
 #   .\build.ps1 -Gdb        debug symbols; QEMU waits for gdb on localhost:1234
 #   .\build.ps1 -Serial     mirror kernel output (boot log, panic reports) to this console
 #   .\build.ps1 -Log        run QEMU with -no-reboot -d int,cpu_reset -D qemu.log
+#   .\build.ps1 -Uefi       boot with QEMU's UEFI firmware (like a modern PC) instead of BIOS
 #
 # First run only: if PowerShell blocks the script, run
 #   Unblock-File .\build.ps1
@@ -17,7 +18,8 @@ param(
     [switch]$NewDisk,
     [switch]$Gdb,
     [switch]$Serial,
-    [switch]$Log
+    [switch]$Log,
+    [switch]$Uefi
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,13 +33,12 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { Fail "docker not 
 docker info *> $null
 if ($LASTEXITCODE -ne 0) { Fail "Docker isn't running. Start Docker Desktop and retry." }
 
-# ---- Build image (once) ----------------------------------------------------
+# ---- Build image -----------------------------------------------------------
+# Docker's layer cache makes this instant unless buildenv/Dockerfile changed.
 docker image inspect myos-buildenv *> $null
-if ($LASTEXITCODE -ne 0) {
-    Step "Building Docker image (first time only, takes a few minutes)..."
-    docker build buildenv -t myos-buildenv
-    if ($LASTEXITCODE -ne 0) { Fail "docker build failed." }
-}
+if ($LASTEXITCODE -ne 0) { Step "Building Docker image (first time only, takes a few minutes)..." }
+docker build -q buildenv -t myos-buildenv > $null
+if ($LASTEXITCODE -ne 0) { Fail "docker build failed." }
 
 # ---- Disk image ------------------------------------------------------------
 if ($NewDisk -or -not (Test-Path disk.img)) {
@@ -75,6 +76,12 @@ $qemuArgs = @(
 )
 if ($Gdb) { $qemuArgs += @("-s", "-S"); Step "QEMU is waiting for gdb on localhost:1234" }
 if ($Serial) { $qemuArgs += @("-serial", "stdio") }
+if ($Uefi) {
+    $ovmf = Join-Path (Split-Path (Get-Command qemu-system-x86_64).Source) "share\edk2-x86_64-code.fd"
+    if (-not (Test-Path $ovmf)) { Fail "UEFI firmware not found: $ovmf" }
+    $qemuArgs += @("-drive", "if=pflash,format=raw,readonly=on,file=$ovmf")
+    Step "Booting with UEFI firmware"
+}
 if ($Log)   { $qemuArgs += @("-no-reboot", "-d", "int,cpu_reset", "-D", "qemu.log"); Step "Logging to qemu.log" }
 
 Step "Starting QEMU..."

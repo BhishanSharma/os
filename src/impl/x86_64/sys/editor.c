@@ -124,7 +124,7 @@ static void editor_display() {
     print_set_color(PRINT_COLOR_BLACK, PRINT_COLOR_CYAN);
     print_str(" EDIT: ");
     print_str(current_filename);
-    for (int i = strlen(current_filename) + 7; i < 80; i++) {
+    for (int i = strlen(current_filename) + 7; i < (int)print_get_cols(); i++) {
         print_char(' ');
     }
     print_set_color(PRINT_COLOR_LIGHT_GRAY, PRINT_COLOR_BLACK);
@@ -148,10 +148,11 @@ static void editor_display() {
     }
     
     // Footer
-    print_set_pos(0, 24);
+    const char* footer = " ^S Save | ^Q Quit | ^N New Line | ^D Delete Line | ^E Edit Line ";
+    print_set_pos(0, print_get_rows() - 1);
     print_set_color(PRINT_COLOR_BLACK, PRINT_COLOR_CYAN);
-    print_str(" ^S Save | ^Q Quit | ^N New Line | ^D Delete Line | ^E Edit Line ");
-    for (int i = 65; i < 80; i++) {
+    print_str(footer);
+    for (int i = strlen(footer); i < (int)print_get_cols(); i++) {
         print_char(' ');
     }
     print_set_color(PRINT_COLOR_LIGHT_GRAY, PRINT_COLOR_BLACK);
@@ -236,7 +237,7 @@ void editor_open(const char* filename) {
         
         if (c == 5) { // Ctrl-E - Edit current line
             if (current_line < line_count) {
-                print_set_pos(0, 22);
+                print_set_pos(0, print_get_rows() - 3);
                 print_set_color(PRINT_COLOR_YELLOW, PRINT_COLOR_BLACK);
                 print_str("Edit line: ");
                 

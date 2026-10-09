@@ -14,4 +14,8 @@
 void paging_init(uint64_t phys_base, uint64_t phys_end, uint64_t heap_start, uint64_t heap_size);
 void map_page(uint64_t virt, uint64_t phys, uint64_t flags);
 
+/* Register a physical range (e.g. the framebuffer) for paging_init() to identity-map.
+ * Call before paging_init(). */
+void paging_add_identity_region(uint64_t base, uint64_t size);
+
 #endif

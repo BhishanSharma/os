@@ -16,6 +16,8 @@
 #include "core/gdt.h"
 #include "lib/serial.h"
 #include "net/net.h"
+#include "core/multiboot2.h"
+#include "lib/fbcon.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
@@ -35,6 +37,17 @@ extern char kernel_end[];
 
 void kernel_main() {
     serial_init();      // mirror all output to COM1 from the very first line
+
+    // UEFI has no VGA text mode: if GRUB gave us a graphics framebuffer, keep the
+    // text grid in RAM until the framebuffer is mapped (after paging_init).
+    fb_info_t fb;
+    int have_fb = mb2_get_framebuffer(&fb) == 0;
+    if (have_fb) {
+        uint32_t cols, rows;
+        fbcon_grid_size(&fb, &cols, &rows);
+        print_use_shadow_buffer(cols, rows);
+        paging_add_identity_region(fb.addr, (uint64_t)fb.pitch * fb.height);
+    }
     gdt_init();         // GDT + TSS (own stack for double faults)
 
     print_set_theme(THEME_CYBERPUNK);
@@ -58,6 +71,15 @@ void kernel_main() {
     memory_init(512 * 1024);
 
     paging_init((uint64_t)kernel_start, (uint64_t)kernel_end, HEAP_START, HEAP_SIZE);
+    if (have_fb) {
+        if (fbcon_init(&fb) == 0) {
+            print_flush();
+            kprintf("[OK] Framebuffer console %ux%u, %u bpp, %ux%u characters\n", fb.width, fb.height,
+                    (uint32_t)fb.bpp, (uint32_t)print_get_cols(), (uint32_t)print_get_rows());
+        } else {
+            serial_puts("[ERR] Unsupported framebuffer format; output on serial only\n");
+        }
+    }
     heap_init(HEAP_START, HEAP_SIZE);
 
     expand_scrollback();
