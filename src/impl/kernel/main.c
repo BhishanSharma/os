@@ -12,7 +12,7 @@
 #include "sys/editor.h"
 #include "sys/shell.h"
 #include "drivers/pic.h"
-#include "drivers/rtl8139.h"
+#include "drivers/nic.h"
 #include "core/gdt.h"
 #include "lib/serial.h"
 #include "net/net.h"
@@ -62,8 +62,9 @@ void kernel_main() {
 
     expand_scrollback();
     
-    if (rtl8139_probe_init() == 0) {
-        idt_set_entry(0x20 + rtl8139_get_irq(), irq_nic_stub, 0x8E);
+    if (nic_probe_init() == 0) {
+        if (nic_get_irq() != NIC_IRQ_NONE)
+            idt_set_entry(0x20 + nic_get_irq(), irq_nic_stub, 0x8E);
         print_str("[NET] NIC driver installed\n");
         net_init();
     }
@@ -86,6 +87,9 @@ void kernel_main() {
     print_str("Boot complete!\n");
 
     __asm__ volatile("sti");
+
+    // DHCP needs the timer and NIC interrupts, so it runs after sti.
+    if (net_is_up()) net_configure();
 
     shell_run();
 }

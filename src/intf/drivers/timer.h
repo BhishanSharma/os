@@ -12,4 +12,8 @@ uint32_t get_tick();           // Returns total ticks since boot
 uint32_t get_seconds();        // Returns uptime in seconds
 void sleep(uint32_t ms);       // Sleep for given milliseconds
 
+/* Called from the timer interrupt on every tick (IRQ context), e.g. to poll a
+ * device whose interrupt is not routed. Pass 0 to remove. */
+void timer_set_poll_hook(void (*hook)(void));
+
 #endif

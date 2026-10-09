@@ -3,8 +3,8 @@
 
 #include <stdint.h>
 
-/* Network configuration. Until DHCP exists these are QEMU's user-mode
- * (slirp) defaults: we are 10.0.2.15, the router is 10.0.2.2, DNS is 10.0.2.3. */
+/* Network configuration, from DHCP (net_configure) or, if no DHCP server
+ * answers, QEMU's user-mode defaults: 10.0.2.15, router 10.0.2.2, DNS 10.0.2.3. */
 typedef struct {
     uint8_t mac[6];
     uint8_t ip[4];
@@ -24,8 +24,11 @@ typedef struct {
 #define PING_BAD_ARG     -3
 #define PING_NET_DOWN    -4
 
-void net_init(void);                        // call once after rtl8139_probe_init() == 0
+void net_init(void);                        // call once after nic_probe_init() == 0
 int  net_is_up(void);                       // 1 if a NIC was found and net_init ran
+/* Ask the network for an address over DHCP; on failure the previous (static)
+ * settings stay. Needs interrupts enabled. Returns 0 on success. */
+int  net_configure(void);
 const net_config_t *net_get_config(void);
 
 void net_print_ifconfig(void);              // the `ifconfig` shell command

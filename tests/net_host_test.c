@@ -10,14 +10,14 @@
 #include <string.h>
 #include <stdint.h>
 #include "net/net.h"
-#include "drivers/rtl8139.h"
+#include "drivers/nic.h"
 
 /* ---- mocks ------------------------------------------------------------ */
 static uint32_t g_tick = 0;
 static uint64_t g_tsc = 1000;
 static char     g_out[65536];
 static size_t   g_outlen = 0;
-static rtl8139_rx_cb_t g_rx = NULL;
+static nic_rx_cb_t g_rx = NULL;
 static uint8_t  g_mac[6] = {0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
 static const uint8_t GW_MAC[6] = {0x52, 0x55, 0x0a, 0x00, 0x02, 0x02};
 
@@ -44,10 +44,11 @@ void kprintf(const char *fmt, ...) {
     }
     va_end(ap);
 }
-int rtl8139_is_up(void) { return 1; }
-void rtl8139_get_mac(uint8_t m[6]) { memcpy(m, g_mac, 6); }
-void rtl8139_set_rx_handler(rtl8139_rx_cb_t cb) { g_rx = cb; }
-void rtl8139_get_stats(rtl8139_stats_t *s) { memset(s, 0, sizeof *s); }
+int nic_is_up(void) { return 1; }
+const char *nic_name(void) { return "mock"; }
+void nic_get_mac(uint8_t m[6]) { memcpy(m, g_mac, 6); }
+void nic_set_rx_handler(nic_rx_cb_t cb) { g_rx = cb; }
+void nic_get_stats(nic_stats_t *s) { memset(s, 0, sizeof *s); }
 uint32_t get_tick(void) { return g_tick; }
 int get_char(void) { return 0; }
 
@@ -106,7 +107,56 @@ static void build_ip(uint8_t *f, const uint8_t *dmac, const uint8_t *smac, const
     uint16_t c = cksum(ip, 20); ip[10] = c >> 8; ip[11] = c & 0xff;
 }
 
-int rtl8139_send(const void *frame, uint16_t len) {
+/* ---- simulated DHCP server (192.168.1.1 hands out 192.168.1.50) ------- */
+static int dhcp_server_on = 1;
+static int dhcp_server_nak = 0;
+static int tx_dhcp_discover = 0, tx_dhcp_request = 0;
+static uint8_t last_requested_ip[4];
+
+static int dhcp_sim(const uint8_t *f) {
+    const uint8_t *ip = f + 14;
+    const uint8_t *u = ip + 20;
+    if (ip[9] != 17 || ((u[2] << 8) | u[3]) != 67) return 0;
+    const uint8_t *m = u + 8;
+    if (memcmp(f, "\xff\xff\xff\xff\xff\xff", 6) != 0) { printf("TEST BUG: DHCP not broadcast\n"); exit(1); }
+    if (memcmp(ip + 12, "\0\0\0\0", 4) != 0) { printf("TEST BUG: DHCP source IP not 0.0.0.0\n"); exit(1); }
+    if (!(m[10] & 0x80)) { printf("TEST BUG: DHCP broadcast flag not set\n"); exit(1); }
+
+    int type = 0;
+    for (int i = 240; m[i] != 255; i += 2 + m[i + 1]) {
+        if (m[i] == 53) type = m[i + 2];
+        if (m[i] == 50) memcpy(last_requested_ip, m + i + 2, 4);
+    }
+    if (type == 1) tx_dhcp_discover++;
+    if (type == 3) tx_dhcp_request++;
+    if (!dhcp_server_on || (type != 1 && type != 3)) return 1;
+
+    uint8_t r[400]; memset(r, 0, sizeof r);
+    int mlen = 300;
+    static const uint8_t SRV[4] = {192, 168, 1, 1};
+    build_ip(r, (const uint8_t *)"\xff\xff\xff\xff\xff\xff", GW_MAC, SRV,
+             (const uint8_t[]){255, 255, 255, 255}, 64, 17, 8 + mlen);
+    uint8_t *ru = r + 34;
+    ru[0] = 0; ru[1] = 67; ru[2] = 0; ru[3] = 68; ru[4] = (8 + mlen) >> 8; ru[5] = (8 + mlen) & 0xff;
+    uint8_t *rm = ru + 8;
+    rm[0] = 2; rm[1] = 1; rm[2] = 6;
+    memcpy(rm + 4, m + 4, 4);                       /* xid */
+    rm[16] = 192; rm[17] = 168; rm[18] = 1; rm[19] = 50;   /* yiaddr */
+    memcpy(rm + 28, m + 28, 6);                     /* chaddr */
+    rm[236] = 0x63; rm[237] = 0x82; rm[238] = 0x53; rm[239] = 0x63;
+    int n = 240;
+    rm[n++] = 53; rm[n++] = 1; rm[n++] = type == 1 ? 2 : (dhcp_server_nak ? 6 : 5);
+    rm[n++] = 54; rm[n++] = 4; memcpy(rm + n, SRV, 4); n += 4;
+    rm[n++] = 1;  rm[n++] = 4; rm[n++] = 255; rm[n++] = 255; rm[n++] = 255; rm[n++] = 0;
+    rm[n++] = 3;  rm[n++] = 4; memcpy(rm + n, SRV, 4); n += 4;
+    rm[n++] = 6;  rm[n++] = 4; rm[n++] = 1; rm[n++] = 1; rm[n++] = 1; rm[n++] = 1;
+    rm[n++] = 51; rm[n++] = 4; rm[n++] = 0; rm[n++] = 1; rm[n++] = 0x51; rm[n++] = 0x80;  /* 86400 s */
+    rm[n++] = 255;
+    enq(r, 14 + 20 + 8 + mlen, 200);
+    return 1;
+}
+
+int nic_send(const void *frame, uint16_t len) {
     const uint8_t *f = frame;
     tx_count++;
     uint16_t type = (f[12] << 8) | f[13];
@@ -127,6 +177,7 @@ int rtl8139_send(const void *frame, uint16_t len) {
     if (type != 0x0800) return 0;
     const uint8_t *ip = f + 14;
     if (cksum(ip, 20) != 0) { printf("TEST BUG: TX IP checksum bad\n"); exit(1); }
+    if (dhcp_sim(f)) return 0;
     static const uint8_t WHO_MAC[6] = {2,2,2,2,2,2};
     if (memcmp(f, GW_MAC, 6) != 0 && memcmp(f, WHO_MAC, 6) != 0) { printf("TEST BUG: frame not addressed to gateway MAC\n"); exit(1); }
     if (ip[9] != 1) return 0;
@@ -302,6 +353,46 @@ int main(void) {
             g_rx(junk, 14 + rand() % 50);
         }
         CHECK(1, "2000 random frames survived");
+    }
+
+    printf("== DHCP: no server keeps the static address ==\n");
+    reset(); dhcp_server_on = 0; tx_dhcp_discover = 0;
+    CHECK(net_configure() != 0, "fails without a server");
+    CHECK(tx_dhcp_discover == 3, "3 DISCOVER attempts");
+    CHECK(net_get_config()->ip[0] == 10 && net_get_config()->ip[3] == 15, "still 10.0.2.15");
+    CHECK(contains("no answer, keeping 10.0.2.15"), "reports fallback");
+
+    printf("== DHCP: NAK is not accepted ==\n");
+    reset(); dhcp_server_on = 1; dhcp_server_nak = 1;
+    CHECK(net_configure() != 0, "NAK -> failure");
+    CHECK(net_get_config()->ip[0] == 10, "address unchanged after NAK");
+    dhcp_server_nak = 0;
+
+    printf("== DHCP: DISCOVER/OFFER/REQUEST/ACK ==\n");
+    reset(); tx_dhcp_discover = tx_dhcp_request = 0;
+    rc = net_configure();
+    show("dhcp");
+    const net_config_t *c = net_get_config();
+    CHECK(rc == 0, "succeeds");
+    CHECK(tx_dhcp_discover == 1 && tx_dhcp_request == 1, "one DISCOVER, one REQUEST");
+    CHECK(memcmp(last_requested_ip, (const uint8_t[]){192, 168, 1, 50}, 4) == 0, "REQUEST asks for the offered IP");
+    CHECK(memcmp(c->ip, (const uint8_t[]){192, 168, 1, 50}, 4) == 0, "IP 192.168.1.50");
+    CHECK(memcmp(c->gateway, (const uint8_t[]){192, 168, 1, 1}, 4) == 0, "gateway from option 3");
+    CHECK(memcmp(c->dns, (const uint8_t[]){1, 1, 1, 1}, 4) == 0, "DNS from option 6");
+    CHECK(memcmp(c->netmask, (const uint8_t[]){255, 255, 255, 0}, 4) == 0, "netmask from option 1");
+    reset(); net_print_ifconfig();
+    CHECK(contains("(DHCP, lease 86400 s)"), "ifconfig shows the lease");
+
+    printf("== DHCP: replies for another xid or MAC are ignored ==\n");
+    {
+        uint8_t f[14 + 20 + 8 + 300]; memset(f, 0, sizeof f);
+        build_ip(f, (const uint8_t *)"\xff\xff\xff\xff\xff\xff", GW_MAC, (const uint8_t[]){6, 6, 6, 6},
+                 (const uint8_t[]){255, 255, 255, 255}, 64, 17, 8 + 300);
+        uint8_t *u = f + 34; u[1] = 67; u[3] = 68; u[4] = (308 >> 8); u[5] = 308 & 0xff;
+        uint8_t *m = u + 8; m[0] = 2; m[16] = 6; m[236] = 0x63; m[237] = 0x82; m[238] = 0x53; m[239] = 0x63;
+        m[240] = 53; m[241] = 1; m[242] = 5; m[243] = 255;
+        g_rx(f, sizeof f);                          /* unsolicited ACK while idle */
+        CHECK(net_get_config()->ip[0] == 192, "unsolicited ACK ignored");
     }
 
     printf("\n%d passed, %d failed\n", passes, fails);

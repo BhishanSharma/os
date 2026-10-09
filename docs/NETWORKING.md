@@ -14,12 +14,31 @@ is offered too. No root or host setup is needed.
 | 3 | **Done.** UDP DNS A-record lookup | internal to `download` |
 | 4 | **Done (minimal).** TCP client handshake/ACK/FIN, HTTP/1.0 GET, write response body to FAT32 | `download http://...` |
 | 5 | **Done (minimal).** TLS 1.2 HTTPS client with BearSSL and certificate/name validation | `download https://...` |
+| 6 | **Done.** DHCP client; NIC abstraction (`drivers/nic.c`) | `dhcp`, `ifconfig` |
+| 7 | **Written, untested on hardware.** RTL8168/8111 driver for real PCs | boot on a PC with that NIC |
+
+## DHCP and NIC drivers
+
+At boot, once interrupts are on, `net_configure()` runs DHCP (DISCOVER, OFFER, REQUEST, ACK;
+3 attempts, 2 s each) and takes the address, netmask, router and DNS server from the reply. If
+no server answers, the QEMU defaults above stay. `dhcp` reruns it; `ifconfig` shows whether the
+address came from DHCP and the lease time. Leases are not renewed yet.
+
+To check DHCP in QEMU, move the virtual LAN off the defaults, e.g.
+`-netdev user,id=n0,net=192.168.76.0/24`; the OS should come up as `192.168.76.15`.
+
+`nic_probe_init()` picks the first supported card: RTL8139 (QEMU's `-device rtl8139`), then
+RTL8168/8111/8169, the on-board Ethernet of most laptops and desktops. The RTL8168 driver uses
+descriptor rings through the I/O-port BAR. Because UEFI machines often don't route the card's
+legacy PIC interrupt, its receive ring is also polled from the timer tick. QEMU cannot emulate
+this chip, so the driver has not been run yet. Booting on real hardware also needs UEFI boot
+and a framebuffer console, which the OS does not have yet.
 
 ## Step 1: what exists
 
 * `drivers/rtl8139.c`: `rtl8139_send(frame, len)`, `rtl8139_get_mac()`, `rtl8139_set_rx_handler()`,
   `rtl8139_get_stats()`. RX and TX both run through the interrupt handler.
-* `net/net.c`: static config (`10.0.2.15/24`, gw `10.0.2.2`, dns `10.0.2.3`), receive hook that
+* `net/net.c`: network config (static QEMU defaults, later DHCP), receive hook that
   counts frames by type, `ifconfig`, and `nettest`.
 * Shell: `ifconfig`, `nettest`, `netdebug <on|off>`.
 

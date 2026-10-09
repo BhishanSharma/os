@@ -15,10 +15,16 @@ typedef struct registers {
 
 
 static uint32_t tick = 0;
+static void (*poll_hook)(void);
+
+void timer_set_poll_hook(void (*hook)(void)) {
+    poll_hook = hook;
+}
 
 // Called on every timer interrupt (IRQ0)
 void isr_timer(registers_t regs) {
     tick++;
+    if (poll_hook) poll_hook();
 }
 
 // Initialize PIT (Programmable Interval Timer)

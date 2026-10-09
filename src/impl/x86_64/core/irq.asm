@@ -97,7 +97,7 @@ irq0_stub:
 
     iretq
 
-extern rtl8139_handle_irq
+extern nic_handle_irq
 
 global irq_nic_stub
 irq_nic_stub:
@@ -119,7 +119,7 @@ irq_nic_stub:
     push r15
 
     sub rsp, 8          ; keep rsp 16-byte aligned for the C ABI
-    call rtl8139_handle_irq
+    call nic_handle_irq
     add rsp, 8
 
     ; The NIC usually sits on the slave PIC (IRQ 8-15): EOI both PICs.

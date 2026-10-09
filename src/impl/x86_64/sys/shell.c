@@ -87,6 +87,7 @@ static void cmd_help(void)
     print_str("                     (div0 ud gp pf null stack int3 irq panic)\n");
     print_str("\n=== Network ===\n");
     print_str("ifconfig           - show MAC, IP settings and packet counters\n");
+    print_str("dhcp               - get an IP address from the network's DHCP server\n");
     print_str("nettest            - send an ARP request to the gateway, wait for the reply\n");
     print_str("ping <ip> [count]  - send ICMP echo requests (default 4), e.g. ping 10.0.2.2\n");
     print_str("download <url> [file] - download HTTP/HTTPS URL to FAT32\n");
@@ -840,6 +841,10 @@ int shell_execute_command(const char* line) {
     else if (strcmp(line, "ifconfig") == 0)
     {
         net_print_ifconfig();
+    }
+    else if (strcmp(line, "dhcp") == 0)
+    {
+        net_configure();
     }
     else if (strcmp(line, "nettest") == 0)
     {

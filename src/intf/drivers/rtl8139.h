@@ -1,19 +1,14 @@
 #ifndef RTL8139_H
 #define RTL8139_H
 #include <stdint.h>
+#include "drivers/nic.h"
 
 /* Largest Ethernet frame we send or receive (without the 4-byte CRC). */
-#define RTL8139_MAX_FRAME 1514
+#define RTL8139_MAX_FRAME NIC_MAX_FRAME
 
-/* Called from the NIC interrupt for every good frame (CRC already stripped).
- * `frame` points into the receive ring and is only valid during the call:
- * copy it if you need it later. Keep the handler short - it runs in IRQ context. */
-typedef void (*rtl8139_rx_cb_t)(const uint8_t *frame, uint16_t len);
-
-typedef struct {
-    uint32_t rx_packets, rx_bytes, rx_errors;
-    uint32_t tx_packets, tx_bytes, tx_errors;
-} rtl8139_stats_t;
+/* See nic_rx_cb_t: called in IRQ context for every good frame. */
+typedef nic_rx_cb_t rtl8139_rx_cb_t;
+typedef nic_stats_t rtl8139_stats_t;
 
 int rtl8139_probe_init(void);   // returns 0 on success
 uint8_t rtl8139_get_irq(void);  // PCI interrupt line; install the IDT entry at 0x20 + this

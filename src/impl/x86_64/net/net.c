@@ -1,5 +1,5 @@
 #include "net/net.h"
-#include "drivers/rtl8139.h"
+#include "drivers/nic.h"
 #include "drivers/timer.h"
 #include "lib/print.h"
 #include "lib/string.h"
@@ -45,6 +45,9 @@ static inline void irq_restore(uint64_t f) {
 
 static net_config_t cfg;
 static int net_up = 0;
+static int cfg_from_dhcp;
+static uint32_t cfg_lease_seconds;
+static void set_static_config(void);
 static volatile int debug = 0;
 
 /* Per-type receive counters (updated from the NIC interrupt). */
@@ -155,7 +158,7 @@ static void arp_send_request(const uint8_t target_ip[4]) {
     static const uint8_t zero[6]  = {0, 0, 0, 0, 0, 0};
     uint8_t f[42];
     arp_build(f, 1, bcast, zero, target_ip);
-    rtl8139_send(f, sizeof(f));
+    nic_send(f, sizeof(f));
 }
 
 /* ---- ping state (written by the RX handler, read by net_ping) ---------- */
@@ -175,7 +178,7 @@ static volatile uint8_t  ping_err_code;
 static uint8_t           ping_err_src[4];
 
 static uint16_t ip_ident = 1;
-static uint8_t  echo_reply_buf[RTL8139_MAX_FRAME];
+static uint8_t  echo_reply_buf[NIC_MAX_FRAME];
 static void net_rx_download_hook(const uint8_t *frame, uint16_t len);
 
 /* Build Ethernet + IPv4 headers (20 bytes, no options) at f. `payload_len` is
@@ -217,7 +220,7 @@ static void handle_arp(const uint8_t *frame, uint16_t len) {
     if (op == 1 && for_us) {
         uint8_t f[42];
         arp_build(f, 2, smac, smac, sip);
-        rtl8139_send(f, sizeof(f));
+        nic_send(f, sizeof(f));
     }
 
     /* Selftest: ARP reply whose sender IP is the one `nettest` asked about. */
@@ -237,7 +240,7 @@ static void handle_icmp(const uint8_t *frame, const uint8_t *ip, uint16_t ihl, u
 
     if (type == ICMP_ECHO_REQUEST) {
         /* Answer pings aimed at us. */
-        if (14 + 20 + icmp_len > RTL8139_MAX_FRAME) return;
+        if (14 + 20 + icmp_len > NIC_MAX_FRAME) return;
         uint8_t *f = echo_reply_buf;
         ip_build(f, frame + 6, ip + 12, IP_PROTO_ICMP, icmp_len);
         uint8_t *r = f + 14 + 20;
@@ -245,7 +248,7 @@ static void handle_icmp(const uint8_t *frame, const uint8_t *ip, uint16_t ihl, u
         r[0] = ICMP_ECHO_REPLY;
         wr16be(r + 2, 0);
         wr16be(r + 2, inet_checksum(r, icmp_len));
-        rtl8139_send(f, (uint16_t)(14 + 20 + icmp_len));
+        nic_send(f, (uint16_t)(14 + 20 + icmp_len));
         return;
     }
 
@@ -310,19 +313,12 @@ static void net_rx(const uint8_t *frame, uint16_t len) {
 /* ---- public API ------------------------------------------------------- */
 
 void net_init(void) {
-    if (!rtl8139_is_up()) return;
+    if (!nic_is_up()) return;
 
-    rtl8139_get_mac(cfg.mac);
-    static const uint8_t ip[4]      = {10, 0, 2, 15};
-    static const uint8_t netmask[4] = {255, 255, 255, 0};
-    static const uint8_t gateway[4] = {10, 0, 2, 2};
-    static const uint8_t dns[4]     = {10, 0, 2, 3};
-    memcpy(cfg.ip, ip, 4);
-    memcpy(cfg.netmask, netmask, 4);
-    memcpy(cfg.gateway, gateway, 4);
-    memcpy(cfg.dns, dns, 4);
+    nic_get_mac(cfg.mac);
+    set_static_config();   /* QEMU defaults until net_configure() runs DHCP */
 
-    rtl8139_set_rx_handler(net_rx_download_hook);
+    nic_set_rx_handler(net_rx_download_hook);
     net_up = 1;
 
     char m[18];
@@ -344,20 +340,22 @@ void net_set_debug(int on) {
 
 void net_print_ifconfig(void) {
     if (!net_up) {
-        print_str("No network interface (is the NIC attached? QEMU needs -device rtl8139)\n");
+        print_str("No network interface (is the NIC attached? QEMU needs -device rtl8139; real PCs need an RTL8168)\n");
         return;
     }
 
     char buf[18];
-    print_str("eth0 (RTL8139)\n");
+    kprintf("eth0 (%s)\n", nic_name());
     net_fmt_mac(buf, cfg.mac);       kprintf("  MAC      %s\n", buf);
-    net_fmt_ip(buf, cfg.ip);         kprintf("  IP       %s  (static)\n", buf);
+    net_fmt_ip(buf, cfg.ip);
+    if (cfg_from_dhcp) kprintf("  IP       %s  (DHCP, lease %u s)\n", buf, cfg_lease_seconds);
+    else               kprintf("  IP       %s  (static)\n", buf);
     net_fmt_ip(buf, cfg.netmask);    kprintf("  Netmask  %s\n", buf);
     net_fmt_ip(buf, cfg.gateway);    kprintf("  Gateway  %s\n", buf);
     net_fmt_ip(buf, cfg.dns);        kprintf("  DNS      %s\n", buf);
 
-    rtl8139_stats_t st;
-    rtl8139_get_stats(&st);
+    nic_stats_t st;
+    nic_get_stats(&st);
     kprintf("  RX       %u packets, %u bytes, %u errors\n", st.rx_packets, st.rx_bytes, st.rx_errors);
     kprintf("           ARP %u, IPv4 %u, other %u\n", (uint32_t)rx_arp, (uint32_t)rx_ipv4, (uint32_t)rx_other);
     kprintf("  TX       %u packets, %u bytes, %u errors\n", st.tx_packets, st.tx_bytes, st.tx_errors);
@@ -394,7 +392,7 @@ int net_selftest(void) {
     net_fmt_ip(ipbuf, cfg.gateway);
     kprintf("Sending ARP request: who has %s? ", ipbuf);
 
-    if (rtl8139_send(f, sizeof(f)) != 0) {
+    if (nic_send(f, sizeof(f)) != 0) {
         print_str("\nTX failed\n");
         return -1;
     }
@@ -496,7 +494,7 @@ static int key_pressed(void) {
 
 int net_ping(const uint8_t ip[4], uint32_t count) {
     if (!net_up) {
-        print_str("No network interface (is the NIC attached? QEMU needs -device rtl8139)\n");
+        print_str("No network interface (is the NIC attached? QEMU needs -device rtl8139; real PCs need an RTL8168)\n");
         return PING_NET_DOWN;
     }
     if (count == 0) count = 4;
@@ -556,7 +554,7 @@ int net_ping(const uint8_t ip[4], uint32_t count) {
             uint64_t tsc0 = READ_TSC();
             sent++;
 
-            if (rtl8139_send(f, sizeof(f)) != 0) {
+            if (nic_send(f, sizeof(f)) != 0) {
                 ping_active = 0;
                 kprintf("icmp_seq=%u: send failed\n", seq);
             } else {
@@ -864,7 +862,7 @@ static void tcp_send_segment(const uint8_t dst_mac[6], uint8_t flags,
     wr16be(t + 14, tcp_last_window); wr16be(t + 16, 0); wr16be(t + 18, 0);
     if (plen) memcpy(t + 20, payload, plen);
     wr16be(t + 16, pseudo_checksum(cfg.ip, tcp_peer, IP_PROTO_TCP, t, (uint16_t)(20 + plen)));
-    rtl8139_send(f, (uint16_t)(54 + plen));
+    nic_send(f, (uint16_t)(54 + plen));
 }
 
 static void tcp_rx(const uint8_t *frame, const uint8_t *ip, uint16_t total) {
@@ -959,6 +957,63 @@ static void tcp_rx(const uint8_t *frame, const uint8_t *ip, uint16_t total) {
     (void)ack;
 }
 
+/* ---- DHCP client (RFC 2131) ------------------------------------------- */
+
+#define DHCP_SERVER_PORT 67
+#define DHCP_CLIENT_PORT 68
+#define DHCP_DISCOVER 1
+#define DHCP_OFFER    2
+#define DHCP_REQUEST  3
+#define DHCP_ACK      5
+#define DHCP_NAK      6
+
+typedef struct {
+    uint8_t ip[4], server[4], netmask[4], router[4], dns[4];
+    uint32_t lease;
+    int has_netmask, has_router, has_dns;
+} dhcp_lease_t;
+
+static volatile int dhcp_active;        /* accept packets not yet addressed to us */
+static volatile int dhcp_want;          /* DHCP_OFFER or DHCP_ACK */
+static volatile int dhcp_result;        /* message type received, 0 if none */
+static uint32_t dhcp_xid;
+static dhcp_lease_t dhcp_reply;
+static uint32_t rd32be(const uint8_t *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
+
+/* Runs in IRQ context: parse a server reply into dhcp_reply. */
+static void dhcp_rx(const uint8_t *p, uint16_t len) {
+    if (!dhcp_active || dhcp_result || len < 240) return;
+    if (p[0] != 2 || rd32be(p + 4) != dhcp_xid || memcmp(p + 28, cfg.mac, 6) != 0) return;
+    if (rd32be(p + 236) != 0x63825363u) return;
+
+    dhcp_lease_t r;
+    memset(&r, 0, sizeof(r));
+    memcpy(r.ip, p + 16, 4);                       /* yiaddr */
+    int type = 0;
+    uint32_t i = 240;
+    while (i < len && p[i] != 255) {
+        uint8_t opt = p[i];
+        if (opt == 0) { i++; continue; }           /* pad */
+        if (i + 1 >= len) break;
+        uint8_t olen = p[i + 1];
+        const uint8_t *v = p + i + 2;
+        if (i + 2 + olen > len) break;
+        if (opt == 53 && olen >= 1) type = v[0];
+        else if (opt == 1 && olen >= 4) { memcpy(r.netmask, v, 4); r.has_netmask = 1; }
+        else if (opt == 3 && olen >= 4) { memcpy(r.router, v, 4); r.has_router = 1; }
+        else if (opt == 6 && olen >= 4) { memcpy(r.dns, v, 4); r.has_dns = 1; }
+        else if (opt == 51 && olen >= 4) r.lease = rd32be(v);
+        else if (opt == 54 && olen >= 4) memcpy(r.server, v, 4);
+        i += 2u + olen;
+    }
+    if (type == DHCP_NAK && dhcp_want == DHCP_ACK) { dhcp_result = DHCP_NAK; return; }
+    if (type != dhcp_want) return;
+    dhcp_reply = r;
+    dhcp_result = type;
+}
+
 static void handle_udp(const uint8_t *ip, uint16_t ihl, uint16_t total) {
     const uint8_t *u = ip + ihl;
     uint16_t len = (uint16_t)(total - ihl);
@@ -966,6 +1021,7 @@ static void handle_udp(const uint8_t *ip, uint16_t ihl, uint16_t total) {
     uint16_t sport = rd16be(u), dport = rd16be(u + 2), ulen = rd16be(u + 4);
     if (ulen < 8 || ulen > len) return;
     if (dport == dns_port && sport == DNS_PORT && ip_eq(ip + 12, cfg.dns)) dns_rx(u + 8, (uint16_t)(ulen - 8));
+    else if (dport == DHCP_CLIENT_PORT && sport == DHCP_SERVER_PORT) dhcp_rx(u + 8, (uint16_t)(ulen - 8));
 }
 
 static void handle_ipv4_extended(const uint8_t *frame, const uint8_t *ip, uint16_t ihl, uint16_t total) {
@@ -981,7 +1037,14 @@ static void net_rx_download_hook(const uint8_t *frame, uint16_t len) {
     if (type != ETHERTYPE_IPV4 || len < 34) return;
     const uint8_t *ip = frame + 14;
     uint16_t ihl = (uint16_t)((ip[0] & 0x0F) * 4), total = rd16be(ip + 2);
-    if ((ip[0] >> 4) != 4 || ihl < 20 || total < ihl || total > len - 14 || inet_checksum(ip, ihl) != 0 || !ip_eq(ip + 16, cfg.ip)) return;
+    if ((ip[0] >> 4) != 4 || ihl < 20 || total < ihl || total > len - 14 || inet_checksum(ip, ihl) != 0) return;
+    /* Packets not addressed to us (broadcasts, or DHCP replies before we have an
+     * address) only go to UDP, where the DHCP client picks them up. */
+    static const uint8_t limited_bcast[4] = {255, 255, 255, 255};
+    if (!ip_eq(ip + 16, cfg.ip)) {
+        if (ip[9] == IP_PROTO_UDP && (dhcp_active || ip_eq(ip + 16, limited_bcast))) handle_udp(ip, ihl, total);
+        return;
+    }
     if (ip[9] == IP_PROTO_ICMP) handle_icmp(frame, ip, ihl, total);
     else handle_ipv4_extended(frame, ip, ihl, total);
 }
@@ -1020,13 +1083,108 @@ static int dns_lookup(const char *host, uint8_t out[4]) {
     q[n++]=0; wr16be(q+n,1); n+=2; wr16be(q+n,1); n+=2;
     dns_done=0; dns_failed=0;
     uint8_t f[14+20+8+256]; udp_build(f,mac,cfg.dns,dns_port,DNS_PORT,q,(uint16_t)n);
-    if (rtl8139_send(f,(uint16_t)(42+n))!=0) return -1;
+    if (nic_send(f,(uint16_t)(42+n))!=0) return -1;
     uint32_t start=get_tick(); while (!dns_done && !dns_failed && (uint32_t)(get_tick()-start)<300) CPU_WAIT();
     if (!dns_done) return -1;
     memcpy(out,dns_answer,4);
     return 0;
 }
 
+
+static int dhcp_send(int type, const dhcp_lease_t *offer) {
+    static const uint8_t bcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    static const uint8_t bcast_ip[4] = {255, 255, 255, 255};
+    uint8_t m[300];
+    memset(m, 0, sizeof(m));
+    m[0] = 1; m[1] = 1; m[2] = 6;                  /* BOOTREQUEST, Ethernet, MAC length */
+    wr32be(m + 4, dhcp_xid);
+    wr16be(m + 10, 0x8000);                        /* ask the server to broadcast replies */
+    memcpy(m + 28, cfg.mac, 6);
+    wr32be(m + 236, 0x63825363u);                  /* magic cookie */
+
+    uint32_t n = 240;
+    m[n++] = 53; m[n++] = 1; m[n++] = (uint8_t)type;
+    m[n++] = 61; m[n++] = 7; m[n++] = 1; memcpy(m + n, cfg.mac, 6); n += 6;
+    static const char host[] = "terminalos";
+    m[n++] = 12; m[n++] = (uint8_t)(sizeof(host) - 1); memcpy(m + n, host, sizeof(host) - 1); n += sizeof(host) - 1;
+    if (type == DHCP_REQUEST) {
+        m[n++] = 50; m[n++] = 4; memcpy(m + n, offer->ip, 4); n += 4;
+        m[n++] = 54; m[n++] = 4; memcpy(m + n, offer->server, 4); n += 4;
+    }
+    m[n++] = 55; m[n++] = 4; m[n++] = 1; m[n++] = 3; m[n++] = 6; m[n++] = 51;
+    m[n++] = 255;
+
+    uint8_t f[14 + 20 + 8 + sizeof(m)];
+    udp_build(f, bcast_mac, bcast_ip, DHCP_CLIENT_PORT, DHCP_SERVER_PORT, m, sizeof(m));
+    return nic_send(f, (uint16_t)sizeof(f));
+}
+
+/* Send `type` and wait up to `ticks` for the reply type set in dhcp_want. */
+static int dhcp_exchange(int type, int want, const dhcp_lease_t *offer, uint32_t ticks) {
+    dhcp_result = 0;
+    dhcp_want = want;
+    if (dhcp_send(type, offer) != 0) return 0;
+    uint32_t start = get_tick();
+    while (!dhcp_result && (uint32_t)(get_tick() - start) < ticks) CPU_WAIT();
+    return dhcp_result;
+}
+
+static void set_static_config(void) {
+    static const uint8_t ip[4]      = {10, 0, 2, 15};
+    static const uint8_t netmask[4] = {255, 255, 255, 0};
+    static const uint8_t gateway[4] = {10, 0, 2, 2};
+    static const uint8_t dns[4]     = {10, 0, 2, 3};
+    memcpy(cfg.ip, ip, 4);
+    memcpy(cfg.netmask, netmask, 4);
+    memcpy(cfg.gateway, gateway, 4);
+    memcpy(cfg.dns, dns, 4);
+    cfg_from_dhcp = 0;
+    cfg_lease_seconds = 0;
+}
+
+int net_configure(void) {
+    if (!net_up) { print_str("No network interface\n"); return -1; }
+    print_str("[NET] DHCP: requesting an address...\n");
+
+    uint8_t old_ip[4];
+    memcpy(old_ip, cfg.ip, 4);
+    memset(cfg.ip, 0, 4);                          /* DHCP requests come from 0.0.0.0 */
+    dhcp_active = 1;
+
+    int ok = 0;
+    for (int attempt = 0; attempt < 3 && !ok; attempt++) {
+        dhcp_xid = (uint32_t)READ_TSC() ^ ((uint32_t)cfg.mac[5] << 24) ^ get_tick();
+        if (dhcp_exchange(DHCP_DISCOVER, DHCP_OFFER, 0, 2 * TIMER_FREQ) != DHCP_OFFER) continue;
+        dhcp_lease_t offer = dhcp_reply;
+        int r = dhcp_exchange(DHCP_REQUEST, DHCP_ACK, &offer, 2 * TIMER_FREQ);
+        if (r == DHCP_ACK) ok = 1;
+    }
+    dhcp_active = 0;
+
+    if (!ok) {
+        memcpy(cfg.ip, old_ip, 4);
+        char ipbuf[16];
+        net_fmt_ip(ipbuf, cfg.ip);
+        kprintf("[NET] DHCP: no answer, keeping %s\n", ipbuf);
+        return -1;
+    }
+
+    const dhcp_lease_t *l = &dhcp_reply;
+    static const uint8_t class_c[4] = {255, 255, 255, 0};
+    memcpy(cfg.ip, l->ip, 4);
+    memcpy(cfg.netmask, l->has_netmask ? l->netmask : class_c, 4);
+    memcpy(cfg.gateway, l->has_router ? l->router : l->server, 4);
+    memcpy(cfg.dns, l->has_dns ? l->dns : cfg.gateway, 4);
+    cfg_from_dhcp = 1;
+    cfg_lease_seconds = l->lease;
+
+    char ipbuf[16], gwbuf[16], dnsbuf[16];
+    net_fmt_ip(ipbuf, cfg.ip);
+    net_fmt_ip(gwbuf, cfg.gateway);
+    net_fmt_ip(dnsbuf, cfg.dns);
+    kprintf("[NET] DHCP: %s, gateway %s, DNS %s\n", ipbuf, gwbuf, dnsbuf);
+    return 0;
+}
 
 int net_tls_read(unsigned char *buf, size_t len) {
     if (!tcp_tls_mode || !tcp_tls_rx || tcp_tls_rx_size == 0 || len == 0 || tcp_tls_overflow) return -1;
@@ -1132,8 +1290,6 @@ int net_download_https(const char *url, const char *filename) {
         uint32_t n = 0; while (b[n] && b[n] != '?' && n < sizeof(derived)-1) n++;
         memcpy(derived, b, n); derived[n] = 0; outname = derived;
     }
-    if (fat32_file_exists(outname)) fat32_delete_file(outname);
-    if (fat32_create_file(outname) != 0) { kprintf("download: cannot create %s\n", outname); return -1; }
 
     tcp_tls_rx = 0;
     tcp_tls_rx_size = 32768;
@@ -1161,6 +1317,9 @@ int net_download_https(const char *url, const char *filename) {
     if (rc == -5 || rc == -6) { kprintf("download: HTTP status %d\n", tls_last_http_status()); kfree(body); return -1; }
     if (rc == -4) { print_str("download: file too large\n"); kfree(body); return -1; }
     if (rc != 0) { kprintf("download: TLS/HTTPS failed (%d, BearSSL error %d)\n", rc, tls_last_error()); kfree(body); return -1; }
+    /* Replace the file only once the download succeeded. */
+    if (fat32_file_exists(outname)) fat32_delete_file(outname);
+    if (fat32_create_file(outname) != 0) { kprintf("download: cannot create %s\n", outname); kfree(body); return -1; }
     int wr = fat32_write_file(outname, body, body_len);
     kfree(body);
     if (wr < 0) { kprintf("download: FAT32 write failed (%d)\n", wr); return -1; }
@@ -1182,8 +1341,6 @@ int net_download_http(const char *url, const char *filename) {
         uint32_t n=0; while (b[n] && b[n]!='?' && n<sizeof(derived)-1) n++;
         memcpy(derived,b,n); derived[n]=0; outname=derived;
     }
-    if (fat32_file_exists(outname)) fat32_delete_file(outname);
-    if (fat32_create_file(outname)!=0) { kprintf("download: cannot create %s\n",outname); return -1; }
     tcp_body=kmalloc(DOWNLOAD_MAX); if (!tcp_body) { print_str("download: out of memory\n"); return -1; }
     tcp_body_len=0; tcp_content_length=0; tcp_content_length_known=0; tcp_body_overflow=0; tcp_headers_done=0; tcp_header_len=0; tcp_http_status=0; tcp_peer_fin=0; tcp_http_bad=0;
     uint8_t mac[6]; if (net_tcp_connect(ip, port, mac, 0) != 0) { print_str("download: TCP connection timeout\n"); kfree(tcp_body); return -1; }
@@ -1207,6 +1364,8 @@ int net_download_http(const char *url, const char *filename) {
     finish_download_progress();
     tcp_tls_mode = 0;
     if (!tcp_headers_done || tcp_http_status != 200 || tcp_body_overflow) { kprintf("download: HTTP status %d%s\n",tcp_http_status,tcp_body_overflow?" or file too large":""); kfree(tcp_body); return -1; }
+    if (fat32_file_exists(outname)) fat32_delete_file(outname);
+    if (fat32_create_file(outname)!=0) { kprintf("download: cannot create %s\n",outname); kfree(tcp_body); return -1; }
     int write_result = fat32_write_file(outname,tcp_body,tcp_body_len);
     if (write_result < 0) { kprintf("download: FAT32 write failed (%d)\n", write_result); kfree(tcp_body); return -1; }
     kprintf("Downloaded %u bytes -> %s\n",tcp_body_len,outname); kfree(tcp_body); return 0;
