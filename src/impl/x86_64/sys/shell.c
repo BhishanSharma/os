@@ -17,6 +17,7 @@
 #include "net/net.h"
 #include "drivers/rtc.h"
 #include "sys/sysinfo.h"
+#include "sys/process.h"
 
 #define MAX_TEST_ALLOCS 16
 static void *test_allocs[MAX_TEST_ALLOCS];
@@ -30,6 +31,8 @@ static void cmd_download(const char *args);
 static void cmd_ls(void);
 static void cmd_cat(const char *filename);
 static void cmd_mount(const char *which);
+static int run_program(const char *line, int report_missing);
+static void cmd_programs(void);
 int shell_execute_command(const char* line);
 
 void shell_run(void)
@@ -66,6 +69,9 @@ static void cmd_help(void)
     print_str("fileinfo <file>    - file name and size\n");
     print_str("edit <file>        - open text editor\n");
     print_str("\n=== Programs and Scripts ===\n");
+    print_str("<program> [args]   - run a user-mode program (e.g. hello, snake, primes)\n");
+    print_str("run <file> [args]  - run a program by file name\n");
+    print_str("programs           - list the installed programs\n");
     print_str("sh <script>        - run a script file\n");
     print_str("compile <file>     - compile and run a C file (tiny subset)\n");
     print_str("\n=== System ===\n");
@@ -367,6 +373,10 @@ int shell_execute_command(const char* line) {
     else if (strcmp(line, "dmesg") == 0)
     {
         cmd_dmesg();
+    }
+    else if (strcmp(line, "programs") == 0)
+    {
+        cmd_programs();
     }
     else if (strcmp(line, "uptime") == 0)
     {
@@ -1003,11 +1013,161 @@ int shell_execute_command(const char* line) {
             print_str("Usage: netdebug <on|off>\n");
         }
     }
-    else
+    else if (strncmp(line, "run ", 4) == 0)
+    {
+        run_program(line + 4, 1);
+    }
+    else if (!run_program(line, 0))
     {
         kprintf("Unknown command: %s\n", line);
     }
     return 0;
+}
+
+/* Read `name` or `name.elf` from the current directory into a kmalloc'd buffer. */
+static uint8_t *read_program_file(const char *name, uint32_t *size)
+{
+    char path[32];
+    k_snprintf(path, sizeof(path), "%s", name);
+    if (!fat32_file_exists(path))
+    {
+        k_snprintf(path, sizeof(path), "%s.elf", name);
+        if (!fat32_file_exists(path)) return 0;
+    }
+    uint32_t n = fat32_get_file_size(path);
+    if (n == 0 || n == 0xFFFFFFFF) return 0;
+    uint8_t *data = kmalloc(n);
+    if (!data) return 0;
+    if (fat32_read_file(path, data, n) < 0)
+    {
+        kfree(data);
+        return 0;
+    }
+    *size = n;
+    return data;
+}
+
+/* Find a program: in the current directory first, then in the root of the RAM
+ * disk, which works as the system's program directory even while the files
+ * are on another disk. Returns the whole file (kfree it) or 0. */
+static uint8_t *find_program(const char *name, uint32_t *size)
+{
+    uint8_t *data = read_program_file(name, size);
+    if (data || disk_selected() == DISK_RAM || !disk_ramdisk_size()) return data;
+
+    char cwd[256] = "/";
+    fat32_get_current_directory(cwd, sizeof(cwd));
+    disk_kind_t old = disk_selected();
+    disk_select(DISK_RAM);
+    if (fat32_init(0) == 0)
+    {
+        fat32_change_directory("/");
+        data = read_program_file(name, size);
+    }
+    disk_select(old);
+    if (old != DISK_NONE)
+    {
+        fat32_init(0);
+        fat32_change_directory(cwd);
+    }
+    return data;
+}
+
+/* `programs`: the .ELF files in the current directory and on the RAM disk. */
+static void list_elf_files(const char *where)
+{
+    fat32_file_info_t *list = kmalloc(32 * sizeof(fat32_file_info_t));
+    if (!list) return;
+    int count = fat32_list_directory(list, 32), shown = 0;
+    for (int i = 0; i < count; i++)
+    {
+        size_t len = strlen(list[i].name);
+        if (list[i].is_directory || len < 5 || strcmp(list[i].name + len - 4, ".ELF") != 0) continue;
+        if (!shown++) kprintf("%s:\n", where);
+        char name[16], padded[20];
+        k_snprintf(name, sizeof(name), "%s", list[i].name);
+        name[len - 4] = '\0';
+        for (char *p = name; *p; p++)
+            if (*p >= 'A' && *p <= 'Z') *p += 32;
+        k_snprintf(padded, sizeof(padded), "%-12s", name);
+        print_str("  ");
+        print_accent(padded);
+        kprintf("%4u KiB\n", (list[i].size + 1023) / 1024);
+    }
+    kfree(list);
+}
+
+static void cmd_programs(void)
+{
+    list_elf_files("In this directory");
+    if (disk_selected() != DISK_RAM && disk_ramdisk_size())
+    {
+        char cwd[256] = "/";
+        fat32_get_current_directory(cwd, sizeof(cwd));
+        disk_kind_t old = disk_selected();
+        disk_select(DISK_RAM);
+        if (fat32_init(0) == 0)
+        {
+            fat32_change_directory("/");
+            list_elf_files("On the RAM disk");
+        }
+        disk_select(old);
+        if (old != DISK_NONE)
+        {
+            fat32_init(0);
+            fat32_change_directory(cwd);
+        }
+    }
+    print_str("Type a program's name (with arguments) to run it in user mode.\n");
+}
+
+/* Run a user program: `line` is "name arg1 arg2 ...". Returns 0 if there is no
+ * such program (and `report_missing` is 0), 1 otherwise. */
+static int run_program(const char *line, int report_missing)
+{
+    static char args[256];
+    char *argv[16];
+    int argc = 0;
+
+    size_t n = strlen(line);
+    if (n >= sizeof(args)) n = sizeof(args) - 1;
+    memcpy(args, line, n);
+    args[n] = '\0';
+    for (char *p = args; *p && argc < 16; )
+    {
+        while (*p == ' ') *p++ = '\0';
+        if (!*p) break;
+        argv[argc++] = p;
+        while (*p && *p != ' ') p++;
+    }
+    if (argc == 0)
+    {
+        if (report_missing) print_str("Usage: run <program> [arguments]\n");
+        return 1;
+    }
+
+    uint32_t size;
+    uint8_t *image = find_program(argv[0], &size);
+    if (!image)
+    {
+        if (!report_missing) return 0;
+        kprintf("%s: no such program\n", argv[0]);
+        return 1;
+    }
+
+    int code = process_run(image, size, argc, argv);
+    kfree(image);
+    if (code < 0)
+    {
+        char msg[96];
+        k_snprintf(msg, sizeof(msg), "%s: %s", argv[0], process_error_text(code));
+        print_error(msg);
+    }
+    else if (code != 0 && code != EXIT_INTERRUPTED && code < 128)
+    {
+        kprintf("[%s exited with code %d]\n", argv[0], code);
+    }
+    return 1;
 }
 
 

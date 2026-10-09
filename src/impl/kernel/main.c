@@ -26,6 +26,7 @@ extern void irq0_stub();
 extern void irq1_stub();
 
 extern void irq_nic_stub();
+extern void syscall_stub();
 
 // Exported by targets/x86_64/linker.ld: the real extent of the kernel image
 // (.text, .rodata, .data, .bss and the boot stack), page aligned at the end.
@@ -34,10 +35,10 @@ extern char kernel_end[];
 
 // Physical layout: kernel image 1-2 MiB (linker.ld asserts it stays below
 // 2 MiB), page-table pool 2-4 MiB (paging.c), heap in the largest usable RAM
-// region above 4 MiB. The heap stays below 4 GiB because the NICs DMA from
-// kmalloc'd buffers with 32-bit addresses.
+// region between 4 MiB and 1 GiB: 1-2 GiB is the user program range, and the
+// NICs DMA from kmalloc'd buffers with 32-bit addresses.
 #define HEAP_LOW       0x400000ULL
-#define HEAP_HIGH      0x100000000ULL
+#define HEAP_HIGH      0x40000000ULL      // user programs own 1-2 GiB (sys/process.h)
 #define HEAP_MAX       (1024ULL * 1024 * 1024)
 #define HEAP_FALLBACK  (1024 * 1024)      // no memory map: assume 1 MiB at 4 MiB
 #define HEAP_MIN       (8ULL * 1024 * 1024) // heap left after carving out the RAM disk
@@ -142,6 +143,7 @@ void kernel_main() {
     // Set keyboard IRQ (IRQ1) handler
     idt_set_entry(0x21, irq1_stub, 0x8E);
     idt_set_entry(0x20, irq0_stub, 0x8E);
+    idt_set_entry(0x80, syscall_stub, 0xEE);   // system calls: DPL 3, so ring 3 may `int 0x80`
 
     // Initialize keyboard and enable interrupts
     init_keyboard();

@@ -31,6 +31,9 @@ detailed driver messages go to the serial port and to the boot log: `dmesg` prin
 ### Programs and scripts
 | Command                    | Description                                              |
 | -------------------------- | -------------------------------------------------------- |
+| `<program> [args]`         | Run a user-mode program, e.g. `hello`, `snake`, `primes` (see [USERSPACE.md](USERSPACE.md)) |
+| `run <file> [args]`        | Run a program by file name                               |
+| `programs`                 | List the installed programs                              |
 | `sh <script>`              | Run a script file                                        |
 | `compile <file>[.c]`       | Compile and run a C file (tiny subset, see below)        |
 

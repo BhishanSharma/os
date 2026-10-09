@@ -868,3 +868,8 @@ void print_boot_status(boot_state_t state, const char *label, const char *fmt, .
 void print_set_theme_colors(void) {
     color = theme_fg | (theme_bg << 4);
 }
+
+void print_set_cursor_visible(int visible) {
+    cursor_hidden = !visible;
+    move_cursor();
+}

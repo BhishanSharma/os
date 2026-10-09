@@ -47,6 +47,7 @@ irq1_stub:
     iretq
 
 extern isr_timer       ; Your C handler for timer interrupt
+extern user_check_interrupt
 
 global irq0_stub
 irq0_stub:
@@ -76,6 +77,16 @@ irq0_stub:
     ; Send End-of-Interrupt (EOI) to PIC
     mov al, 0x20
     out 0x20, al
+
+    ; Interrupted a user program (CS in the iret frame, above the 16 saved
+    ; registers, has RPL 3)? Let process.c end it if Ctrl+C was pressed; that
+    ; call does not return then.
+    test qword [rsp + 16*8 + 8], 3
+    jz .resume
+    sub rsp, 8
+    call user_check_interrupt
+    add rsp, 8
+.resume:
 
     ; Restore all registers
     pop r15

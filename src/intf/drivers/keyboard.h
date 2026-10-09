@@ -16,6 +16,7 @@
 #define KEY_CTRL_N  14
 #define KEY_CTRL_D  4
 #define KEY_CTRL_E  5
+#define KEY_CTRL_C  3
 
 void keyboard_handler(void);
 void init_keyboard(void);
@@ -31,5 +32,8 @@ const char* history_next(void);
  * then halt until the next interrupt. */
 void keyboard_set_idle_hook(void (*hook)(void));
 void keyboard_idle(void);
+
+/* Set by the keyboard interrupt on Ctrl+C (also queued as KEY_CTRL_C). */
+extern volatile int keyboard_ctrl_c;
 
 #endif

@@ -2,7 +2,7 @@
 
 struct tss {
     uint32_t reserved0;
-    uint64_t rsp[3];          // stacks for ring 0..2 (unused: everything is ring 0)
+    uint64_t rsp[3];          // rsp[0]: kernel stack for interrupts that arrive in ring 3
     uint64_t reserved1;
     uint64_t ist[7];          // interrupt stack table
     uint64_t reserved2;
@@ -12,7 +12,7 @@ struct tss {
 
 extern void gdt_flush(const void* gdtr);     // gdt_load.asm
 
-static uint64_t gdt[5];                       // null, code, data, TSS (16 bytes)
+static uint64_t gdt[7];                       // null, code, data, TSS (16 bytes), user code, user data
 static struct tss tss;
 static uint8_t fatal_stack[8192] __attribute__((aligned(16)));
 
@@ -20,6 +20,8 @@ void gdt_init(void) {
     gdt[0] = 0;
     gdt[1] = 0x0020980000000000ULL;           // 64-bit code: P, S, exec, L
     gdt[2] = 0x0000920000000000ULL;           // data: P, S, writable
+    gdt[5] = 0x0020F80000000000ULL;           // user code: as gdt[1] with DPL 3
+    gdt[6] = 0x0000F20000000000ULL;           // user data: as gdt[2] with DPL 3
 
     tss.ist[IST_FATAL - 1] = (uint64_t)(fatal_stack + sizeof(fatal_stack));
     tss.iomap_base = sizeof(tss);             // no I/O permission bitmap
@@ -38,4 +40,8 @@ void gdt_init(void) {
     };
     gdt_flush(&gdtr);
     __asm__ volatile("ltr %0" : : "r"((uint16_t)GDT_TSS));
+}
+
+void gdt_set_kernel_stack(uint64_t top) {
+    tss.rsp[0] = top;
 }

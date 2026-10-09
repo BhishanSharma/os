@@ -18,6 +18,7 @@ static int caps_lock = 0;
 static int key_buffer[256];
 static int buffer_index = 0;
 static int extended_scancode = 0;
+volatile int keyboard_ctrl_c = 0;   // set on every Ctrl+C; whoever cares clears it
 
 // Command history
 static char command_history[HISTORY_SIZE][MAX_CMD_LEN];
@@ -58,6 +59,12 @@ void keyboard_handler() {
         // Track modifier key releases
         if (scancode == 0x1D) ctrl_pressed = 0;   // Left or right Ctrl
         if (scancode == 0x2A || scancode == 0x36) shift_pressed = 0;  // Shift
+        return;
+    }
+
+    // Buffer full (nobody is reading keys): drop the key rather than overflow.
+    if (buffer_index >= (int)(sizeof(key_buffer) / sizeof(key_buffer[0])) - 2) {
+        extended_scancode = 0;
         return;
     }
 
@@ -105,6 +112,10 @@ void keyboard_handler() {
                 case 0x31: key_buffer[buffer_index++] = KEY_CTRL_N; break;  // N
                 case 0x20: key_buffer[buffer_index++] = KEY_CTRL_D; break;  // D
                 case 0x12: key_buffer[buffer_index++] = KEY_CTRL_E; break;  // E
+                case 0x2E:                                                   // C
+                    key_buffer[buffer_index++] = KEY_CTRL_C;
+                    keyboard_ctrl_c = 1;
+                    break;
                 default: return;
             }
         } else {
@@ -151,11 +162,17 @@ void keyboard_idle(void) {
 }
 
 int get_char() {
-    if (buffer_index == 0) return 0;
-    int c = key_buffer[0];
-    for (int i = 0; i < buffer_index - 1; i++)
-        key_buffer[i] = key_buffer[i+1];
-    buffer_index--;
+    // The keyboard interrupt appends to the same buffer: keep it out meanwhile.
+    uint64_t flags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+    int c = 0;
+    if (buffer_index > 0) {
+        c = key_buffer[0];
+        for (int i = 0; i < buffer_index - 1; i++)
+            key_buffer[i] = key_buffer[i+1];
+        buffer_index--;
+    }
+    if (flags & 0x200) __asm__ volatile("sti");
     return c;
 }
 
@@ -278,8 +295,8 @@ void get_line(char* buffer, size_t max_len) {
             continue;
         }
         
-        // Filter out ALL other special keys (left/right arrows, etc.)
-        if (c >= 0x80) {
+        // Filter out ALL other special keys (left/right arrows, Ctrl combinations)
+        if (c >= 0x80 || (c < 32 && c != '\b' && c != '\n' && c != '\r')) {
             continue;  // Silently ignore
         }
 

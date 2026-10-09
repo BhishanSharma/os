@@ -20,4 +20,12 @@ void map_large_page(uint64_t virt, uint64_t phys);   // 2 MiB, both 2 MiB aligne
  * Call before paging_init(). */
 void paging_add_identity_region(uint64_t base, uint64_t size);
 
+/* The page-table entry for `virt` (flags in the low 12 bits), the 2 MiB PD
+ * entry if a large page maps it, or 0 if it is not mapped. */
+uint64_t paging_get_entry(uint64_t virt);
+
+/* Remove the 4 KiB mapping of `virt`. Returns the physical page, or 0 if it
+ * was not mapped. */
+uint64_t unmap_page(uint64_t virt);
+
 #endif

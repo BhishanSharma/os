@@ -11,6 +11,7 @@
 #include "lib/print.h"
 #include "lib/serial.h"
 #include "drivers/timer.h"
+#include "sys/process.h"
 
 extern void* isr_stub_table[32];             // exc_stubs.asm
 extern char kernel_start[];
@@ -162,6 +163,12 @@ void exception_handler(struct exc_frame* f) {
     if (f->vector == 1 || f->vector == 3) {
         kprintf("[EXC] %s at rip=0x%lx\n", exc_name[f->vector], f->rip);
         return;
+    }
+
+    // A user program faulted: end the program, not the kernel.
+    if ((f->cs & 3) == 3) {
+        uint32_t uv = f->vector < 32 ? (uint32_t)f->vector : 31;
+        process_fault(f->vector, exc_name[uv], f->rip, f->vector == 14 ? read_cr(2) : 0);
     }
 
     begin_or_halt();

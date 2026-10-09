@@ -110,5 +110,6 @@ void print_accent(const char *text);      /* theme accent colour */
 void print_highlight(const char *text);   /* theme success colour */
 void print_shell_prompt(const char *user_host, const char *path);
 void print_set_theme_colors(void);         /* back to the theme's text colours */
+void print_set_cursor_visible(int visible);
 
 #endif

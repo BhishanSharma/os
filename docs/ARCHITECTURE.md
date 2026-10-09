@@ -8,6 +8,7 @@ Makefile                       Build system  (`make help`)
 build.ps1                      Windows one-shot: build + disk + QEMU
 scripts/mkdisk.sh              Creates a FAT32 test disk without root
 scripts/mkramdisk.sh           Builds the gzipped FAT32 RAM disk image (boot/ramdisk.img.gz)
+user/                          User programs (ring 3): crt0, linker script, C library, programs/
 targets/x86_64/
   linker.ld                    Kernel linked at 1 MiB, entry symbol `start`, exports kernel_start/kernel_end
   iso/boot/grub/grub.cfg       GRUB menu: multiboot2 /boot/kernel.bin, module2 /boot/ramdisk.img.gz

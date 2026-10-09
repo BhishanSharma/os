@@ -68,8 +68,9 @@ void paging_init(uint64_t phys_base, uint64_t phys_end,
             map_page(addr, addr, PAGE_PRESENT | PAGE_RW);
     }
 
-    // Identity map ALL page tables (including those we just allocated)
-    for (uint64_t addr = PAGE_TABLE_AREA; addr < next_table; addr += PAGE_SIZE) {
+    // Identity map the whole page-table pool, not just the tables allocated so
+    // far: tables created later (user programs' mappings) must be reachable too.
+    for (uint64_t addr = PAGE_TABLE_AREA; addr < PAGE_TABLE_END; addr += PAGE_SIZE) {
         map_page(addr, addr, PAGE_PRESENT | PAGE_RW);
     }
 
@@ -118,34 +119,68 @@ void map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
     uint64_t pdpt_idx = (virt >> 30) & 0x1FF;
     uint64_t pd_idx   = (virt >> 21) & 0x1FF;
     uint64_t pt_idx   = (virt >> 12) & 0x1FF;
+    // A user page needs the user bit at every level; kernel pages under the
+    // same upper entries stay protected because their own entries lack it.
+    uint64_t upper = PAGE_PRESENT | PAGE_RW | (flags & PAGE_USER);
 
     page_entry_t *pdpt, *pd, *pt;
 
     // Get or create PDPT
     if (!(pml4[pml4_idx] & PAGE_PRESENT)) {
         pdpt = (page_entry_t*)alloc_table();
-        pml4[pml4_idx] = ((uint64_t)pdpt) | PAGE_PRESENT | PAGE_RW;
+        pml4[pml4_idx] = ((uint64_t)pdpt) | upper;
     } else {
-        // FIX: Since we identity-mapped, phys addr = virt addr
-        pdpt = (page_entry_t*)(pml4[pml4_idx] & ~0xFFF);
+        // Page tables are identity mapped: physical address = virtual address
+        pml4[pml4_idx] |= upper;
+        pdpt = (page_entry_t*)(pml4[pml4_idx] & ~0xFFFULL);
     }
 
     // Get or create PD
     if (!(pdpt[pdpt_idx] & PAGE_PRESENT)) {
         pd = (page_entry_t*)alloc_table();
-        pdpt[pdpt_idx] = ((uint64_t)pd) | PAGE_PRESENT | PAGE_RW;
+        pdpt[pdpt_idx] = ((uint64_t)pd) | upper;
     } else {
-        pd = (page_entry_t*)(pdpt[pdpt_idx] & ~0xFFF);
+        pdpt[pdpt_idx] |= upper;
+        pd = (page_entry_t*)(pdpt[pdpt_idx] & ~0xFFFULL);
     }
 
     // Get or create PT
     if (!(pd[pd_idx] & PAGE_PRESENT)) {
         pt = (page_entry_t*)alloc_table();
-        pd[pd_idx] = ((uint64_t)pt) | PAGE_PRESENT | PAGE_RW;
+        pd[pd_idx] = ((uint64_t)pt) | upper;
     } else {
-        pt = (page_entry_t*)(pd[pd_idx] & ~0xFFF);
+        if (pd[pd_idx] & PAGE_SIZE_2MB) kpanic("map_page: address is inside a 2 MiB page");
+        pd[pd_idx] |= upper;
+        pt = (page_entry_t*)(pd[pd_idx] & ~0xFFFULL);
     }
 
     // Map the actual page
-    pt[pt_idx] = (phys & ~0xFFF) | (flags & 0xFFF) | PAGE_PRESENT;
+    pt[pt_idx] = (phys & ~0xFFFULL) | (flags & 0xFFF) | PAGE_PRESENT;
+    asm volatile("invlpg (%0)" :: "r"(virt) : "memory");
+}
+
+uint64_t paging_get_entry(uint64_t virt) {
+    if (!pml4) return 0;
+    page_entry_t e = pml4[(virt >> 39) & 0x1FF];
+    if (!(e & PAGE_PRESENT)) return 0;
+    e = ((page_entry_t*)(e & ~0xFFFULL))[(virt >> 30) & 0x1FF];
+    if (!(e & PAGE_PRESENT)) return 0;
+    e = ((page_entry_t*)(e & ~0xFFFULL))[(virt >> 21) & 0x1FF];
+    if (!(e & PAGE_PRESENT) || (e & PAGE_SIZE_2MB)) return e;
+    return ((page_entry_t*)(e & ~0xFFFULL))[(virt >> 12) & 0x1FF];
+}
+
+uint64_t unmap_page(uint64_t virt) {
+    page_entry_t e = pml4[(virt >> 39) & 0x1FF];
+    if (!(e & PAGE_PRESENT)) return 0;
+    e = ((page_entry_t*)(e & ~0xFFFULL))[(virt >> 30) & 0x1FF];
+    if (!(e & PAGE_PRESENT)) return 0;
+    e = ((page_entry_t*)(e & ~0xFFFULL))[(virt >> 21) & 0x1FF];
+    if (!(e & PAGE_PRESENT) || (e & PAGE_SIZE_2MB)) return 0;
+    page_entry_t *pt = (page_entry_t*)(e & ~0xFFFULL);
+    uint64_t pte = pt[(virt >> 12) & 0x1FF];
+    if (!(pte & PAGE_PRESENT)) return 0;
+    pt[(virt >> 12) & 0x1FF] = 0;
+    asm volatile("invlpg (%0)" :: "r"(virt) : "memory");
+    return pte & ~0xFFFULL;
 }

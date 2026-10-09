@@ -34,16 +34,17 @@ The ISO ends up at `dist/x86_64/kernel.iso`.
 | Area           | Status                                                                           |
 | -------------- | -------------------------------------------------------------------------------- |
 | Boot           | GRUB (Multiboot2) -> 32-bit stub -> long mode -> `kernel_main`                   |
-| Display        | VGA text mode, 8 colour themes, 2000-line scrollback; output mirrored to COM1    |
+| Display        | Framebuffer console (BIOS and UEFI) or VGA text, boot screen, status bar, 8 themes, scrollback; output mirrored to COM1 |
 | Exceptions     | Handlers for CPU vectors 0-31, panic screen with register dump, stack guard page  |
 | Input          | PS/2 keyboard, command history, arrow keys                                       |
-| Memory         | Paging (identity mapped), first-fit heap allocator (`kmalloc`/`kfree`)           |
-| Storage        | ATA PIO driver (primary master), FAT32 read/write, directories, 8.3 names        |
+| Memory         | Paging, heap sized from the bootloader memory map (`kmalloc`/`kfree`)            |
+| User space     | Programs run in ring 3 with their own memory, system calls (`int 0x80`), a small C library, faults and Ctrl+C end only the program; see [docs/USERSPACE.md](docs/USERSPACE.md) |
+| Storage        | ATA PIO disk or a RAM disk loaded by GRUB; FAT32 read/write, directories, 8.3 names |
 | Shell          | ~30 commands (files, memory, disk, themes), see [docs/SHELL.md](docs/SHELL.md)   |
 | Editor         | Line-based text editor (`edit <file>`)                                           |
 | Scripts        | Shell scripts with variables (`sh <file>`)                                       |
 | C subset       | `compile <file.c>` runs a tiny C subset on a stack VM (`printf` of a literal, `return N`) |
-| Networking     | RTL8139 driver, ARP, IPv4, ICMP: **`ping <ip>`** works, plus `ifconfig`, `nettest`. No UDP/TCP/DNS yet, see [docs/NETWORKING.md](docs/NETWORKING.md). |
+| Networking     | RTL8139 / RTL8168, DHCP, DNS, TCP, `ping`, and `download` over HTTP or HTTPS (BearSSL TLS 1.2); see [docs/NETWORKING.md](docs/NETWORKING.md) |
 
 See [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) for the honest list of rough edges.
 
@@ -55,6 +56,7 @@ See [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) for the honest list of rough ed
 | [docs/DEVELOPING.md](docs/DEVELOPING.md) | Daily workflow, debugging, adding commands and drivers    |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Boot flow, memory map, interrupts, source layout       |
 | [docs/SHELL.md](docs/SHELL.md)           | Every shell command, editor keys, scripting, C subset     |
+| [docs/USERSPACE.md](docs/USERSPACE.md)   | User programs: running them, writing your own, how ring 3 works |
 | [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) | Bugs, limits and ideas for what to do next            |
 | [docs/NETWORKING.md](docs/NETWORKING.md) | Network stack roadmap (towards `download <url>`)          |
 
