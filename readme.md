@@ -48,7 +48,7 @@ The ISO ends up at `dist/x86_64/kernel.iso`.
 | Scripts        | Shell scripts with variables (`sh <file>`)                                       |
 | C subset       | `compile <file.c>` runs a tiny C subset on a stack VM (`printf` of a literal, `return N`) |
 | Networking     | RTL8139 / RTL8168 / Intel e1000, DHCP, DNS, TCP, `ping`, and `download` over HTTP or HTTPS (BearSSL TLS 1.2); see [docs/NETWORKING.md](docs/NETWORKING.md) |
-| Wi-Fi          | Detection only: the PCI bus is scanned at boot and `wifi` names the adapter (Intel, Qualcomm Atheros, Realtek, MediaTek, Broadcom chips), its Wi-Fi generation and the driver it would need; `lspci` lists every PCI device. No Wi-Fi driver yet |
+| Wi-Fi          | Intel AX101/AX201/AX211 ("So" family, iwlwifi firmware loaded from the RAM disk): scans, joins open and WPA2-Personal (AES) networks, then serves the network stack like an Ethernet card (DHCP, ping, DNS, HTTPS downloads). The WPA2 handshake is in `net/wpa.c`; the card encrypts. The joined network is saved in `/WIFI.CFG` and rejoined at boot and after a drop. Legacy 802.11a/g rates for now (up to 54 Mbit/s). Other chips: detection only (`wifi` names them) |
 
 See [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) for the honest list of rough edges.
 

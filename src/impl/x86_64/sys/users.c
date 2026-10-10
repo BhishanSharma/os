@@ -379,12 +379,17 @@ static int write_guard(const char *path) {
     return user_may_write(path);
 }
 
-/* Like /etc/shadow: only root reads the password hashes. */
+/* Like /etc/shadow: only root reads the password hashes (and the saved
+ * Wi-Fi key). */
 static int read_guard(const char *path) {
     if (privileged || session_depth == 0 || user_is_root()) return 1;
     char abs[256];
     normalize_path(path, abs, sizeof(abs));
-    return strcmp(abs, "/" DB_FILE) != 0;
+    return strcmp(abs, "/" DB_FILE) != 0 && strcmp(abs, "/WIFI.CFG") != 0;
+}
+
+int users_read_line(char *buf, int size, int echo) {
+    return read_input(buf, size, echo);
 }
 
 /* ---- Sessions ----------------------------------------------------------- */

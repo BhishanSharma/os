@@ -116,7 +116,7 @@ static void delay_ms(uint32_t ms) {
 /* PCI power management: put the device in D0 (the firmware leaves these
  * controllers in D3hot). Leaving D3hot can reset the device, including its
  * command register and BARs, so the caller sets those up afterwards. */
-static void pci_power_on(i2c_ctrl_t *c) {
+static void ctrl_power_on(i2c_ctrl_t *c) {
     if (!(pci_config_read_dword(c->bus, c->slot, c->func, 0x04) & (1u << 20))) return;   /* no cap list */
     uint8_t cap = pci_config_read_byte(c->bus, c->slot, c->func, 0x34) & 0xFC;
     for (int guard = 0; cap && guard < 32; guard++) {
@@ -143,137 +143,12 @@ static int i2c_disable(i2c_ctrl_t *c) {
     return -1;
 }
 
-/* ---- Giving a controller an address ---------------------------------------- */
-
-/* Some firmware leaves these controllers without a memory address (BAR 0),
- * as Windows and Linux assign one themselves. Do the same: find what every
- * other device uses, and put the controller in the first free, aligned spot
- * after the firmware's own assignments, below the top 64 MiB (chipset,
- * APIC, HPET, flash) and outside the PCI configuration window. */
-#define MAX_RANGES 160
-static uint64_t used_start[MAX_RANGES], used_end[MAX_RANGES];
-static int used_count;
-static uint32_t assign_low;                  /* lowest firmware-assigned 32-bit BAR */
-static char assign_note[80];
-
-static void add_used(uint64_t start, uint64_t size) {
-    if (!size || used_count >= MAX_RANGES) return;
-    used_start[used_count] = start;
-    used_end[used_count++] = start + size;
-}
-
-/* A BAR's size, probed the standard way (decoding off meanwhile). */
-static uint64_t bar_size(uint8_t b, uint8_t d, uint8_t f, uint8_t off, int is64) {
-    uint32_t cmd = pci_config_read_dword(b, d, f, 0x04);
-    pci_config_write_dword(b, d, f, 0x04, cmd & ~0x3u & 0xFFFF);
-    uint32_t lo = pci_config_read_dword(b, d, f, off), hi = is64 ? pci_config_read_dword(b, d, f, off + 4) : 0;
-    pci_config_write_dword(b, d, f, off, 0xFFFFFFFF);
-    uint32_t mlo = pci_config_read_dword(b, d, f, off);
-    uint32_t mhi = 0xFFFFFFFF;
-    if (is64) {
-        pci_config_write_dword(b, d, f, off + 4, 0xFFFFFFFF);
-        mhi = pci_config_read_dword(b, d, f, off + 4);
-        pci_config_write_dword(b, d, f, off + 4, hi);
-    }
-    pci_config_write_dword(b, d, f, off, lo);
-    pci_config_write_dword(b, d, f, 0x04, cmd & 0xFFFF);
-    uint64_t mask = ((uint64_t)mhi << 32) | (mlo & ~0xFu);
-    if (!(mlo & ~0xFu)) return 0;
-    return ~mask + 1;
-}
-
-static void collect_used(void) {
-    used_count = 0;
-    assign_low = 0xFFFFFFFF;
-    __asm__ volatile("cli");
-    for (int bus = 0; bus < 256; bus++)
-        for (uint8_t dev = 0; dev < 32; dev++)
-            for (uint8_t fn = 0; fn < 8; fn++) {
-                uint32_t id = pci_config_read_dword((uint8_t)bus, dev, fn, 0);
-                if ((id & 0xFFFF) == 0xFFFF) { if (!fn) break; continue; }
-                uint8_t type = (pci_config_read_dword((uint8_t)bus, dev, fn, 0x0C) >> 16) & 0xFF;
-                int bars = (type & 0x7F) == 0 ? 6 : (type & 0x7F) == 1 ? 2 : 0;
-                for (int i = 0; i < bars; i++) {
-                    uint8_t off = (uint8_t)(0x10 + 4 * i);
-                    uint32_t v = pci_config_read_dword((uint8_t)bus, dev, fn, off);
-                    if (v & 1) continue;                            /* I/O ports */
-                    int is64 = ((v >> 1) & 3) == 2;
-                    uint64_t base = v & ~0xFu;
-                    if (is64) base |= (uint64_t)pci_config_read_dword((uint8_t)bus, dev, fn, off + 4) << 32;
-                    if (base) {
-                        add_used(base, bar_size((uint8_t)bus, dev, fn, off, is64));
-                        if (base < 0x100000000ull && base >= 0x10000000 && base < assign_low) assign_low = (uint32_t)base;
-                    }
-                    if (is64) i++;
-                }
-                if ((type & 0x7F) == 1) {                           /* bridge windows */
-                    uint32_t m = pci_config_read_dword((uint8_t)bus, dev, fn, 0x20);
-                    uint64_t mb = (uint64_t)(m & 0xFFF0) << 16, ml = ((uint64_t)(m >> 16 & 0xFFF0) << 16) | 0xFFFFF;
-                    if (ml > mb) add_used(mb, ml - mb + 1);
-                    uint32_t pm = pci_config_read_dword((uint8_t)bus, dev, fn, 0x24);
-                    uint64_t pb = ((uint64_t)(pm & 0xFFF0) << 16) | ((uint64_t)pci_config_read_dword((uint8_t)bus, dev, fn, 0x28) << 32);
-                    uint64_t pl = ((uint64_t)(pm >> 16 & 0xFFF0) << 16) | 0xFFFFF |
-                                  ((uint64_t)pci_config_read_dword((uint8_t)bus, dev, fn, 0x2C) << 32);
-                    if (pl > pb) add_used(pb, pl - pb + 1);
-                }
-                if (!fn && !(type & 0x80)) break;                    /* single-function device */
-            }
-    __asm__ volatile("sti");
-
-    /* The PCI configuration window (Intel host bridge PCIEXBAR) and the top 64 MiB. */
-    uint64_t pciex = pci_config_read_dword(0, 0, 0, 0x60) | (uint64_t)pci_config_read_dword(0, 0, 0, 0x64) << 32;
-    if (pciex & 1) {
-        uint64_t len = (pciex >> 1 & 3) == 1 ? (128ull << 20) : (pciex >> 1 & 3) == 2 ? (64ull << 20) : (256ull << 20);
-        add_used(pciex & 0x7FFC000000ull, len);
-    }
-    add_used(0xFC000000ull, 0x4000000ull);
-}
-
-static int overlaps(uint64_t a, uint64_t size) {
-    for (int i = 0; i < used_count; i++)
-        if (a < used_end[i] && used_start[i] < a + size) return 1;
-    return 0;
-}
-
-static uint64_t find_free(uint64_t size) {
-    uint32_t tolud = pci_config_read_dword(0, 0, 0, 0xBC) & 0xFFF00000u;   /* top of low RAM */
-    uint64_t floor = assign_low != 0xFFFFFFFF ? assign_low : tolud;
-    if (floor < tolud) floor = tolud;
-    uint64_t best = 0;
-    /* Candidates: just after each used range, aligned. Take the lowest one. */
-    for (int i = -1; i < used_count; i++) {
-        uint64_t a = i < 0 ? floor : used_end[i];
-        a = (a + size - 1) & ~(size - 1);
-        if (a < floor || a + size > 0xFC000000ull || overlaps(a, size)) continue;
-        if (!best || a < best) best = a;
-    }
-    k_snprintf(assign_note, sizeof(assign_note), "TOLUD %x, firmware BARs from %x, %d ranges in use",
-               tolud, assign_low, used_count);
-    return best;
-}
-
-static uint64_t assign_bar(i2c_ctrl_t *c) {
-    uint32_t v = pci_config_read_dword(c->bus, c->slot, c->func, 0x10);
-    int is64 = ((v >> 1) & 3) == 2;
-    uint64_t size = bar_size(c->bus, c->slot, c->func, 0x10, is64);
-    if (!size || size > (16u << 20)) return 0;
-    if (size < 4096) size = 4096;
-    if (!used_count) collect_used();
-    uint64_t a = find_free(size);
-    if (!a) return 0;
-    pci_config_write_dword(c->bus, c->slot, c->func, 0x10, (uint32_t)a | (v & 0xF));
-    if (is64) pci_config_write_dword(c->bus, c->slot, c->func, 0x14, 0);
-    add_used(a, size);
-    c->assigned = 1;
-    return a;
-}
-
 static int ctrl_start(i2c_ctrl_t *c) {
     /* Wake it first, then put back the BAR (if the wake-up cleared it) and
      * turn memory decoding on. */
     uint32_t bar0 = pci_config_read_dword(c->bus, c->slot, c->func, 0x10);
     uint32_t bar1 = pci_config_read_dword(c->bus, c->slot, c->func, 0x14);
-    pci_power_on(c);
+    ctrl_power_on(c);
     if ((pci_config_read_dword(c->bus, c->slot, c->func, 0x10) & ~0xFu) != (bar0 & ~0xFu)) {
         pci_config_write_dword(c->bus, c->slot, c->func, 0x10, bar0);
         pci_config_write_dword(c->bus, c->slot, c->func, 0x14, bar1);
@@ -282,11 +157,13 @@ static int ctrl_start(i2c_ctrl_t *c) {
     pci_config_write_dword(c->bus, c->slot, c->func, 0x04, (cmd & 0xFFFF) | 0x2);   /* memory space */
     uint64_t base = bar0 & ~0xFu;
     if (((bar0 >> 1) & 3) == 2) base |= (uint64_t)bar1 << 32;
-    if (!base) base = assign_bar(c);
+    if (!base) {
+        base = pci_assign_bar0(c->bus, c->slot, c->func);
+        c->assigned = base != 0;
+    }
     c->base = base;
     if (!base) return -1;
-    map_page(base, base, PAGE_PRESENT | PAGE_RW | PAGE_PCD | PAGE_PWT);
-    c->regs = (volatile uint8_t *)base;
+    c->regs = (volatile uint8_t *)mmio_map(base, 4096);
 
     c->fw_resets = rd(c, LPSS_RESETS);
     c->fw_clock = rd(c, 0x200);
@@ -413,7 +290,8 @@ typedef struct {
 
 /* Where the report fields are (bit offsets after the report ID): the mouse
  * collection (relative movement), and the Precision Touchpad collection
- * (absolute finger positions; the first finger's fields are used). */
+ * (absolute finger positions: one block per finger, each with a contact ID). */
+#define TP_FINGERS 5
 typedef struct {
     int report_id;                       /* -1: reports have no ID byte */
     int buttons_off, buttons;
@@ -422,6 +300,8 @@ typedef struct {
     int tp_id;                           /* touchpad report ID, -1: none */
     int tp_tip_off, tp_x_off, tp_x_size, tp_y_off, tp_y_size, tp_cc_off, tp_cc_size, tp_btn_off;
     uint32_t tp_x_max, tp_y_max;
+    int tp_fingers;                      /* finger blocks in a report (finger collections) */
+    int f_tip[TP_FINGERS], f_id[TP_FINGERS], f_id_size[TP_FINGERS], f_x[TP_FINGERS], f_y[TP_FINGERS];
     int collections;                     /* application collections seen */
     uint32_t apps[6];                    /* their usages (page << 16 | usage) */
     int app_ids[6];
@@ -466,7 +346,7 @@ static void parse_report_desc(const uint8_t *p, int len, layout_t *L) {
     uint32_t page = 0, rsize = 0, rcount = 0, rid = 0, any_id = 0, lmax = 0;
     uint32_t usages[16], umin = 0, umax = 0;
     int nusages = 0, have_range = 0;
-    int depth = 0, mouse_depth = -1, pad_depth = -1;
+    int depth = 0, mouse_depth = -1, pad_depth = -1, finger = -1;
     uint32_t stack_page[8], stack_rsize[8], stack_rcount[8], stack_rid[8];
     int sp = 0;
 
@@ -503,6 +383,12 @@ static void parse_report_desc(const uint8_t *p, int len, layout_t *L) {
                     if (u == 0x00010002 && mouse_depth < 0) mouse_depth = depth;
                     if (u == 0x000D0005 && pad_depth < 0) pad_depth = depth;
                 }
+                if (pad_depth >= 0 && depth > pad_depth && nusages && usages[0] == 0x000D0022 &&
+                    L->tp_fingers < TP_FINGERS) {
+                    finger = L->tp_fingers++;
+                    L->f_tip[finger] = L->f_id[finger] = L->f_x[finger] = L->f_y[finger] = -1;
+                    L->f_id_size[finger] = 0;
+                }
                 depth++;
             } else if (tag == 12) {                          /* end collection */
                 if (depth > 0) depth--;
@@ -533,6 +419,12 @@ static void parse_report_desc(const uint8_t *p, int len, layout_t *L) {
                         else if (u == 0x00010031 && L->tp_y_off < 0) { L->tp_y_off = off; L->tp_y_size = (int)rsize; L->tp_y_max = lmax; }
                         else if (u == 0x000D0054 && L->tp_cc_off < 0) { L->tp_cc_off = off; L->tp_cc_size = (int)rsize; }
                         else if (u == 0x00090001 && L->tp_btn_off < 0) L->tp_btn_off = off;
+                        if (finger >= 0) {
+                            if (u == 0x000D0042) L->f_tip[finger] = off;
+                            else if (u == 0x000D0051) { L->f_id[finger] = off; L->f_id_size[finger] = (int)rsize; }
+                            else if (u == 0x00010030) L->f_x[finger] = off;
+                            else if (u == 0x00010031) L->f_y[finger] = off;
+                        }
                     }
                     offsets[rid] = off + (int)rsize;
                 }
@@ -541,6 +433,13 @@ static void parse_report_desc(const uint8_t *p, int len, layout_t *L) {
         }
     }
     if (!any_id) L->report_id = -1;
+    if (L->tp_fingers == 0 && L->tp_tip_off >= 0) {          /* no finger collections: one finger */
+        L->tp_fingers = 1;
+        L->f_tip[0] = L->tp_tip_off;
+        L->f_id[0] = -1;
+        L->f_x[0] = L->tp_x_off;
+        L->f_y[0] = L->tp_y_off;
+    }
 }
 
 static int32_t get_bits(const uint8_t *data, int datalen, int off, int size, int sign) {
@@ -564,17 +463,31 @@ static int read_input(uint8_t *buf, int max) {
     return n > got ? got : n;
 }
 
-/* Precision Touchpad reports: absolute finger positions. Turned into
- * pointer movement (one finger), scrolling (two fingers moving), a click
- * (the pad pressed down; with two fingers on it, a right click), and tap
- * to click (a short touch that hardly moved; two fingers: right click). */
+/* Precision Touchpad reports: absolute finger positions, one block per
+ * finger. Some pads put every finger in one report, others send one report
+ * per finger (the contact count is then only in the first of them), so
+ * fingers are tracked by contact ID, and the pointer follows one finger
+ * (the "primary") only: it never jumps to another finger's position.
+ *   one finger moving       pointer
+ *   two fingers moving      scrolling
+ *   pad pressed down        left click (right click with two fingers down)
+ *   short tap               left click (two-finger tap: right click)
+ * Around a press the pointer stands still for a moment: pressing the pad
+ * moves the finger a little, which must not turn a click into a selection. */
+#define TP_CONTACTS 8
+
 static struct {
-    int touching, last_x, last_y, fingers, moved, clicked;
-    uint32_t since;
+    struct { int id, down, x, y; uint32_t seen; } c[TP_CONTACTS];
+    int touching;                                           /* any finger down */
+    int primary;                                            /* contact index the pointer follows, -1 */
+    int max_fingers, moved, clicked;
+    uint32_t since;                                         /* touch start */
+    uint32_t still_until;                                   /* no pointer movement before this tick */
     int rem_x, rem_y, scroll;
     int held;                                               /* buttons the pad press holds */
+    int press;
     uint32_t last_report;
-} pad;
+} pad = { .primary = -1 };
 
 static int pad_scale(int delta, int *rem) {
     /* The width of the pad moves the pointer 1600 "mouse pixels" (two
@@ -585,54 +498,120 @@ static int pad_scale(int delta, int *rem) {
     return v / range;
 }
 
+static int contact_slot(int id) {
+    int free_slot = -1;
+    for (int i = 0; i < TP_CONTACTS; i++) {
+        if (pad.c[i].down && pad.c[i].id == id) return i;
+        if (!pad.c[i].down && free_slot < 0) free_slot = i;
+    }
+    return free_slot;
+}
+
+static int fingers_down(void) {
+    int n = 0;
+    for (int i = 0; i < TP_CONTACTS; i++) n += pad.c[i].down;
+    return n;
+}
+
 static void handle_touchpad(const uint8_t *data, int datalen) {
     const layout_t *L = &tp_layout;
-    int tip = L->tp_tip_off >= 0 ? get_bits(data, datalen, L->tp_tip_off, 1, 0) : 1;
-    int x = get_bits(data, datalen, L->tp_x_off, L->tp_x_size, 0);
-    int y = get_bits(data, datalen, L->tp_y_off, L->tp_y_size, 0);
-    int fingers = L->tp_cc_off >= 0 ? get_bits(data, datalen, L->tp_cc_off, L->tp_cc_size, 0) : tip;
+    uint32_t now = get_tick();
+    int cc = L->tp_cc_off >= 0 ? get_bits(data, datalen, L->tp_cc_off, L->tp_cc_size, 0) : -1;
     int press = L->tp_btn_off >= 0 ? get_bits(data, datalen, L->tp_btn_off, 1, 0) : 0;
-    int dx = 0, dy = 0, wheel = 0;
-    pad.last_report = get_tick();
+    int dx = 0, dy = 0, wheel = 0, scroll_dy = 0, scrolled = 0;
+    int range = (int)(L->tp_x_max ? L->tp_x_max : 4096);
+    pad.last_report = now;
 
-    if (tip) {
-        if (!pad.touching) {
-            pad.touching = 1;
-            pad.since = get_tick();
-            pad.moved = pad.clicked = pad.scroll = 0;
-            pad.fingers = fingers;
-            pad.rem_x = pad.rem_y = 0;
-        } else {
-            int mx = x - pad.last_x, my = y - pad.last_y;
-            pad.moved += (mx < 0 ? -mx : mx) + (my < 0 ? -my : my);
-            if (fingers >= 2) {                             /* two fingers: scroll */
-                pad.scroll += my;
-                int step = (int)(tp_layout.tp_y_max ? tp_layout.tp_y_max : 4096) / 25;
-                while (pad.scroll >= step) { wheel--; pad.scroll -= step; }    /* fingers down: scroll down */
-                while (pad.scroll <= -step) { wheel++; pad.scroll += step; }
-            } else {
-                dx = pad_scale(mx, &pad.rem_x);
-                dy = pad_scale(my, &pad.rem_y);
-            }
+    /* Finger blocks in use: the contact count's worth (one block if this is a
+     * follow-up report of a frame, whose count is 0). */
+    int blocks = cc > 0 ? cc : 1;
+    if (blocks > L->tp_fingers) blocks = L->tp_fingers;
+    for (int k = 0; k < blocks; k++) {
+        int tip = get_bits(data, datalen, L->f_tip[k], 1, 0);
+        int id = L->f_id[k] >= 0 ? get_bits(data, datalen, L->f_id[k], L->f_id_size[k], 0) : k;
+        int x = get_bits(data, datalen, L->f_x[k], L->tp_x_size, 0);
+        int y = get_bits(data, datalen, L->f_y[k], L->tp_y_size, 0);
+        int i = contact_slot(id);
+        if (i < 0) continue;
+        if (!tip) {                                         /* this finger lifted */
+            pad.c[i].down = 0;
+            if (i == pad.primary) pad.primary = -1;
+            continue;
         }
-        if (fingers > pad.fingers) pad.fingers = fingers;
-        pad.last_x = x;
-        pad.last_y = y;
+        if (pad.c[i].down) {
+            int mx = x - pad.c[i].x, my = y - pad.c[i].y;
+            if (i == pad.primary) {
+                pad.moved += (mx < 0 ? -mx : mx) + (my < 0 ? -my : my);
+                dx += mx;
+                dy += my;
+            } else if (pad.primary < 0) {
+                pad.primary = i;                            /* follow this one from now on */
+            }
+            scroll_dy += my;
+            scrolled = 1;
+        } else if (pad.primary < 0) {
+            pad.primary = i;
+        }
+        pad.c[i].id = id;
+        pad.c[i].down = 1;
+        pad.c[i].x = x;
+        pad.c[i].y = y;
+        pad.c[i].seen = now;
     }
+    /* A finger not reported for 300 ms has gone (a lost "lifted" report). */
+    for (int i = 0; i < TP_CONTACTS; i++)
+        if (pad.c[i].down && (uint32_t)(now - pad.c[i].seen) > TIMER_FREQ * 3 / 10) {
+            pad.c[i].down = 0;
+            if (i == pad.primary) pad.primary = -1;
+        }
 
-    /* The pad pressed down: left click, or right click with two fingers. */
-    if (press && !pad.held) pad.held = fingers >= 2 ? MOUSE_RIGHT : MOUSE_LEFT;
+    int n = fingers_down();
+    if (cc > n) n = cc;
+    if (n && !pad.touching) {                               /* touch starts */
+        pad.touching = 1;
+        pad.since = now;
+        pad.moved = pad.clicked = pad.scroll = 0;
+        pad.max_fingers = 0;
+        pad.rem_x = pad.rem_y = 0;
+        dx = dy = 0;
+    }
+    if (n > pad.max_fingers) pad.max_fingers = n;
+
+    /* Pressing or releasing the pad: hold the pointer still briefly. */
+    if (press != pad.press) {
+        pad.press = press;
+        pad.still_until = now + TIMER_FREQ / 6;
+    }
+    if (press && !pad.held) pad.held = n >= 2 ? MOUSE_RIGHT : MOUSE_LEFT;
     if (!press) pad.held = 0;
     if (press) pad.clicked = 1;
-    mouse_report("I2C touchpad", pad.held, dx, dy, wheel);
 
-    if (!tip && pad.touching) {                             /* lifted: was it a tap? */
+    int mdx = 0, mdy = 0;
+    if (n >= 2) {                                           /* two fingers: scroll */
+        if (scrolled) {
+            pad.scroll += scroll_dy / (n > 0 ? n : 1);
+            int step = (int)(L->tp_y_max ? L->tp_y_max : 4096) / 25;
+            while (pad.scroll >= step) { wheel--; pad.scroll -= step; }    /* fingers down: scroll down */
+            while (pad.scroll <= -step) { wheel++; pad.scroll += step; }
+        }
+    } else if (n == 1 && (int32_t)(now - pad.still_until) >= 0) {
+        /* Ignore the first little bit of a touch (a resting or tapping finger). */
+        if (pad.moved > range / 100 || (uint32_t)(now - pad.since) > TIMER_FREQ / 5) {
+            mdx = pad_scale(dx, &pad.rem_x);
+            mdy = pad_scale(dy, &pad.rem_y);
+        }
+    }
+    mouse_report("I2C touchpad", pad.held, mdx, mdy, wheel);
+
+    if (!n && pad.touching) {                               /* all lifted: was it a tap? */
         pad.touching = 0;
-        int range = (int)(tp_layout.tp_x_max ? tp_layout.tp_x_max : 4096);
-        if (!pad.clicked && (uint32_t)(get_tick() - pad.since) < TIMER_FREQ / 4 && pad.moved < range / 40) {
-            int b = pad.fingers >= 2 ? MOUSE_RIGHT : MOUSE_LEFT;
-            mouse_report("I2C touchpad", b, 0, 0, 0);
-            mouse_report("I2C touchpad", 0, 0, 0, 0);
+        pad.primary = -1;
+        if (!pad.clicked && (uint32_t)(now - pad.since) < TIMER_FREQ / 5 && pad.moved < range / 40) {
+            int b = pad.max_fingers == 2 ? MOUSE_RIGHT : MOUSE_LEFT;
+            if (pad.max_fingers <= 2) {
+                mouse_report("I2C touchpad", b, 0, 0, 0);
+                mouse_report("I2C touchpad", 0, 0, 0, 0);
+            }
         }
     }
 }
@@ -664,11 +643,15 @@ void touchpad_poll(void) {
     tp_last_tick = get_tick();
     for (int i = 0; i < 4; i++) {                           /* drain a few */
         int n = read_input(tp_buf, sizeof(tp_buf));
-        if (n == 0 && pad.touching && (uint32_t)(get_tick() - pad.last_report) > TIMER_FREQ / 10) {
-            /* Quiet for 100 ms while "touching": the finger was lifted without
-             * a last report saying so (or it is resting): end the touch. */
-            static uint8_t lifted[64];
-            handle_touchpad(lifted, (int)sizeof(lifted));   /* all zero: no tip */
+        if (n == 0 && pad.touching && (uint32_t)(get_tick() - pad.last_report) > TIMER_FREQ * 3 / 10) {
+            /* Quiet for 300 ms while touching: the "lifted" report was lost. */
+            for (int k = 0; k < TP_CONTACTS; k++) pad.c[k].down = 0;
+            pad.touching = 0;
+            pad.primary = -1;
+            if (pad.held) {
+                pad.held = pad.press = 0;
+                mouse_report("I2C touchpad", 0, 0, 0, 0);
+            }
             return;
         }
         if (n <= 0) return;
@@ -867,12 +850,11 @@ void touchpad_diagnose(void) {
                 c->base, c->assigned ? " (assigned by us)" : "", c->pm_before,
                 c->pm_after, c->fw_resets, c->fw_clock, c->fw_con, c->fw_ss_h, c->fw_ss_l, c->fw_fs_h, c->fw_fs_l);
     }
-    if (!assign_note[0]) {                                  /* dry run: where a 4 KiB BAR would go */
-        if (!used_count) collect_used();
-        uint64_t a = find_free(4096);
+    if (!pci_assign_note()[0]) {                            /* dry run: where a 4 KiB BAR would go */
+        uint64_t a = pci_find_free_window(4096);
         kprintf("  a free 4 KiB address would be %lx\n", a);
     }
-    kprintf("  address assignment: %s\n", assign_note);
+    kprintf("  address assignment: %s\n", pci_assign_note());
     kprintf("Touchpad: %s\n", tp_text);
     if (!tp_ctrl) return;
     kprintf("  HID descriptor at register 0x%04x: report descriptor %u bytes, input max %u bytes\n",
@@ -887,6 +869,10 @@ void touchpad_diagnose(void) {
     kprintf("  touchpad report id %d: tip at bit %d, X %d bits at %d (max %u), Y %d bits at %d (max %u),"
             " fingers at %d, click at %d\n", L->tp_id, L->tp_tip_off, L->tp_x_size, L->tp_x_off, L->tp_x_max,
             L->tp_y_size, L->tp_y_off, L->tp_y_max, L->tp_cc_off, L->tp_btn_off);
+    kprintf("  %d finger block%s:", L->tp_fingers, L->tp_fingers == 1 ? "" : "s");
+    for (int k = 0; k < L->tp_fingers; k++)
+        kprintf(" [tip %d id %d/%d x %d y %d]", L->f_tip[k], L->f_id[k], L->f_id_size[k], L->f_x[k], L->f_y[k]);
+    kprintf("\n");
 
     kprintf("Move a finger and click for 8 seconds; reports (changed ones only):\n");
     int was_ready = tp_ready, shown = 0, reads = 0, same = 0, empty = 0;

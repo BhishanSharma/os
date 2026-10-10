@@ -24,6 +24,7 @@
 #include "drivers/wifi.h"
 #include "drivers/usb.h"
 #include "drivers/touchpad.h"
+#include "drivers/iwlwifi.h"
 #include "drivers/display.h"
 #include "lib/fbcon.h"
 
@@ -218,6 +219,11 @@ static void cmd_help(void)
     print_str("\n=== Network ===\n");
     print_str("ifconfig           - show MAC, IP settings and packet counters\n");
     print_str("wifi               - Wi-Fi adapters in this machine and what they need\n");
+    print_str("wifi scan          - list the Wi-Fi networks in range\n");
+    print_str("wifi connect [n]   - join network number n of the scan (or give its name;\n");
+    print_str("                     no argument: scan and choose). Asks the password once\n");
+    print_str("wifi status        - the network joined, signal, address\n");
+    print_str("wifi disconnect    - leave the network;  wifi forget - delete the saved one\n");
     print_str("dhcp               - get an IP address from the network's DHCP server\n");
     print_str("nettest            - send an ARP request to the gateway, wait for the reply\n");
     print_str("ping <ip> [count]  - send ICMP echo requests (default 4), e.g. ping 10.0.2.2\n");
@@ -1146,6 +1152,72 @@ static int kernel_command(const char *line, int run_programs) {
     else if (strcmp(line, "wifi") == 0)
     {
         wifi_print_status();
+    }
+    else if (strcmp(line, "wifi start") == 0)
+    {
+        if (!need_root("wifi start")) return 1;
+        iwl_start();
+    }
+    else if (strcmp(line, "wifi scan") == 0)
+    {
+        if (!need_root("wifi scan")) return 1;
+        iwl_scan();
+    }
+    else if (strncmp(line, "wifi connect", 12) == 0)
+    {
+        if (!need_root("wifi connect")) return 1;
+        const char *name = line + 12;
+        while (*name == ' ') name++;
+        /* No name: scan and choose by number. A number: from the last scan. */
+        char choice[16];
+        int number = 0, digits = *name != 0;
+        for (const char *q = name; *q; q++)
+        {
+            if (*q < '0' || *q > '9') { digits = 0; break; }
+            number = number * 10 + (*q - '0');
+        }
+        if (!*name)
+        {
+            if (iwl_scan() != 0 || !iwl_scan_pick(1)) return 1;
+            print_str("Network number: ");
+            if (users_read_line(choice, sizeof(choice), 1) <= 0) return 1;
+            number = 0;
+            for (const char *q = choice; *q >= '0' && *q <= '9'; q++) number = number * 10 + (*q - '0');
+            digits = 1;
+        }
+        if (digits)
+        {
+            if (!iwl_scan_pick(1) && iwl_scan() != 0) return 1;
+            if (!iwl_scan_pick(number))
+            {
+                kprintf("No network number %d in the list (`wifi scan` shows it).\n", number);
+                return 1;
+            }
+            name = iwl_scan_pick(number);
+            kprintf("Network: %s\n", name);
+        }
+        char password[64] = "";
+        if (!iwl_has_saved(name))
+        {
+            print_str("Password (empty for an open network): ");
+            if (users_read_line(password, sizeof(password), 0) < 0) return 1;
+        }
+        iwl_connect(name, password);
+        memset(password, 0, sizeof(password));
+    }
+    else if (strcmp(line, "wifi status") == 0)
+    {
+        iwl_print_status();
+    }
+    else if (strcmp(line, "wifi disconnect") == 0)
+    {
+        if (!need_root("wifi disconnect")) return 1;
+        iwl_disconnect();
+    }
+    else if (strcmp(line, "wifi forget") == 0)
+    {
+        if (!need_root("wifi forget")) return 1;
+        iwl_forget();
     }
     else if (strcmp(line, "lspci") == 0)
     {

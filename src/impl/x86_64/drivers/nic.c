@@ -45,6 +45,11 @@ int nic_probe_init(void) {
     return -1;
 }
 
+void nic_attach(nic_driver_t *drv) {
+    active = drv;
+    timer_set_poll_hook(nic_handle_irq);
+}
+
 int nic_is_up(void) { return active != 0; }
 
 const char *nic_name(void) { return active ? active->name : "none"; }

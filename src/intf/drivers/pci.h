@@ -27,4 +27,16 @@ const char *pci_class_name(uint8_t class_code, uint8_t subclass, uint8_t prog_if
 /* "Intel", "Realtek", ...; 0 if unknown */
 const char *pci_vendor_name(uint16_t vendor);
 
+/* Give a device that the firmware left without one a memory address for
+ * BAR 0 (in a free spot after the firmware's assignments). Returns it, or 0. */
+uint64_t pci_assign_bar0(uint8_t bus, uint8_t slot, uint8_t func);
+/* Where a BAR of `size` would go (a dry run). */
+uint64_t pci_find_free_window(uint64_t size);
+/* How the last assignment was decided, for diagnostics. */
+const char *pci_assign_note(void);
+
+/* Wake a device to D0 (PCI power management). Returns the power register
+ * before (bits 0-1: D-state), and the one after in *after. */
+uint32_t pci_power_on(uint8_t bus, uint8_t slot, uint8_t func, uint32_t *after);
+
 #endif

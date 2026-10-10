@@ -42,4 +42,7 @@ int users_authenticate(const char *name, user_t *out);
  * Returns 1 if `line` was one of them. */
 int users_command(const char *line);
 
+/* A line from the keyboard; `echo` 0 for passwords. -1 on Ctrl+C. */
+int users_read_line(char *buf, int size, int echo);
+
 #endif

@@ -336,6 +336,10 @@ int net_is_up(void) {
     return net_up;
 }
 
+uint32_t net_lease_seconds(void) {
+    return cfg_from_dhcp ? cfg_lease_seconds : 0;
+}
+
 const net_config_t *net_get_config(void) {
     return &cfg;
 }

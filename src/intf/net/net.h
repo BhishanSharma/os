@@ -30,6 +30,8 @@ int  net_is_up(void);                       // 1 if a NIC was found and net_init
  * settings stay. Needs interrupts enabled. Returns 0 on success. */
 int  net_configure(void);
 const net_config_t *net_get_config(void);
+/* DHCP lease length in seconds (0 if the address is not from DHCP). */
+uint32_t net_lease_seconds(void);
 
 void net_print_ifconfig(void);              // the `ifconfig` shell command
 int  net_selftest(void);                    // the `nettest` shell command; 0 = got a reply

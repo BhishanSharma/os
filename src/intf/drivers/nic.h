@@ -40,4 +40,8 @@ void nic_set_rx_handler(nic_rx_cb_t cb);
 void nic_get_stats(nic_stats_t *out);
 int  nic_send(const void *frame, uint16_t len);   /* 0 on success */
 
+/* Make `drv` the card the network stack uses (Wi-Fi, once it has joined a
+ * network); it is polled from the timer. */
+void nic_attach(nic_driver_t *drv);
+
 #endif

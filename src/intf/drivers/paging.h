@@ -13,6 +13,11 @@
 
 void paging_init(uint64_t phys_base, uint64_t phys_end, uint64_t heap_start, uint64_t heap_size);
 void map_page(uint64_t virt, uint64_t phys, uint64_t flags);
+
+/* Map device registers at [phys, phys + size), uncached, into the kernel's
+ * device window; returns where they are. Use this, not an identity mapping,
+ * for anything a device decodes (BARs can sit in the user range). */
+void *mmio_map(uint64_t phys, uint64_t size);
 #define LARGE_PAGE 0x200000ULL
 void map_large_page(uint64_t virt, uint64_t phys);   // 2 MiB, both 2 MiB aligned
 

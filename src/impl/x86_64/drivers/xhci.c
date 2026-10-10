@@ -167,10 +167,7 @@ static void w64(volatile uint8_t *base, uint32_t off, uint64_t v) {
     w32(base, off + 4, (uint32_t)(v >> 32));
 }
 
-static void map_mmio(uint64_t base, uint64_t size) {
-    for (uint64_t a = base & ~0xFFFull; a < base + size; a += 0x1000)
-        map_page(a, a, PAGE_PRESENT | PAGE_RW | PAGE_PCD | PAGE_PWT);
-}
+static uint64_t mmio_size;                  /* how much of the BAR is mapped at `mmio` */
 
 /* Zeroed memory with the given alignment (the heap is identity-mapped, so
  * the address is also what the controller uses). Never freed. */
@@ -596,11 +593,10 @@ static void usb_tick(void) {
 
 /* The firmware may be using the controller (for its own USB keyboard
  * support); ask it to let go. */
-static void take_from_bios(uint64_t base, uint32_t hccparams1) {
+static void take_from_bios(uint32_t hccparams1) {
     uint32_t off = (hccparams1 >> 16) << 2;
-    for (int guard = 0; off && guard < 64; guard++) {
-        map_mmio(base + off, 8);
-        volatile uint32_t *cap = (volatile uint32_t *)(base + off);
+    for (int guard = 0; off && off + 8 <= mmio_size && guard < 64; guard++) {
+        volatile uint32_t *cap = (volatile uint32_t *)(mmio + off);
         uint32_t v = cap[0];
         if ((v & 0xFF) == 1) {                              /* USB legacy support */
             if (v & (1u << 16)) {
@@ -619,8 +615,7 @@ static void take_from_bios(uint64_t base, uint32_t hccparams1) {
 }
 
 static int controller_start(uint64_t base) {
-    map_mmio(base, 0x1000);
-    mmio = (volatile uint8_t *)base;
+    mmio = (volatile uint8_t *)mmio_map(base, 0x1000);         /* the capability registers first */
     uint32_t caplen = mmio[CAP_LENGTH];
     uint32_t hcs1 = r32(mmio, CAP_HCSPARAMS1), hcs2 = r32(mmio, CAP_HCSPARAMS2);
     uint32_t hcc1 = r32(mmio, CAP_HCCPARAMS1);
@@ -630,14 +625,21 @@ static int controller_start(uint64_t base) {
     if (hcc1 & (1u << 2)) ctx_size = 64;
     if (max_slots > MAX_DEVICES) max_slots = MAX_DEVICES;
 
-    map_mmio(base, caplen + OP_PORTSC + 0x10 * (uint64_t)max_ports);
-    map_mmio(base + dboff, 4 * 256);
-    map_mmio(base + rtsoff, 0x40);
+    /* Then the whole register block: operational, runtime, doorbells and the
+     * extended capabilities (at most 256 KiB in). */
+    uint64_t need = caplen + OP_PORTSC + 0x10 * (uint64_t)max_ports;
+    if (dboff + 4 * 256 > need) need = dboff + 4 * 256;
+    if (rtsoff + 0x40 > need) need = rtsoff + 0x40;
+    uint64_t xecp_end = ((uint64_t)(hcc1 >> 16) << 2) + 0x1000;
+    if (xecp_end > need) need = xecp_end;
+    if (need < 0x10000) need = 0x10000;
+    mmio = (volatile uint8_t *)mmio_map(base, need);
+    mmio_size = need;
     op = mmio + caplen;
     rt = mmio + rtsoff;
     doorbells = (volatile uint32_t *)(mmio + dboff);
 
-    take_from_bios(base, hcc1);
+    take_from_bios(hcc1);
 
     /* Stop, then reset. */
     w32(op, OP_USBCMD, r32(op, OP_USBCMD) & ~CMD_RUN);

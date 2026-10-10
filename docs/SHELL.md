@@ -111,7 +111,13 @@ disk the accounts last until reboot.
 | Command                    | Description                                              |
 | -------------------------- | -------------------------------------------------------- |
 | `ifconfig`                 | MAC address, IP settings, RX/TX packet counters          |
-| `wifi`                     | The Wi-Fi adapter in this machine: chip, Wi-Fi generation, PCI IDs, and what a driver for it needs (detection only; no Wi-Fi driver yet) |
+| `wifi`                     | The Wi-Fi adapter in this machine: chip, Wi-Fi generation, PCI IDs, and what a driver for it needs |
+| `wifi scan`                | (root) Numbered list of the networks in range: name, channel, signal, security |
+| `wifi connect [n\|name]`   | (root) Join network number `n` of the last scan, or by name; no argument: scan and ask for a number. Asks for the password unless the network is saved, then gets an address over DHCP |
+| `wifi status`              | The joined network, access point, channel, signal, address, packet counts |
+| `wifi disconnect`          | (root) Leave the network and stop reconnecting |
+| `wifi forget`              | (root) Delete the saved network (`/WIFI.CFG`) |
+| `wifi start`               | (root) Start the card step by step, printing each stage (for diagnosing) |
 | `nettest`                  | Send an ARP request to the gateway and wait for the reply (proves TX + RX work) |
 | `ping <ip> [count]`        | ICMP echo to a dotted IPv4 address (default 4, max 1000), one per second; any key stops it. Prints per-reply RTT and a loss/min/avg/max summary. |
 | `download <url> [file]`    | Download an `http://` or `https://` URL and save it to FAT32 (HTTPS uses BearSSL TLS 1.2). |

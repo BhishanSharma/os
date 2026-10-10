@@ -28,6 +28,25 @@ void paging_add_identity_region(uint64_t base, uint64_t size) {
     }
 }
 
+/* Device registers are mapped here (1 TiB up, PML4 entry 2), not at their
+ * physical address: a device placed in the 1-2 GiB range would otherwise
+ * take over the user programs' range. The PDPT for this window is created in
+ * paging_init, before any user address space copies the PML4, so mappings
+ * added later are visible in every address space. */
+#define MMIO_WINDOW 0x0000010000000000ULL
+static uint64_t mmio_next = MMIO_WINDOW;
+
+static void* alloc_table();
+
+void *mmio_map(uint64_t phys, uint64_t size) {
+    uint64_t first = phys & ~0xFFFULL, last = (phys + size + 0xFFF) & ~0xFFFULL;
+    uint64_t va = mmio_next;
+    for (uint64_t p = first; p < last; p += PAGE_SIZE)
+        map_page(va + (p - first), p, PAGE_PRESENT | PAGE_RW | 0x10 | 0x08);   /* uncached */
+    mmio_next += (last - first) + PAGE_SIZE;                                   /* plus a gap */
+    return (void *)(va + (phys - first));
+}
+
 static void* alloc_table() {
     if (next_table >= PAGE_TABLE_END) kpanic("page table pool exhausted");
     void* t = (void*)next_table;
@@ -76,6 +95,9 @@ void paging_init(uint64_t phys_base, uint64_t phys_end,
 
     // Identity map video memory (0xB8000)
     map_page(0xB8000, 0xB8000, PAGE_PRESENT | PAGE_RW);
+
+    // The device register window: its PDPT exists from the start (see mmio_map).
+    pml4[(MMIO_WINDOW >> 39) & 0x1FF] = (uint64_t)alloc_table() | PAGE_PRESENT | PAGE_RW;
 
     asm volatile("cli");
 

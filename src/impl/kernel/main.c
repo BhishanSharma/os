@@ -23,6 +23,7 @@
 #include "sys/sysinfo.h"
 #include "sys/task.h"
 #include "drivers/wifi.h"
+#include "drivers/iwlwifi.h"
 #include "drivers/display.h"
 #include "drivers/mouse.h"
 #include "drivers/apic.h"
@@ -95,6 +96,7 @@ static void report_clock(void) {
 static void statusbar_idle(void) {
     display_poll();          // VirtualBox window resized?
     usb_service();           // USB device plugged in or out?
+    iwl_service();           // Wi-Fi dropped? reconnect
     mouse_poll();            // pointer, wheel, selection
     statusbar_update(0);
 }
@@ -224,7 +226,7 @@ void kernel_main() {
     if (wifi_detect() > 0) {
         char name[80];
         wifi_describe(wifi_get(0), name, sizeof(name));
-        print_boot_status(BOOT_OK, "Wi-Fi", "%s found (no driver yet: type `wifi`)", name);
+        print_boot_status(BOOT_OK, "Wi-Fi", "%s found (`wifi scan`, `wifi connect <name>`)", name);
     } else {
         print_boot_status(BOOT_WARN, "Wi-Fi", "no Wi-Fi adapter on PCI");
     }
@@ -262,6 +264,14 @@ void kernel_main() {
             print_boot_status(BOOT_OK, "DHCP", "%s, gateway %s", ip, gw);
         else
             print_boot_status(BOOT_WARN, "DHCP", "no answer, using %s", ip);
+    }
+
+    // A Wi-Fi network joined before (saved in /WIFI.CFG): join it again.
+    if (have_ticks && wifi_count() > 0) {
+        char how[128];
+        int r = iwl_autoconnect(how, sizeof(how));
+        if (r == 0) print_boot_status(BOOT_OK, "Wi-Fi", "%s", how);
+        else if (r < 0) print_boot_status(BOOT_WARN, "Wi-Fi", "%s", how);
     }
 
     print_set_muted(0);
