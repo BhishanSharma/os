@@ -30,4 +30,7 @@ int mb2_booted_from_uefi(void);
 /* Copy of the ACPI RSDP made by the boot loader, or 0. */
 const void *mb2_get_rsdp(void);
 
+/* A word on the kernel command line (grub.cfg: multiboot2 /boot/kernel.bin nosmp). */
+int mb2_cmdline_has(const char *word);
+
 #endif

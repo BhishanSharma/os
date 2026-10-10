@@ -19,4 +19,16 @@ int timer_check(char *how, int size);
  * APIC when the APIC timer drives the ticks. */
 void apic_timer_ack(void);
 
+/* MSI support: the local APIC on (with the PIC still arriving through LINT0),
+ * this CPU's APIC ID (the MSI destination), end of interrupt. */
+int apic_msi_ready(void);
+uint32_t apic_id(void);
+void apic_eoi(void);
+
+/* Other cores: the APIC timer's rate, starting a core, setting one up. */
+uint32_t apic_timer_per_second(void);
+void apic_start_core(uint32_t apic_id, uint8_t page);
+void apic_setup_core(uint32_t per_second, uint8_t timer_vector);
+int apic_is_x2(void);
+
 #endif

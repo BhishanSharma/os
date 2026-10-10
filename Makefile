@@ -300,9 +300,22 @@ test-net: ## Unit-test the IP/ICMP/ARP code on the host with a simulated gateway
 	    -DNET_HOST_TEST \
 	    -I src/intf \
 	    tests/net_host_test.c \
-	    $(SRC_X86)/net/net.c \
+	    $(SRC_X86)/net/net.c $(SRC_X86)/net/tcp.c \
 	    -o $(BUILD)/test/net_host_test
 	$(BUILD)/test/net_host_test
+
+test-tcp: ## Unit-test TCP on the host against a simulated peer (loss, reordering)
+	mkdir -p $(BUILD)/test
+	gcc -g -O1 -Wall -Wno-unused-function -fsanitize=address,undefined -I src/intf \
+	    tests/tcp_host_test.c $(SRC_X86)/net/tcp.c -o $(BUILD)/test/tcp_host_test
+	$(BUILD)/test/tcp_host_test
+
+test-wpa: ## Unit-test the WPA2 handshake on the host (IEEE/RFC vectors, simulated AP)
+	mkdir -p $(BUILD)/test
+	$(MAKE) -C $(BEARSSL_DIR) -s lib >/dev/null      # a host build of BearSSL
+	gcc -g -O1 -Wall -I src/intf -I $(BEARSSL_DIR)/inc tests/wpa_host_test.c $(SRC_X86)/net/wpa.c \
+	    $(BEARSSL_DIR)/build/libbearssl.a -o $(BUILD)/test/wpa_host_test
+	$(BUILD)/test/wpa_host_test
 
 
 # ---- Clean ----------------------------------------------------------------

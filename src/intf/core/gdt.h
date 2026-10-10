@@ -18,8 +18,11 @@
 // registers and load the task register. Call before idt_init().
 void gdt_init(void);
 
-// Stack the CPU switches to when an interrupt or system call arrives while a
-// user program (ring 3) runs (TSS.rsp0).
+// Another core: load the same GDT and its own TSS.
+void gdt_init_ap(int cpu, uint64_t fatal_stack_top);
+
+// Stack this core switches to when an interrupt or system call arrives while a
+// user program (ring 3) runs (its TSS.rsp0).
 void gdt_set_kernel_stack(uint64_t top);
 
 #endif

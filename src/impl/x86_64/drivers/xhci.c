@@ -11,6 +11,8 @@
 // the USB 2.0 spec chapter 9 (device requests) and HID 1.11 appendix B (boot
 // protocol mouse).
 #include "drivers/usb.h"
+#include "sys/smp.h"
+#include "drivers/msi.h"
 #include "drivers/pci.h"
 #include "drivers/paging.h"
 #include "drivers/heap.h"
@@ -61,6 +63,8 @@
 #define PORT_KEEP     0x0E01C3E0u
 
 /* Interrupter 0 (offsets from BAR + RTSOFF) */
+#define IR0_IMAN    0x20     /* bit 0: pending (write 1 to clear), bit 1: enabled */
+#define IR0_IMOD    0x24     /* moderation: minimum gap between interrupts, 250 ns units */
 #define IR0_ERSTSZ  0x28
 #define IR0_ERSTBA  0x30
 #define IR0_ERDP    0x38
@@ -181,7 +185,7 @@ static void *dma_alloc(uint64_t size, uint64_t align) {
 
 static void delay_ms(uint32_t ms) {
     uint32_t start = get_tick(), ticks = (ms * TIMER_FREQ + 999) / 1000;
-    while ((uint32_t)(get_tick() - start) < ticks) __asm__ volatile("hlt");
+    while ((uint32_t)(get_tick() - start) < ticks) cpu_wait();
 }
 
 /* ---- Rings ----------------------------------------------------------------- */
@@ -589,6 +593,13 @@ static void usb_tick(void) {
     }
 }
 
+/* MSI: the controller has events. Acknowledge, then do what the timer poll does. */
+static void usb_interrupt(void) {
+    w32(op, OP_USBSTS, 1u << 3);                            /* EINT, write 1 to clear */
+    w32(rt, IR0_IMAN, r32(rt, IR0_IMAN) | 1);               /* IP, write 1 to clear (IE stays) */
+    usb_tick();
+}
+
 /* ---- Controller ------------------------------------------------------------ */
 
 /* The firmware may be using the controller (for its own USB keyboard
@@ -727,7 +738,12 @@ int usb_init(void) {
         found = 1;
         scan_ports();
         busy = 0;
-        timer_add_poll_hook(usb_tick);
+        timer_add_poll_hook(usb_tick);                      /* (a backstop when interrupts work) */
+        if (msi_enable(p->bus, p->slot, p->func, usb_interrupt, "USB (xHCI)", 0) == 0) {
+            w32(rt, IR0_IMOD, 1000);                        /* at most one interrupt per 250 us */
+            w32(rt, IR0_IMAN, 3);                           /* enable, clear pending */
+            w32(op, OP_USBCMD, r32(op, OP_USBCMD) | (1u << 2));   /* INTE */
+        }
         describe();
         return mouse_count;
     }

@@ -30,8 +30,12 @@ task_switch:
     pop rbx
     ret
 
+extern bkl_user_entry
 global task_start_user
 task_start_user:
+    sub rsp, 8              ; (16-byte alignment for the call)
+    call bkl_user_entry     ; leaving the kernel: let other cores in
+    add rsp, 8
     mov ax, USER_DATA
     mov ds, ax
     mov es, ax

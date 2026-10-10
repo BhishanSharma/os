@@ -1,5 +1,6 @@
 // mouse.c - PS/2 mouse, VirtualBox absolute pointer, console selection and paste
 #include "drivers/mouse.h"
+#include "sys/smp.h"
 #include "drivers/keyboard.h"
 #include "drivers/pic.h"
 #include "drivers/vmmdev.h"
@@ -199,7 +200,15 @@ void mouse_report(const char *source, int buttons, int dx, int dy, int wheel) {
     queue_head = next;
 }
 
+static void mouse_irq_locked(void);
+
 void mouse_irq(void) {
+    bkl_enter();
+    mouse_irq_locked();
+    bkl_leave();
+}
+
+static void mouse_irq_locked(void) {
     for (int i = 0; i < 16; i++) {
         uint8_t status = inb(PS2_STATUS);
         if ((status & (STATUS_OUT | STATUS_AUX)) != (STATUS_OUT | STATUS_AUX)) break;

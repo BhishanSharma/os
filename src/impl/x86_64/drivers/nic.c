@@ -1,4 +1,5 @@
 #include "drivers/nic.h"
+#include "sys/smp.h"
 #include "drivers/rtl8139.h"
 #include "drivers/rtl8168.h"
 #include "drivers/e1000.h"
@@ -56,7 +57,11 @@ const char *nic_name(void) { return active ? active->name : "none"; }
 
 uint8_t nic_get_irq(void) { return active ? active->irq : NIC_IRQ_NONE; }
 
-void nic_handle_irq(void) { if (active) active->handle_irq(); }
+void nic_handle_irq(void) {
+    bkl_enter();
+    if (active) active->handle_irq();
+    bkl_leave();
+}
 
 void nic_get_mac(uint8_t mac[6]) { if (active) active->get_mac(mac); }
 

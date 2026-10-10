@@ -54,4 +54,8 @@ const char *process_error_text(int err);
  * the program. Does not return. */
 void process_fault(uint64_t vector, const char *name, uint64_t rip, uint64_t address);
 
+/* For waiting kernel calls (sockets): has Ctrl+C or `kill` asked the current
+ * program (or, in the kernel shell, the command) to stop? */
+int process_interrupted(void);
+
 #endif

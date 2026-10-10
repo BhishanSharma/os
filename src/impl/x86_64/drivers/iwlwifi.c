@@ -21,6 +21,8 @@
 #include "drivers/heap.h"
 #include "drivers/timer.h"
 #include "drivers/fat32.h"
+#include "sys/vfs.h"
+#include "drivers/msi.h"
 #include "drivers/nic.h"
 #include "net/net.h"
 #include "net/wpa.h"
@@ -274,21 +276,19 @@ static void *dma_alloc(uint64_t size, uint64_t align) {
 
 static int read_firmware(void) {
     if (fw_file) return 0;
-    /* The FAT32 calls look names up in the current folder: read it from "/". */
-    char cwd[128];
-    if (fat32_get_current_directory(cwd, sizeof(cwd)) != 0) cwd[0] = 0;
-    fat32_change_directory("/");
-    fw_size = fat32_get_file_size(FIRMWARE_PATH + 1);
+    /* In the system folder (the RAM disk): "/" or "/SYS". */
+    char path[64];
+    k_snprintf(path, sizeof(path), "%s%s", strcmp(vfs_system_dir(), "/") ? vfs_system_dir() : "", FIRMWARE_PATH);
+    fw_size = fat32_get_file_size(path);
     int got = -1;
     if (fw_size && fw_size != 0xFFFFFFFFu && (fw_file = kmalloc(fw_size)) != 0)
-        got = fat32_read_file(FIRMWARE_PATH + 1, fw_file, fw_size);
-    if (cwd[0]) fat32_change_directory(cwd);
+        got = fat32_read_file(path, fw_file, fw_size);
     if (!fw_size || fw_size == 0xFFFFFFFFu) {
-        kprintf("  firmware %s not found on the disk\n", FIRMWARE_PATH);
+        kprintf("  firmware %s not found on the disk\n", path);
         return -1;
     }
     if (got < (int)fw_size) {
-        kprintf("  could not read %s (%u bytes, got %d)\n", FIRMWARE_PATH, fw_size, got);
+        kprintf("  could not read %s (%u bytes, got %d)\n", path, fw_size, got);
         if (fw_file) kfree(fw_file);
         fw_file = 0;
         return -1;
@@ -570,6 +570,11 @@ static void poll_once(void) {
         if (r & (INT_SW_ERR | INT_HW_ERR)) fw_error = 1;
     }
     receive();
+}
+
+/* MSI: the card has something (interrupts are off here, as in the timer). */
+static void iwl_interrupt(void) {
+    if (regs && fw_alive) poll_once();
 }
 
 /* Poll the card for up to `ms` milliseconds or until *flag is set. */
@@ -1151,6 +1156,11 @@ int iwl_start(void) {
     pci_config_write_dword(d->bus, d->slot, d->func, 0x04, (cmd & 0xFFFF) | 0x2 | 0x4 | 0x400);
     uint32_t r40 = pci_config_read_dword(d->bus, d->slot, d->func, 0x40);
     pci_config_write_dword(d->bus, d->slot, d->func, 0x40, r40 & ~0xFF00u);   /* no retry timeout */
+    static int msi_tried;
+    if (!msi_tried) {                                       /* interrupts: packets handled at once */
+        msi_tried = 1;
+        msi_enable(d->bus, d->slot, d->func, iwl_interrupt, "Wi-Fi", 0);
+    }
     static uint64_t mapped_base;
     if (mapped_base != base) {
         regs = (volatile uint8_t *)mmio_map(base, 0x4000);
@@ -1240,6 +1250,8 @@ int iwl_start(void) {
             rd(CSR_IML_RESP), packets_seen, packets_seen == 1 ? "" : "s");
     if (alive_ok) {
         fw_alive = 1;
+        /* From now on the card may interrupt for everything we handle. */
+        wr(CSR_INT_MASK, INT_FH_RX | INT_SW_RX | INT_ALIVE | INT_SW_ERR | INT_HW_ERR | INT_RF_KILL);
         say("Firmware is ALIVE (status %04x, version %u.%u). Step 1 done.\n", alive_status,
                 alive_lmac_major, alive_lmac_minor);
         return firmware_init();

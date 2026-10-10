@@ -1,3 +1,4 @@
+// fat32.h - the FAT32 on-disk format, and the file calls (implemented by sys/vfs.c)
 #ifndef FAT32_H
 #define FAT32_H
 
@@ -73,11 +74,6 @@ typedef struct {
     uint8_t is_directory;
 } fat32_file_info_t;
 
-typedef struct {
-    char name[256];
-    uint32_t cluster;
-} path_component_t;
-
 /* Returned by the functions that change the disk when the write guard says no. */
 #define FAT32_ERR_PERMISSION (-13)
 
@@ -87,8 +83,8 @@ void fat32_set_write_guard(int (*guard)(const char *path));
 /* Same for reading a file (keeps the password file root-only). */
 void fat32_set_read_guard(int (*guard)(const char *path));
 
-// Core functions
-int fat32_init(uint32_t partition_lba);
+/* Paths may be absolute or relative to the current folder, with "." and "..";
+ * they may cross mount points (sys/vfs.h implements these). */
 int fat32_read_file(const char* path, uint8_t* buffer, uint32_t max_size);
 int fat32_list_directory(fat32_file_info_t* files, uint32_t max_files);
 int fat32_file_exists(const char* path);

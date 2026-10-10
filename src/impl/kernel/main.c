@@ -25,6 +25,11 @@
 #include "drivers/wifi.h"
 #include "drivers/iwlwifi.h"
 #include "drivers/hda.h"
+#include "drivers/nvme.h"
+#include "drivers/msi.h"
+#include "sys/smp.h"
+#include "drivers/part.h"
+#include "sys/vfs.h"
 #include "drivers/display.h"
 #include "drivers/mouse.h"
 #include "drivers/apic.h"
@@ -57,29 +62,45 @@ extern char kernel_end[];
 #define HEAP_FALLBACK  (1024 * 1024)      // no memory map: assume 1 MiB at 4 MiB
 #define HEAP_MIN       (8ULL * 1024 * 1024) // heap left after carving out the RAM disk
 
-// Mount FAT32 from the ATA disk if there is one with a FAT32 volume, else from
-// the RAM disk (machines without IDE, e.g. NVMe laptops booted from USB).
+// Mount the main volume: the ATA disk if it holds FAT32 (with the RAM disk at
+// /SYS), else the RAM disk. A TERMINALOS partition on an NVMe drive takes over
+// "/" later, once the timer runs (mount_persistent).
 static void mount_filesystem(void) {
-    if (ata_init() == 0) {
-        disk_select(DISK_ATA);
-        if (fat32_init(0) == 0) {
-            print_boot_status(BOOT_OK, "Storage", "FAT32 on ATA disk%s",
-                              disk_ramdisk_size() ? " (RAM disk also loaded: `mount ram`)" : "");
-            return;
-        }
-        kprintf("ATA disk has no FAT32 volume\n");
+    blockdev_t dev;
+    if (ata_init() == 0 && disk_open(DISK_ATA, &dev) == 0 && vfs_mount("/", &dev) == 0) {
+        blockdev_t ram;
+        int sys = disk_open(DISK_RAM, &ram) == 0 && vfs_mount("/SYS", &ram) == 0;
+        print_boot_status(BOOT_OK, "Storage", "FAT32 on ATA disk%s", sys ? ", RAM disk at /SYS" : "");
+        return;
     }
-    if (disk_ramdisk_size()) {
-        disk_select(DISK_RAM);
-        if (fat32_init(0) == 0) {
-            print_boot_status(BOOT_OK, "Storage", "FAT32 on RAM disk, %u MiB (changes are lost at reboot)",
-                              (uint32_t)(disk_ramdisk_size() >> 20));
-            return;
-        }
-        kprintf("RAM disk is not a FAT32 image\n");
+    if (disk_open(DISK_RAM, &dev) == 0 && vfs_mount("/", &dev) == 0) {
+        print_boot_status(BOOT_OK, "Storage", "FAT32 on RAM disk, %u MiB (changes are lost at reboot)",
+                          (uint32_t)(disk_ramdisk_size() >> 20));
+        return;
     }
-    disk_select(DISK_NONE);
     print_boot_status(BOOT_FAIL, "Storage", "no disk with a FAT32 volume: file commands will not work");
+}
+
+// The NVMe drive's TERMINALOS partition (FAT32, made in Windows' Disk
+// Management) becomes "/": homes, accounts and settings survive reboots. The
+// RAM disk's system files stay reachable at /SYS.
+static void mount_persistent(void) {
+    static partition_t parts[16];
+    int n = part_scan(nvme_partition_reader, parts, 16);
+    for (int i = 0; i < n; i++) {
+        if (!parts[i].ours) continue;
+        blockdev_t nv, ram;
+        if (disk_open_nvme_partition(parts[i].start, parts[i].sectors, 1, i + 1, &nv) != 0) return;
+        if (vfs_mount("/", &nv) != 0) {
+            print_boot_status(BOOT_WARN, "Files", "TERMINALOS partition found but it is not readable FAT32");
+            return;
+        }
+        if (disk_open(DISK_RAM, &ram) == 0) vfs_mount("/SYS", &ram);
+        fat32_change_directory("/");
+        print_boot_status(BOOT_OK, "Files", "on the NVMe TERMINALOS partition (%u MiB, kept across reboots); "
+                          "system files at /SYS", (uint32_t)(parts[i].sectors / 2048));
+        return;
+    }
 }
 
 static void report_clock(void) {
@@ -117,7 +138,8 @@ void kernel_main() {
         paging_add_identity_region(fb.addr, display_early_init(&fb));
     }
     boot_info.uefi = mb2_booted_from_uefi();
-    acpi_save_rsdp();   // the boot information is not mapped after paging_init
+    acpi_save_rsdp();
+    int no_smp = mb2_cmdline_has("nosmp");    // the `nosmp` boot option (read now, for the same reason)
     // The memory map is in the multiboot info, which the heap may overwrite.
     int mem_regions = memory_init();
     uint64_t heap_start = HEAP_LOW, heap_size = HEAP_FALLBACK;
@@ -244,11 +266,20 @@ void kernel_main() {
     int have_ticks = timer_check(timer_how, sizeof(timer_how)) == 0;
     print_boot_status(have_ticks ? BOOT_OK : BOOT_FAIL, "Timer", "%s", timer_how);
 
+    // Message-signalled interrupts (devices interrupt through the local APIC).
+    if (have_ticks) msi_init();
+
     // USB waits for the controller's answers, so it needs the ticks too.
     if (have_ticks) {
         int mice = usb_init();
         print_boot_status(mice > 0 ? BOOT_OK : BOOT_WARN, "USB", "%s%s", usb_description(),
                           mice == 0 ? " (plug a mouse in any time)" : "");
+        char nvme_how[160];
+        int nv = nvme_init(nvme_how, sizeof(nvme_how));
+        if (nv == 0 || strncmp(nvme_how, "no NVMe", 7) != 0)
+            print_boot_status(nv == 0 ? BOOT_OK : BOOT_WARN, "NVMe", "%s%s", nvme_how,
+                              nv == 0 ? " (`nvme` lists partitions)" : "");
+        if (nv == 0) mount_persistent();
         char sound_how[96];
         int snd = sound_init(sound_how, sizeof(sound_how));
         print_boot_status(snd == 0 ? BOOT_OK : BOOT_WARN, "Sound", "%s", sound_how);
@@ -281,6 +312,10 @@ void kernel_main() {
     print_set_muted(0);
     print_bootlog_stop();
     task_init();        // the shell becomes task 1; programs run alongside it
+    if (have_ticks) {   // the other cores join the scheduler
+        int cores = smp_init(!no_smp);
+        kprintf("CPU: %d core%s running\n", cores, cores == 1 ? "" : "s");
+    }
     statusbar_update(1);
     keyboard_set_idle_hook(statusbar_idle);
 

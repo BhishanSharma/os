@@ -14,6 +14,7 @@
 #include "sys/sysinfo.h"
 #include "sys/task.h"
 #include "drivers/fat32.h"
+#include "sys/vfs.h"
 #include "drivers/disk.h"
 #include "drivers/keyboard.h"
 #include "drivers/timer.h"
@@ -446,7 +447,7 @@ static void first_start(void) {
 
     if (save_accounts() == 0) {
         print_str("\n  Accounts saved to /PASSWD.");
-        if (disk_selected() == DISK_RAM) print_str(" (This is the RAM disk: they last until reboot.)");
+        if (!vfs_root_persistent()) print_str(" (This is the RAM disk: they last until reboot.)");
         print_str("\n");
     } else {
         print_str("\n  Could not save the accounts (no writable disk): they last until reboot.\n");

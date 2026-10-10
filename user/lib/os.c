@@ -82,3 +82,35 @@ void console_size(int *cols, int *rows) {
     if (cols) *cols = (int)(r >> 16);
     if (rows) *rows = (int)(r & 0xFFFF);
 }
+
+/* ---- TCP sockets ---- */
+
+int resolve(const char *host, unsigned char ip[4]) { return (int)os_syscall(SYS_RESOLVE, (long)host, (long)ip, 0); }
+
+int net_connect(const unsigned char ip[4], int port) {
+    long packed = (long)((unsigned long)ip[0] << 24 | (unsigned long)ip[1] << 16 | (unsigned long)ip[2] << 8 | ip[3]);
+    return (int)os_syscall(SYS_CONNECT, packed, port, 10000);
+}
+
+int net_listen(int port)                                { return (int)os_syscall(SYS_LISTEN, port, 0, 0); }
+int net_accept(int listener, unsigned long timeout_ms)  { return (int)os_syscall(SYS_ACCEPT, listener, (long)timeout_ms, 0); }
+long net_send(int sock, const void *buf, size_t len)    { return os_syscall(SYS_SEND, sock, (long)buf, (long)len); }
+long net_recv(int sock, void *buf, size_t len, unsigned long timeout_ms) {
+    return os_syscall4(SYS_RECV, sock, (long)buf, (long)len, (long)timeout_ms);
+}
+int net_close(int sock)                                 { return (int)os_syscall(SYS_SOCKCLOSE, sock, 0, 0); }
+
+const char *net_strerror(int err) {
+    switch (err) {
+        case SYSERR_TIMEOUT: return "timed out";
+        case SYSERR_REFUSED: return "connection refused";
+        case SYSERR_RESET:   return "connection reset";
+        case SYSERR_CLOSED:  return "connection closed";
+        case SYSERR_NOROUTE: return "no route to the host";
+        case SYSERR_INUSE:   return "port in use";
+        case SYSERR_NOHOST:  return "unknown host";
+        case SYSERR_BADFD:   return "not a socket of yours";
+        case SYSERR_AGAIN:   return "no free socket";
+        default:             return "network error";
+    }
+}

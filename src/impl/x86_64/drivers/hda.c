@@ -13,6 +13,7 @@
 //   6. Playback: one output stream descriptor, a buffer descriptor list over
 //      a ring of 4 x 16 KiB, refilled while the DMA position (LPIB) moves on.
 #include "drivers/hda.h"
+#include "sys/smp.h"
 #include "drivers/pci.h"
 #include "drivers/paging.h"
 #include "drivers/heap.h"
@@ -613,7 +614,7 @@ static int play(source_fn src, void *ctx) {
             wpos += (uint64_t)n;
         }
         __asm__ volatile("mfence" ::: "memory");
-        __asm__ volatile("sti; hlt");                       /* until the next tick */
+        cpu_wait();                                         /* until the next tick */
     }
     stream_stop();
     (void)written;

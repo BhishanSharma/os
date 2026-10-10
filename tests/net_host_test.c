@@ -67,6 +67,7 @@ uint64_t net_test_tsc(void) { return g_tsc; }
 void *kmalloc(uint64_t size) { return malloc(size); }
 void kfree(void *p) { free(p); }
 uint64_t heap_get_free(void) { return 1u << 20; }
+int k_snprintf(char *b, size_t n, const char *fmt, ...) { va_list ap; va_start(ap, fmt); int r = vsnprintf(b, n, fmt, ap); va_end(ap); return r; }
 int fat32_file_exists(const char *p) { (void)p; return 0; }
 int fat32_write_file(const char *p, const uint8_t *b, uint32_t n) { (void)p; (void)b; return (int)n; }
 int fat32_create_file(const char *p) { (void)p; return 0; }

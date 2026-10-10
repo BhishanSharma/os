@@ -49,6 +49,9 @@ int  net_ping(const uint8_t ip[4], uint32_t count);
 int  net_download_http(const char *url, const char *filename);
 int  net_download_https(const char *url, const char *filename);
 
+/* A host name (or dotted address) to an IPv4 address over DNS. 0 on success. */
+int  net_resolve(const char *host, uint8_t out[4]);
+
 /* Formatting helpers (buffers: mac >= 18 bytes, ip >= 16 bytes) */
 void net_fmt_mac(char *out, const uint8_t mac[6]);
 void net_fmt_ip(char *out, const uint8_t ip[4]);

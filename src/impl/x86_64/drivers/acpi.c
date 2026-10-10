@@ -152,3 +152,41 @@ int acpi_find_i2c_devices(acpi_i2c_device_t *out, int max) {
     unmap_window();
     return n;
 }
+
+/* The MADT ("APIC" table): one entry per core that the firmware enabled. */
+int acpi_list_cpus(uint32_t *ids, int max) {
+    if (!have_rsdp) return -1;
+    const uint8_t *rsdp = rsdp_copy;
+    int xsdt = rsdp[15] >= 2 && rd64(rsdp + 24);
+    uint64_t root = xsdt ? rd64(rsdp + 24) : rd32(rsdp + 16);
+    char sig[5];
+    uint32_t root_len = table_length(root, sig);
+    if (root_len < 36 || root_len > 4096) { unmap_window(); return -1; }
+    uint64_t tables[64];
+    int count = 0;
+    const uint8_t *r = map_window(root, root_len);
+    for (uint32_t off = 36; off + (xsdt ? 8 : 4) <= root_len && count < 64; off += xsdt ? 8 : 4)
+        tables[count++] = xsdt ? rd64(r + off) : rd32(r + off);
+    int n = -1;
+    for (int i = 0; i < count && n < 0; i++) {
+        uint32_t len = table_length(tables[i], sig);
+        if (strcmp(sig, "APIC") || len < 44) continue;
+        const uint8_t *t = map_window(tables[i], len);
+        if (!t) break;
+        n = 0;
+        for (uint32_t off = 44; off + 2 <= len && n < max;) {
+            uint8_t type = t[off], elen = t[off + 1];
+            if (elen < 2 || off + elen > len) break;
+            if (type == 0 && elen >= 8 && (rd32(t + off + 4) & 1)) ids[n++] = t[off + 3];
+            else if (type == 9 && elen >= 16 && (rd32(t + off + 8) & 1)) {
+                uint32_t id = rd32(t + off + 4);
+                int dup = 0;
+                for (int k = 0; k < n; k++) dup |= ids[k] == id;
+                if (!dup) ids[n++] = id;
+            }
+            off += elen;
+        }
+    }
+    unmap_window();
+    return n;
+}

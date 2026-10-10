@@ -8,6 +8,7 @@
 // the report layout, a command register (power, reset), and the input
 // register, read with a plain read, whose first two bytes are the length.
 #include "drivers/touchpad.h"
+#include "sys/smp.h"
 #include "drivers/pci.h"
 #include "drivers/paging.h"
 #include "drivers/heap.h"
@@ -108,7 +109,7 @@ static void wr(i2c_ctrl_t *c, uint32_t off, uint32_t v) { *(volatile uint32_t *)
 
 static void delay_ms(uint32_t ms) {
     uint32_t start = get_tick(), ticks = (ms * TIMER_FREQ + 999) / 1000;
-    while ((uint32_t)(get_tick() - start) < ticks) __asm__ volatile("hlt");
+    while ((uint32_t)(get_tick() - start) < ticks) cpu_wait();
 }
 
 /* ---- Controller ------------------------------------------------------------ */

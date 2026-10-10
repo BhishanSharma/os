@@ -17,6 +17,16 @@ static inline long os_syscall(long n, long a, long b, long c) {
     return ret;
 }
 
+static inline long os_syscall4(long n, long a, long b, long c, long d) {
+    long ret;
+    register long r10 __asm__("r10") = d;
+    __asm__ volatile("int $0x80"
+                     : "=a"(ret)
+                     : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10)
+                     : "memory");
+    return ret;
+}
+
 void exit(int code) __attribute__((noreturn));
 long write(int fd, const void *buf, size_t len);
 long read(int fd, void *buf, size_t len);   /* fd 0: one keyboard line, with '\n' */
@@ -53,6 +63,16 @@ int gfx_info(struct os_gfx_info *info);      /* 0, or SYSERR_NOENT in VGA text m
 int gfx_begin(void);                         /* take the screen below the status bar */
 int gfx_blit(int x, int y, int w, int h, const unsigned int *pixels, int stride);   /* 0x00RRGGBB */
 int gfx_end(void);                           /* the console redraws itself */
+
+/* TCP sockets. Results < 0 are SYSERR_* codes (SYSERR_TIMEOUT, SYSERR_REFUSED...). */
+int resolve(const char *host, unsigned char ip[4]);        /* DNS (or "a.b.c.d") */
+int net_connect(const unsigned char ip[4], int port);      /* -> socket */
+int net_listen(int port);                                  /* -> listening socket */
+int net_accept(int listener, unsigned long timeout_ms);    /* 0 = wait as long as it takes */
+long net_send(int sock, const void *buf, size_t len);      /* sends all of it */
+long net_recv(int sock, void *buf, size_t len, unsigned long timeout_ms);   /* 0 = peer closed */
+int net_close(int sock);
+const char *net_strerror(int err);
 const char *os_strerror(int err);            /* text for a negative SYSERR_* result */
 
 /* Console */

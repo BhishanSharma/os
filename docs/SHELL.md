@@ -100,7 +100,11 @@ disk the accounts last until reboot.
 | `malloc <bytes>`           | Allocate heap memory in a test slot                      |
 | `free` / `freeidx <n>`     | Free the last / the n-th test allocation                 |
 | `listptr`                  | List test allocations                                    |
-| `mount [ata\|ram]`         | Show which disk the files are on, or switch to the ATA disk / RAM disk |
+| `mount [ram\|ata\|nvme n] [dir]` | List the mounted volumes, or mount one at a folder (default /RAM, /ATA, /NVME) |
+| `umount <dir>`             | (root) Unmount a volume (not /)                          |
+| `nvme`                     | The NVMe drive: model, size, partitions (TERMINALOS is the read-write one) |
+| `cpus`                     | The CPU cores and what each one runs                     |
+| `interrupts`               | Devices that interrupt through MSI/MSI-X, and how often  |
 | `diskinfo`                 | Boot sector of the current disk                          |
 | `readsector <lba>`         | Dump a raw sector                                        |
 | `fat32info`                | FAT32 volume parameters                                  |
@@ -111,6 +115,7 @@ disk the accounts last until reboot.
 | Command                    | Description                                              |
 | -------------------------- | -------------------------------------------------------- |
 | `ifconfig`                 | MAC address, IP settings, RX/TX packet counters          |
+| `netstat`                  | TCP connections and listening ports                      |
 | `wifi`                     | The Wi-Fi adapter in this machine: chip, Wi-Fi generation, PCI IDs, and what a driver for it needs |
 | `wifi scan`                | (root) Numbered list of the networks in range: name, channel, signal, security |
 | `wifi connect [n\|name]`   | (root) Join network number `n` of the last scan, or by name; no argument: scan and ask for a number. Asks for the password unless the network is saved, then gets an address over DHCP |
@@ -142,6 +147,23 @@ keeps its scrollback). Under VirtualBox the screen follows the VM window by itse
 >
 > Filenames are FAT32 short names (8.3). The disk stores them upper-case, so
 > `test.txt` is listed as `TEST.TXT`.
+
+## Keeping files on a laptop
+
+Booted from a USB stick, `/` is a RAM disk: everything is gone after a reboot.
+To keep files, give Terminal OS a partition of its own on the laptop's SSD,
+made with Windows (Terminal OS never changes Windows' partition table):
+
+1. Windows: Disk Management (right-click Start). Right-click C:, Shrink Volume,
+   by 1024 MB or more.
+2. Right-click the new "Unallocated" space: New Simple Volume. No drive letter
+   is needed; file system **FAT32**, volume label **TERMINALOS**.
+3. Boot Terminal OS: the boot screen says "Files: on the NVMe TERMINALOS
+   partition". That partition is now `/`; the RAM disk's programs and
+   firmware are at `/SYS`. The first boot asks for a root password again.
+
+If the drive is not found, the firmware setup may have the SSD in Intel
+RST/VMD mode (`nvme` says so); AHCI/NVMe mode shows it.
 
 ## Mouse
 

@@ -37,6 +37,7 @@ static volatile uint32_t *lapic;     /* MMIO window (xAPIC mode) */
 static int x2apic;
 static int apic_ready;
 static int apic_timer_on;
+static uint32_t apic_timer_rate;     /* timer counts per second (divide by 16) */
 
 static uint64_t rdmsr(uint32_t msr) {
     uint32_t lo, hi;
@@ -174,6 +175,7 @@ static int apic_timer_start(uint32_t *per_second) {
     lapic_write(LAPIC_TIMER_INIT, 0);
     if (counted < TIMER_FREQ * 100) return -1;          /* not counting */
     *per_second = counted;
+    apic_timer_rate = counted;
     outb(0x21, inb(0x21) | 0x01);                       /* PIC IRQ 0 off: one tick source */
     apic_timer_on = 1;
     lapic_write(LAPIC_LVT_TIMER, LVT_PERIODIC | TIMER_VECTOR);
@@ -210,3 +212,95 @@ int timer_check(char *how, int size) {
                counting ? "counting" : "stopped", apic_ready ? (x2apic ? "x2APIC" : "xAPIC") : "missing");
     return -1;
 }
+
+/* ---- For MSI (drivers/msi.c) ---- */
+
+int apic_msi_ready(void) {
+    if (apic_enable() != 0) return -1;
+    /* The 8259 PIC (keyboard, PIT on VMs) keeps coming in through LINT0. */
+    if ((lapic_read(LAPIC_LVT_LINT0) & 0x700) != DELIVERY_EXTINT || (lapic_read(LAPIC_LVT_LINT0) & LVT_MASKED))
+        virtual_wire();
+    return 0;
+}
+
+uint32_t apic_id(void) {
+    uint32_t id = lapic_read(0x020);
+    return x2apic ? id : id >> 24;
+}
+
+void apic_eoi(void) { lapic_write(LAPIC_EOI, 0); }
+
+/* ---- Other cores (sys/smp.c) ---- */
+
+#define LAPIC_ICR_LOW   0x300
+#define LAPIC_ICR_HIGH  0x310
+
+/* Counts per second of the APIC timer (divide by 16), measured against the
+ * kernel's ticks if the APIC timer does not drive them already. */
+uint32_t apic_timer_per_second(void) {
+    if (apic_timer_rate) return apic_timer_rate;
+    if (apic_enable() != 0) return 0;
+    lapic_write(LAPIC_TIMER_DIV, 0x3);
+    lapic_write(LAPIC_LVT_TIMER, LVT_MASKED | 0x41);
+    uint32_t t = get_tick();
+    while (get_tick() == t) __asm__ volatile("pause");
+    lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFFu);
+    t = get_tick();
+    while ((uint32_t)(get_tick() - t) < TIMER_FREQ / 10) __asm__ volatile("pause");   /* 100 ms */
+    uint32_t counted = 0xFFFFFFFFu - lapic_read(LAPIC_TIMER_CUR);
+    lapic_write(LAPIC_TIMER_INIT, 0);
+    apic_timer_rate = counted * 10;
+    return apic_timer_rate;
+}
+
+static void send_ipi(uint32_t dest, uint32_t low) {
+    if (x2apic) {
+        wrmsr(0x830, (uint64_t)dest << 32 | low);
+        return;
+    }
+    lapic_write(LAPIC_ICR_HIGH, dest << 24);
+    lapic_write(LAPIC_ICR_LOW, low);
+    for (int i = 0; i < 100000 && (lapic_read(LAPIC_ICR_LOW) & (1u << 12)); i++) __asm__ volatile("pause");
+}
+
+static void wait_us(uint32_t us) {
+    /* The TSC rate from the kernel ticks (once). */
+    static uint64_t per_us;
+    if (!per_us) {
+        uint32_t t = get_tick();
+        while (get_tick() == t) __asm__ volatile("pause");
+        uint64_t a = rdtsc();
+        t = get_tick();
+        while ((uint32_t)(get_tick() - t) < 5) __asm__ volatile("pause");
+        per_us = (rdtsc() - a) / (5 * 1000000 / TIMER_FREQ);
+        if (!per_us) per_us = 1;
+    }
+    uint64_t end = rdtsc() + per_us * us;
+    while (rdtsc() < end) __asm__ volatile("pause");
+}
+
+/* INIT, then two STARTUP messages: the core starts in real mode at page << 12. */
+void apic_start_core(uint32_t apic_id, uint8_t page) {
+    send_ipi(apic_id, 0x4500);                          /* INIT, assert */
+    wait_us(10000);
+    send_ipi(apic_id, 0x4600 | page);                   /* STARTUP */
+    wait_us(200);
+    send_ipi(apic_id, 0x4600 | page);
+}
+
+/* On a core that just started: its local APIC on (in the boot core's mode),
+ * PIC line masked (the boot core takes those), its timer at TIMER_FREQ. */
+void apic_setup_core(uint32_t per_second, uint8_t timer_vector) {
+    uint64_t base = rdmsr(MSR_APIC_BASE) | APIC_BASE_ON;
+    if (x2apic) base |= APIC_BASE_X2;
+    wrmsr(MSR_APIC_BASE, base);
+    lapic_write(LAPIC_TPR, 0);
+    lapic_write(LAPIC_SVR, 0x100 | SPURIOUS_VECTOR);
+    lapic_write(LAPIC_LVT_LINT0, LVT_MASKED);
+    lapic_write(LAPIC_LVT_LINT1, DELIVERY_NMI);
+    lapic_write(LAPIC_TIMER_DIV, 0x3);
+    lapic_write(LAPIC_LVT_TIMER, LVT_PERIODIC | timer_vector);
+    lapic_write(LAPIC_TIMER_INIT, per_second / TIMER_FREQ);
+}
+
+int apic_is_x2(void) { return x2apic; }

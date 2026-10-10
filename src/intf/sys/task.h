@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include "sys/users.h"
 
-#define MAX_TASKS   16
+#define MAX_TASKS   32
 #define TASK_SLICE  5         /* timer ticks (50 ms) a program runs before the next one */
 
 typedef enum { TASK_FREE, TASK_READY, TASK_SLEEPING, TASK_ZOMBIE } task_state_t;
@@ -33,10 +33,17 @@ typedef struct task {
     int kill_code;            /* nonzero: end the program at the next chance */
     user_t user;              /* who runs it */
     void *process;            /* sys/process.c state of a user program */
+    int running_on;           /* the core running it now, -1 if none (sys/smp.h) */
+    int pinned;               /* kernel tasks: the only core that may run it */
+    int is_idle;
+    int bkl_depth;            /* its kernel-lock nesting while switched out */
+    uint8_t fpu[512] __attribute__((aligned(16)));   /* x87/SSE registers (fxsave) */
 } task_t;
 
 /* The boot context becomes task 1 ("shell"); also starts the idle task (pid 0). */
 void task_init(void);
+/* A core that just started: its boot context becomes its idle task. */
+void task_init_ap(int cpu);
 int task_running(void);       /* 1 once task_init has run */
 
 task_t *task_current(void);

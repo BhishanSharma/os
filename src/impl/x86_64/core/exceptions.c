@@ -6,6 +6,7 @@
 // print_flush() draws on a framebuffer) and to COM1.
 
 #include "core/exceptions.h"
+#include "sys/smp.h"
 #include "core/idt.h"
 #include "core/gdt.h"
 #include "lib/print.h"
@@ -159,6 +160,7 @@ static void describe_gp(uint64_t err) {
 // ---- public entry points --------------------------------------------------
 
 void exception_handler(struct exc_frame* f) {
+    bkl_enter();                      /* (a fault in a program ends it; the kernel panics) */
     // Debug and breakpoint traps are not errors: report and resume.
     if (f->vector == 1 || f->vector == 3) {
         kprintf("[EXC] %s at rip=0x%lx\n", exc_name[f->vector], f->rip);

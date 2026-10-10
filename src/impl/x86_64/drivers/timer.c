@@ -1,4 +1,5 @@
 #include "drivers/timer.h"
+#include "sys/smp.h"
 #include "sys/task.h"
 #include "lib/print.h"
 #include "../lib/ports.h"
@@ -35,10 +36,12 @@ void timer_add_poll_hook(void (*hook)(void)) {
 // Called on every timer interrupt (IRQ0)
 void isr_timer(registers_t regs) {
     apic_timer_ack();
-    tick++;
+    tick++;                          /* outside the kernel lock: the clock never waits */
+    bkl_enter();
     task_tick();
     if (poll_hook) poll_hook();
     for (int i = 0; i < 4 && more_hooks[i]; i++) more_hooks[i]();
+    bkl_leave();
 }
 
 // Initialize PIT (Programmable Interval Timer)
@@ -70,6 +73,6 @@ void sleep(uint32_t ms) {
     }
     uint32_t target_ticks = tick + (ms * TIMER_FREQ) / 1000;
     while (tick < target_ticks) {
-        asm volatile("hlt"); // Halt CPU until next interrupt (saves power)
+        cpu_wait();          // until the next interrupt (other cores may use the kernel)
     }
 }

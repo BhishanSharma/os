@@ -35,6 +35,16 @@
 #define SYS_MOUSE   25   /* getmouse(struct os_mouse *): takes the mouse while in the foreground -> 1, 0 if no mouse */
 #define SYS_GFX     26   /* gfx(op, arg): pixels on the screen, op = GFX_* -> see below */
 
+/* TCP sockets (the 4th argument goes in r10). A socket belongs to the program
+ * that opened it and is closed when the program ends. */
+#define SYS_RESOLVE   27 /* resolve(host, uint8_t ip[4]): DNS             -> 0          */
+#define SYS_CONNECT   28 /* connect(ip as a.b.c.d = a<<24.., port, timeout ms) -> socket */
+#define SYS_LISTEN    29 /* listen(port)                                  -> socket     */
+#define SYS_ACCEPT    30 /* accept(socket, timeout ms; 0 = no limit)      -> socket     */
+#define SYS_SEND      31 /* send(socket, buf, len): all of it, waiting    -> len        */
+#define SYS_RECV      32 /* recv(socket, buf, len, timeout ms; 0 = none)  -> bytes, 0 = closed by the peer */
+#define SYS_SOCKCLOSE 33 /* closesocket(socket)                           -> 0          */
+
 /* open() modes */
 #define OPEN_READ    0
 #define OPEN_WRITE   1   /* create or truncate */
@@ -88,6 +98,13 @@
 #define SYSERR_NOUSER  -12   /* no such user */
 #define SYSERR_AUTH    -13   /* wrong password */
 #define SYSERR_SRCH    -14   /* no such process */
+#define SYSERR_TIMEOUT -15   /* nothing happened in time */
+#define SYSERR_REFUSED -16   /* connection refused */
+#define SYSERR_RESET   -17   /* connection reset by the peer */
+#define SYSERR_CLOSED  -18   /* the connection is closed */
+#define SYSERR_NOROUTE -19   /* no network, or the gateway does not answer */
+#define SYSERR_INUSE   -20   /* port already in use */
+#define SYSERR_NOHOST  -21   /* DNS: no such host */
 
 struct os_time {
     int year, month, day, hour, minute, second;

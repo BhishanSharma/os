@@ -1,4 +1,5 @@
 #include "core/multiboot2.h"
+#include "lib/string.h"
 #include <stdint.h>
 
 #define MB2_TAG_END         0
@@ -86,4 +87,19 @@ const void *mb2_get_rsdp(void) {
  * only when the firmware is UEFI. */
 int mb2_booted_from_uefi(void) {
     return find_tag(11) != 0 || find_tag(12) != 0;
+}
+
+/* Is `word` one of the words on the kernel's command line (tag 1)? */
+int mb2_cmdline_has(const char *word) {
+    const uint8_t *tag = find_tag(1);
+    if (!tag) return 0;
+    const char *p = (const char *)(tag + 8);
+    size_t n = strlen(word);
+    while (*p) {
+        while (*p == ' ') p++;
+        const char *start = p;
+        while (*p && *p != ' ') p++;
+        if ((size_t)(p - start) == n && !memcmp(start, word, n)) return 1;
+    }
+    return 0;
 }

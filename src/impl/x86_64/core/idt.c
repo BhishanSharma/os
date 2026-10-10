@@ -24,6 +24,14 @@ void idt_set_entry_ist(int vector, void* isr, uint8_t flags, uint8_t ist) {
     idt[vector].zero        = 0;
 }
 
+/* Another core: the same table. */
+void idt_load_ap(void) {
+    struct IDTDescriptor idtd;
+    idtd.limit = sizeof(idt) - 1;
+    idtd.base  = (uint64_t)&idt;
+    idt_load(&idtd);
+}
+
 void idt_init() {
     struct IDTDescriptor idtd;
     idtd.limit = sizeof(idt) - 1;

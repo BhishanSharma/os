@@ -24,4 +24,8 @@ void acpi_save_rsdp(void);
  * how many were found (at most `max`), or -1 without ACPI tables. */
 int acpi_find_i2c_devices(acpi_i2c_device_t *out, int max);
 
+/* The local APIC IDs of the enabled cores (from the MADT). Returns how many,
+ * or -1 without the table. */
+int acpi_list_cpus(uint32_t *ids, int max);
+
 #endif

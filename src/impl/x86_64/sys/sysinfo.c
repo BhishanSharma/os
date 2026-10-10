@@ -1,5 +1,6 @@
 // sysinfo.c - logo, status bar and the `sysinfo` command
 #include "sys/sysinfo.h"
+#include "sys/vfs.h"
 #include "drivers/wifi.h"
 #include "lib/print.h"
 #include "lib/string.h"
@@ -147,7 +148,7 @@ void statusbar_update(int force) {
     uint32_t total = (uint32_t)(heap_get_total() >> 20);
     k_snprintf(left, sizeof(left), " %s %s" SEP "%s" SEP "%s" SEP "RAM %u.%u/%u MiB" SEP "%s" SEP "up %s",
                OS_NAME, OS_VERSION, user_current()->name, ip, (uint32_t)(used >> 20), (uint32_t)((used & 0xFFFFF) * 10 >> 20),
-               total, disk_name(), up);
+               total, vfs_root_name(), up);
 
     rtc_time_t t;
     if (local_time(&t) == 0)
@@ -206,10 +207,7 @@ void sysinfo_print(void) {
     } else {
         info_line("Wi-Fi", "none found");
     }
-    if (disk_selected() == DISK_RAM)
-        info_line("Disk", "FAT32 on RAM disk (%u MiB, not saved)", (uint32_t)(disk_ramdisk_size() >> 20));
-    else
-        info_line("Disk", disk_selected() == DISK_ATA ? "FAT32 on ATA disk" : "none");
+    info_line("Disk", "FAT32 on %s%s", vfs_root_name(), vfs_root_persistent() ? " (kept across reboots)" : " (not saved)");
     info_line("Shell", "SHELL.ELF, a user program (type `help`)");
     color_theme_t theme = print_get_current_theme();
     info_line("Theme", "%s", (unsigned)theme < sizeof(theme_names) / sizeof(theme_names[0]) ? theme_names[theme] : "?");

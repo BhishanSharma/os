@@ -26,6 +26,13 @@
 #include "drivers/touchpad.h"
 #include "drivers/iwlwifi.h"
 #include "drivers/hda.h"
+#include "drivers/nvme.h"
+#include "drivers/part.h"
+#include "drivers/fatvol.h"
+#include "sys/vfs.h"
+#include "net/tcp.h"
+#include "drivers/msi.h"
+#include "sys/smp.h"
 #include "drivers/display.h"
 #include "lib/fbcon.h"
 
@@ -38,9 +45,10 @@ static void cmd_help(void);
 static void cmd_crash(const char *what);
 static void cmd_ping(const char *args);
 static void cmd_download(const char *args);
-static void cmd_ls(void);
+static void cmd_ls(const char *path);
 static void cmd_cat(const char *filename);
 static void cmd_mount(const char *which);
+static void cmd_umount(const char *path);
 static int run_program(const char *line, int report_missing);
 static int need_root(const char *what);
 static void report_exit(const char *name, int pid, int code, int background);
@@ -154,7 +162,7 @@ static void print_fs_error(const char *what, const char *name, int result)
         kprintf("%s: %s: permission denied (you can change files in %s and /tmp)\n", what, name,
                 user_current()->home);
     else
-        kprintf("%s: %s: failed (error %d)\n", what, name, result);
+        kprintf("%s: %s: %s\n", what, name, vfs_error(result));
 }
 
 static void cmd_help(void)
@@ -213,7 +221,9 @@ static void cmd_help(void)
     print_str("free               - free last test allocation\n");
     print_str("freeidx <n>        - free n-th test allocation\n");
     print_str("listptr            - list test allocations\n");
-    print_str("mount [ata|ram]    - show or switch the disk the files live on\n");
+    print_str("mount [ram|ata|nvme n] [dir] - mount a volume (no arguments: list mounts)\n");
+    print_str("umount <dir>       - unmount a volume\n");
+    print_str("nvme               - the NVMe drive and its partitions\n");
     print_str("diskinfo           - boot sector of the current disk\n");
     print_str("readsector <lba>   - dump a raw sector\n");
     print_str("fat32info          - FAT32 volume parameters\n");
@@ -226,6 +236,9 @@ static void cmd_help(void)
     print_str("volume [0-100]     - show or set the volume\n");
     print_str("\n=== Network ===\n");
     print_str("ifconfig           - show MAC, IP settings and packet counters\n");
+    print_str("netstat            - TCP connections and listening ports\n");
+    print_str("interrupts         - devices that interrupt (MSI/MSI-X) and how often\n");
+    print_str("cpus               - the CPU cores and what each one runs\n");
     print_str("wifi               - Wi-Fi adapters in this machine and what they need\n");
     print_str("wifi scan          - list the Wi-Fi networks in range\n");
     print_str("wifi connect [n]   - join network number n of the scan (or give its name;\n");
@@ -256,20 +269,21 @@ static void format_size(char *out, size_t size, uint32_t bytes)
         k_snprintf(out, size, "%u.%u MiB", bytes >> 20, (bytes % (1024 * 1024)) * 10 / (1024 * 1024));
 }
 
-static void cmd_ls(void)
+static void cmd_ls(const char *path)
 {
-    // fat32_file_info_t is 268 bytes: 32 of them must not live on the boot stack.
-    fat32_file_info_t *files = kmalloc(32 * sizeof(fat32_file_info_t));
+    // fat32_file_info_t is 268 bytes: these must not live on the boot stack.
+    fat32_file_info_t *files = kmalloc(128 * sizeof(fat32_file_info_t));
     if (!files)
     {
         print_str("Out of memory\n");
         return;
     }
-    int count = fat32_list_directory(files, 32);
+    while (*path == ' ') path++;
+    int count = fat32_list_directory_ex(path, files, 128);
 
     if (count < 0)
     {
-        print_error("Cannot read the directory (no filesystem mounted?)");
+        kprintf("ls: %s: no such folder\n", *path ? path : ".");
     }
     else if (count == 0)
     {
@@ -325,45 +339,74 @@ static void cmd_mount(const char *which)
     while (*which == ' ') which++;
     if (!*which)
     {
-        kprintf("Files are on: %s\n", disk_name());
-        if (disk_ramdisk_size())
-            kprintf("RAM disk loaded: %u MiB (changes are lost at reboot)\n",
-                    (uint32_t)(disk_ramdisk_size() >> 20));
-        else
-            print_str("No RAM disk loaded\n");
+        print_str("Mounted volumes:\n");
+        vfs_print_mounts();
         return;
     }
-    disk_kind_t kind;
-    if (strcmp(which, "ata") == 0)
-        kind = DISK_ATA;
-    else if (strcmp(which, "ram") == 0)
-        kind = DISK_RAM;
+    /* mount <ata|ram|nvme N> [folder] */
+    char kind[8];
+    int k = 0;
+    while (*which && *which != ' ' && k < 7) kind[k++] = *which++;
+    kind[k] = 0;
+    while (*which == ' ') which++;
+    int number = 0;
+    if (!strcmp(kind, "nvme"))
+        while (*which >= '0' && *which <= '9') number = number * 10 + (*which++ - '0');
+    while (*which == ' ') which++;
+    const char *at = *which ? which : !strcmp(kind, "nvme") ? "/NVME" : !strcmp(kind, "ram") ? "/RAM" : "/ATA";
+    blockdev_t dev;
+    if (!strcmp(kind, "ram"))
+    {
+        if (disk_open(DISK_RAM, &dev) != 0) { print_error("No RAM disk was loaded at boot"); return; }
+    }
+    else if (!strcmp(kind, "ata"))
+    {
+        if (ata_init() != 0 || disk_open(DISK_ATA, &dev) != 0) { print_error("No ATA disk found"); return; }
+    }
+    else if (!strcmp(kind, "nvme"))
+    {
+        char how[160];
+        if (!nvme_present() && nvme_init(how, sizeof(how)) != 0)
+        {
+            kprintf("mount: %s\n", how);
+            return;
+        }
+        static partition_t parts[16];
+        int n = part_scan(nvme_partition_reader, parts, 16);
+        if (number < 1 || number > n)
+        {
+            print_str("usage: mount nvme <partition> [folder]   (`nvme` lists the partitions)\n");
+            return;
+        }
+        partition_t *p = &parts[number - 1];
+        if (!p->fat32)
+        {
+            print_error("That partition is not FAT32 (NTFS cannot be read yet)");
+            return;
+        }
+        if (disk_open_nvme_partition(p->start, p->sectors, p->ours, number, &dev) != 0) return;
+    }
     else
     {
-        print_str("Usage: mount [ata|ram]\n");
+        print_str("usage: mount [ram|ata|nvme <n>] [folder]   (no arguments: list the mounts)\n");
         return;
     }
-    if (kind == DISK_RAM && !disk_ramdisk_size())
+    int r = vfs_mount(at, &dev);
+    if (r != 0)
     {
-        print_error("No RAM disk was loaded at boot");
+        kprintf("mount: %s\n", vfs_error(r));
         return;
     }
-    if (kind == DISK_ATA && ata_init() != 0)
-    {
-        print_error("No ATA disk found");
-        return;
-    }
-    disk_kind_t old = disk_selected();
-    disk_select(kind);
-    if (fat32_init(0) != 0)
-    {
-        print_error("No FAT32 volume on that disk; keeping the old one");
-        disk_select(old);
-        if (old != DISK_NONE) fat32_init(0);
-        return;
-    }
-    fat32_change_directory("/");
-    kprintf("Files are now on: %s\n", disk_name());
+    char abs[64];
+    vfs_normalize(at, abs, sizeof(abs));
+    kprintf("Mounted %s at %s%s\n", dev.name, abs, dev.writable ? "" : " (read-only)");
+}
+
+static void cmd_umount(const char *path)
+{
+    while (*path == ' ') path++;
+    int r = vfs_unmount(path);
+    if (r != 0) kprintf("umount: %s: %s\n", path, r == FATV_BAD_NAME ? "cannot unmount /" : "not a mount point");
 }
 
 #define CAT_MAX   (1024 * 1024)   // largest file `cat` will show
@@ -699,9 +742,9 @@ static int kernel_command(const char *line, int run_programs) {
         sleep(s * 1000);
         print_str("Done sleeping\n");
     }
-    else if (strcmp(line, "ls") == 0)
+    else if (strcmp(line, "ls") == 0 || strncmp(line, "ls ", 3) == 0)
     {
-        cmd_ls();
+        cmd_ls(line[2] ? line + 3 : "");
     }
     else if (strncmp(line, "cat ", 4) == 0)
     {
@@ -802,7 +845,7 @@ static int kernel_command(const char *line, int run_programs) {
         else
         {
             // Read boot sector
-            if (disk_read_sectors(0, 1, buffer) == 0)
+            if (vfs_read_sectors(0, 1, buffer) == 0)
             {
                 print_str("=== Boot Sector (LBA 0) ===\n");
 
@@ -877,7 +920,7 @@ static int kernel_command(const char *line, int run_programs) {
         {
             kprintf("Reading sector %d...\n", lba);
 
-            if (disk_read_sectors(lba, 1, buffer) == 0)
+            if (vfs_read_sectors(lba, 1, buffer) == 0)
             {
                 print_str("Success! First 64 bytes:\n");
                 for (int i = 0; i < 64; i++)
@@ -903,7 +946,7 @@ static int kernel_command(const char *line, int run_programs) {
         }
         else
         {
-            if (disk_read_sectors(0, 1, buffer) == 0)
+            if (vfs_read_sectors(0, 1, buffer) == 0)
             {
                 fat32_boot_sector_t *bs = (fat32_boot_sector_t *)buffer;
 
@@ -1237,6 +1280,15 @@ static int kernel_command(const char *line, int run_programs) {
         }
         cmd_sound(line);
     }
+    else if (strncmp(line, "umount ", 7) == 0)
+    {
+        if (!need_root("umount")) return 1;
+        cmd_umount(line + 7);
+    }
+    else if (strcmp(line, "nvme") == 0)
+    {
+        nvme_print_info();
+    }
     else if (strcmp(line, "lspci") == 0)
     {
         cmd_lspci();
@@ -1248,6 +1300,18 @@ static int kernel_command(const char *line, int run_programs) {
     else if (strcmp(line, "touchpad") == 0)
     {
         touchpad_diagnose();
+    }
+    else if (strcmp(line, "cpus") == 0)
+    {
+        smp_print();
+    }
+    else if (strcmp(line, "interrupts") == 0)
+    {
+        msi_print();
+    }
+    else if (strcmp(line, "netstat") == 0)
+    {
+        tcp_print_sockets();
     }
     else if (strcmp(line, "ifconfig") == 0)
     {
@@ -1353,30 +1417,14 @@ static void cmd_programs(void)
 {
     char cwd[256] = "/";
     fat32_get_current_directory(cwd, sizeof(cwd));
-    disk_kind_t old = disk_selected();
-    int at_ram_root = old == DISK_RAM && strcmp(cwd, "/") == 0;
-    if (!at_ram_root) list_elf_files("In this directory");
-    if (disk_ramdisk_size())
+    const char *sys = vfs_system_dir();
+    if (strcmp(cwd, sys) != 0) list_elf_files("In this directory");
+    char here[256];
+    kstrncpy(here, cwd, sizeof(here));
+    if (fat32_change_directory(sys) == 0)
     {
-        if (old != DISK_RAM)
-        {
-            disk_select(DISK_RAM);
-            if (fat32_init(0) != 0)
-            {
-                disk_select(old);
-                if (old != DISK_NONE) fat32_init(0);
-                fat32_change_directory(cwd);
-                return;
-            }
-        }
-        fat32_change_directory("/");
-        list_elf_files("On the RAM disk");
-        if (old != DISK_RAM)
-        {
-            disk_select(old);
-            if (old != DISK_NONE) fat32_init(0);
-        }
-        fat32_change_directory(cwd);
+        list_elf_files(strcmp(sys, "/") ? "In /SYS (the RAM disk)" : "On the RAM disk");
+        fat32_change_directory(here);
     }
     print_str("Type a program's name (with arguments) to run it in user mode.\n");
 }
@@ -1495,7 +1543,7 @@ static void cmd_ps(int programs_only)
     if (programs_only)
         kprintf("  %5s  %-9s %-9s %s\n", "PID", "USER", "STATE", "PROGRAM");
     else
-        kprintf("  %5s  %-9s %-9s %8s  %s\n", "PID", "USER", "STATE", "CPU", "NAME");
+        kprintf("  %5s  %-9s %-9s %8s %4s  %s\n", "PID", "USER", "STATE", "CPU", "CORE", "NAME");
     int shown = 0;
     for (int i = 0; i < MAX_TASKS; i++)
     {
@@ -1506,8 +1554,12 @@ static void cmd_ps(int programs_only)
             kprintf("  %5d  %-9s %-9s %s%s\n", t->pid, user, state_name(t), t->name,
                     t->pid == process_foreground() ? "  (foreground)" : "");
         else
-            kprintf("  %5d  %-9s %-9s %5u.%02us  %s\n", t->pid, user, state_name(t),
-                    t->ticks / 100, t->ticks % 100, t->name);
+        {
+            char core[8] = "-";
+            if (t->running_on >= 0) k_snprintf(core, sizeof(core), "%d", t->running_on);
+            kprintf("  %5d  %-9s %-9s %5u.%02us %4s  %s\n", t->pid, user, state_name(t),
+                    t->ticks / 100, t->ticks % 100, core, t->name);
+        }
         shown++;
     }
     if (programs_only && shown == 0) print_str("  (no programs running; start one with `name &`)\n");
@@ -1801,31 +1853,17 @@ static int cmd_sound(const char *line)
     }
     const char *name = line + 5;
     while (*name == ' ') name++;
-    /* The FAT32 calls look a name up in the current folder: go to the file's
-     * folder for the read, and back afterwards. */
-    char cwd[256], dir[256];
-    cwd[0] = 0;
-    const char *slash = 0;
-    for (const char *q = name; *q; q++)
-        if (*q == '/') slash = q;
-    if (slash)
+    /* Not found: the system folder (where CHIME.WAV is) by its last name. */
+    char sys_path[128];
+    if (!fat32_file_exists(name))
     {
-        size_t n = (size_t)(slash - name);
-        if (n >= sizeof(dir)) n = sizeof(dir) - 1;
-        memcpy(dir, name, n);
-        dir[n] = 0;
-        if (n == 0) { dir[0] = '/'; dir[1] = 0; }
-        if (fat32_get_current_directory(cwd, sizeof(cwd)) != 0) cwd[0] = 0;
-        if (fat32_change_directory(dir) != 0)
-        {
-            kprintf("play: %s: no such folder\n", dir);
-            return 1;
-        }
-        name = slash + 1;
+        const char *base = name;
+        for (const char *q = name; *q; q++)
+            if (*q == '/') base = q + 1;
+        k_snprintf(sys_path, sizeof(sys_path), "%s/%s", strcmp(vfs_system_dir(), "/") ? vfs_system_dir() : "", base);
+        if (fat32_file_exists(sys_path)) name = sys_path;
     }
-    int r = play_file(name);
-    if (cwd[0]) fat32_change_directory(cwd);
-    return r;
+    return play_file(name);
 }
 
 static int play_file(const char *name)

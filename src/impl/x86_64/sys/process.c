@@ -7,6 +7,7 @@
 // programs can run at once; the timer switches between them. One of them may
 // be in the foreground: it gets the keyboard and Ctrl+C.
 #include "sys/process.h"
+#include "sys/smp.h"
 #include "sys/syscall_nums.h"
 #include "sys/task.h"
 #include "sys/users.h"
@@ -17,6 +18,9 @@
 #include "drivers/memory.h"
 #include "drivers/heap.h"
 #include "drivers/fat32.h"
+#include "net/tcp.h"
+#include "net/net.h"
+#include "sys/vfs.h"
 #include "drivers/disk.h"
 #include "drivers/mouse.h"
 #include "lib/fbcon.h"
@@ -157,6 +161,71 @@ static void leave_cwd(const char *saved) {
     if (saved[0]) fat32_change_directory(saved);
 }
 
+static void check_killed(void);
+
+/* ---- Sockets ------------------------------------------------------------ */
+
+static int own_socket(int s) { return tcp_owner(s) == task_current()->pid; }
+
+/* A TCP result for the program: new sockets become its own; Ctrl+C ends it. */
+static int64_t sock_result(int r, int is_new_socket) {
+    if (r >= 0) {
+        if (is_new_socket) tcp_set_owner(r, task_current()->pid);
+        return r;
+    }
+    switch (r) {
+        case TCP_ERR_INTR:    check_killed(); return SYSERR_TIMEOUT;
+        case TCP_ERR_TIMEOUT: return SYSERR_TIMEOUT;
+        case TCP_ERR_REFUSED: return SYSERR_REFUSED;
+        case TCP_ERR_RESET:   return SYSERR_RESET;
+        case TCP_ERR_CLOSED:  return SYSERR_CLOSED;
+        case TCP_ERR_NOROUTE: return SYSERR_NOROUTE;
+        case TCP_ERR_INUSE:   return SYSERR_INUSE;
+        case TCP_ERR_NOSOCK:  return is_new_socket ? SYSERR_AGAIN : SYSERR_BADFD;
+        default:              return SYSERR_IO;
+    }
+}
+
+static int64_t sys_resolve(uint64_t host_ptr, uint64_t ip_ptr) {
+    char host[128];
+    if (copy_user_string(host, host_ptr, sizeof(host)) != 0 || !user_range_ok(ip_ptr, 4, 1)) return SYSERR_FAULT;
+    if (!net_is_up()) return SYSERR_NOROUTE;
+    uint8_t ip[4];
+    if (net_resolve(host, ip) != 0) return SYSERR_NOHOST;
+    memcpy((void *)ip_ptr, ip, 4);
+    return 0;
+}
+
+static int64_t sys_connect(uint64_t packed, uint64_t port, uint64_t timeout_ms) {
+    if (!net_is_up()) return SYSERR_NOROUTE;
+    if (!port || port > 65535) return SYSERR_BADCALL;
+    uint8_t ip[4] = { (uint8_t)(packed >> 24), (uint8_t)(packed >> 16), (uint8_t)(packed >> 8), (uint8_t)packed };
+    return sock_result(tcp_connect(ip, (uint16_t)port, timeout_ms ? (uint32_t)timeout_ms : 10000), 1);
+}
+
+#define NO_LIMIT_MS 0x7FFFFFFu                        /* "no limit": about 37 hours */
+
+static int64_t sys_accept(uint64_t s, uint64_t timeout_ms) {
+    if (!own_socket((int)s)) return SYSERR_BADFD;
+    uint32_t ms = timeout_ms && timeout_ms < NO_LIMIT_MS ? (uint32_t)timeout_ms : NO_LIMIT_MS;
+    return sock_result(tcp_accept((int)s, ms), 1);
+}
+
+static int64_t sys_send(uint64_t s, uint64_t buf, uint64_t len) {
+    if (!own_socket((int)s)) return SYSERR_BADFD;
+    if (!user_range_ok(buf, len, 0)) return SYSERR_FAULT;
+    if (len > 0x7FFFFFFF) len = 0x7FFFFFFF;
+    return sock_result(tcp_send((int)s, (const void *)buf, (uint32_t)len), 0);
+}
+
+static int64_t sys_recv(uint64_t s, uint64_t buf, uint64_t len, uint64_t timeout_ms) {
+    if (!own_socket((int)s)) return SYSERR_BADFD;
+    if (!user_range_ok(buf, len, 1)) return SYSERR_FAULT;
+    if (len > 0x7FFFFFFF) len = 0x7FFFFFFF;
+    uint32_t ms = timeout_ms && timeout_ms < NO_LIMIT_MS ? (uint32_t)timeout_ms : NO_LIMIT_MS;
+    return sock_result(tcp_recv((int)s, (void *)buf, (uint32_t)len, ms), 0);
+}
+
 /* ---- Files -------------------------------------------------------------- */
 
 static int file_grow(file_t *f, uint32_t need) {
@@ -243,6 +312,7 @@ static int64_t sys_close(uint64_t fd) {
 static void __attribute__((noreturn)) process_exit(int code) {
     task_t *t = task_current();
     process_t *p = t->process;
+    tcp_close_owned_by(t->pid);                         /* its connections end with it */
     if (p) {
         for (int i = 3; i < MAX_FDS; i++)
             if (p->files[i].used) close_file(&p->files[i]);
@@ -270,6 +340,18 @@ static void __attribute__((noreturn)) process_exit(int code) {
         print_set_cursor_visible(1);
     }
     task_exit(code);
+}
+
+int process_interrupted(void) {
+    task_t *t = task_current();
+    if (t && t->is_user) {
+        if (!t->kill_code && keyboard_ctrl_c && t->pid == foreground_pid) {
+            keyboard_ctrl_c = 0;
+            t->kill_code = EXIT_INTERRUPTED;
+        }
+        return t->kill_code != 0;
+    }
+    return keyboard_ctrl_c;                    /* a kernel command (download) */
 }
 
 /* Called where a program can be stopped safely: Ctrl+C, `kill`. */
@@ -305,8 +387,10 @@ void process_fault(uint64_t vector, const char *name, uint64_t rip, uint64_t add
 /* Timer interrupt that arrived in user mode (irq.asm): stop the program if it
  * was asked to, otherwise switch if its time slice is used up. */
 void user_check_interrupt(void) {
+    bkl_enter();
     check_killed();
     task_preempt();
+    bkl_leave();
 }
 
 /* ---- Keyboard ----------------------------------------------------------- */
@@ -542,7 +626,16 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg);
 
 /* int 0x80 (usermode.asm). Runs with interrupts on, so a blocking call
  * (keyboard, sleep) still gets timer and keyboard interrupts. */
+static void syscall_dispatch_locked(struct exc_frame *f);
+
+/* Every system call runs under the big kernel lock (sys/smp.h). */
 void syscall_dispatch(struct exc_frame *f) {
+    bkl_enter();
+    syscall_dispatch_locked(f);
+    bkl_leave();
+}
+
+static void syscall_dispatch_locked(struct exc_frame *f) {
     __asm__ volatile("sti");
     check_killed();
     int64_t r;
@@ -574,6 +667,13 @@ void syscall_dispatch(struct exc_frame *f) {
         case SYS_UNAME:   r = sys_uname(f->rdi); break;
         case SYS_MOUSE:   r = sys_mouse(f->rdi); break;
         case SYS_GFX:     r = sys_gfx(f->rdi, f->rsi); break;
+        case SYS_RESOLVE: r = sys_resolve(f->rdi, f->rsi); break;
+        case SYS_CONNECT: r = sys_connect(f->rdi, f->rsi, f->rdx); break;
+        case SYS_LISTEN:  r = sock_result(tcp_listen((uint16_t)f->rdi), 1); break;
+        case SYS_ACCEPT:  r = sys_accept(f->rdi, f->rsi); break;
+        case SYS_SEND:    r = sys_send(f->rdi, f->rsi, f->rdx); break;
+        case SYS_RECV:    r = sys_recv(f->rdi, f->rsi, f->rdx, f->r10); break;
+        case SYS_SOCKCLOSE: r = own_socket((int)f->rdi) ? (tcp_close((int)f->rdi), 0) : SYSERR_BADFD; break;
         default:          r = SYSERR_BADCALL; break;
     }
     f->rax = (uint64_t)r;
@@ -803,27 +903,11 @@ uint8_t *process_find_program(const char *name, uint32_t *size) {
     int has_folder = 0;
     for (const char *c = name; *c; c++)
         if (*c == '/') has_folder = 1;
-    if (data || !disk_ramdisk_size() || has_folder) return data;
-
-    char cwd[256] = "/";
-    fat32_get_current_directory(cwd, sizeof(cwd));
-    disk_kind_t old = disk_selected();
-    if (old != DISK_RAM) {
-        disk_select(DISK_RAM);
-        if (fat32_init(0) != 0) {
-            disk_select(old);
-            if (old != DISK_NONE) fat32_init(0);
-            return 0;
-        }
-    }
-    fat32_change_directory("/");
-    data = read_program_file(name, size);
-    if (old != DISK_RAM) {
-        disk_select(old);
-        if (old != DISK_NONE) fat32_init(0);
-    }
-    fat32_change_directory(cwd);
-    return data;
+    if (data || has_folder) return data;
+    /* Not here: the system folder (the RAM disk's programs). */
+    char path[64];
+    k_snprintf(path, sizeof(path), "%s/%s", strcmp(vfs_system_dir(), "/") ? vfs_system_dir() : "", name);
+    return read_program_file(path, size);
 }
 
 /* ---- System calls for programs that run programs ----------------------- */
