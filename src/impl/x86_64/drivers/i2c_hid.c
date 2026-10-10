@@ -303,6 +303,7 @@ typedef struct {
     uint32_t tp_x_max, tp_y_max;
     int tp_fingers;                      /* finger blocks in a report (finger collections) */
     int f_tip[TP_FINGERS], f_id[TP_FINGERS], f_id_size[TP_FINGERS], f_x[TP_FINGERS], f_y[TP_FINGERS];
+    int f_conf[TP_FINGERS];                                 /* "confidence": 0 = palm, -1 = not reported */
     int collections;                     /* application collections seen */
     uint32_t apps[6];                    /* their usages (page << 16 | usage) */
     int app_ids[6];
@@ -388,6 +389,7 @@ static void parse_report_desc(const uint8_t *p, int len, layout_t *L) {
                     L->tp_fingers < TP_FINGERS) {
                     finger = L->tp_fingers++;
                     L->f_tip[finger] = L->f_id[finger] = L->f_x[finger] = L->f_y[finger] = -1;
+                    L->f_conf[finger] = -1;
                     L->f_id_size[finger] = 0;
                 }
                 depth++;
@@ -422,6 +424,7 @@ static void parse_report_desc(const uint8_t *p, int len, layout_t *L) {
                         else if (u == 0x00090001 && L->tp_btn_off < 0) L->tp_btn_off = off;
                         if (finger >= 0) {
                             if (u == 0x000D0042) L->f_tip[finger] = off;
+                            else if (u == 0x000D0047) L->f_conf[finger] = off;
                             else if (u == 0x000D0051) { L->f_id[finger] = off; L->f_id_size[finger] = (int)rsize; }
                             else if (u == 0x00010030) L->f_x[finger] = off;
                             else if (u == 0x00010031) L->f_y[finger] = off;
@@ -438,6 +441,7 @@ static void parse_report_desc(const uint8_t *p, int len, layout_t *L) {
         L->tp_fingers = 1;
         L->f_tip[0] = L->tp_tip_off;
         L->f_id[0] = -1;
+        L->f_conf[0] = -1;
         L->f_x[0] = L->tp_x_off;
         L->f_y[0] = L->tp_y_off;
     }
@@ -474,11 +478,17 @@ static int read_input(uint8_t *buf, int max) {
  *   pad pressed down        left click (right click with two fingers down)
  *   short tap               left click (two-finger tap: right click)
  * Around a press the pointer stands still for a moment: pressing the pad
- * moves the finger a little, which must not turn a click into a selection. */
+ * moves the finger a little, which must not turn a click into a selection.
+ * A contact the pad calls a palm (confidence 0) is ignored for as long as it
+ * stays down; a resting finger's sensor noise does not move the pointer until
+ * the finger really moves (it "glides"); and a jump no finger could make
+ * between two reports is a misread, not a movement. */
 #define TP_CONTACTS 8
 
 static struct {
-    struct { int id, down, x, y; uint32_t seen; } c[TP_CONTACTS];
+    struct { int id, down, palm, x, y; uint32_t seen; } c[TP_CONTACTS];
+    int gliding, acc_x, acc_y;                              /* the primary finger is moving */
+    uint32_t last_glide;
     int touching;                                           /* any finger down */
     int primary;                                            /* contact index the pointer follows, -1 */
     int max_fingers, moved, clicked;
@@ -510,7 +520,7 @@ static int contact_slot(int id) {
 
 static int fingers_down(void) {
     int n = 0;
-    for (int i = 0; i < TP_CONTACTS; i++) n += pad.c[i].down;
+    for (int i = 0; i < TP_CONTACTS; i++) n += pad.c[i].down && !pad.c[i].palm;
     return n;
 }
 
@@ -532,6 +542,7 @@ static void handle_touchpad(const uint8_t *data, int datalen) {
         int id = L->f_id[k] >= 0 ? get_bits(data, datalen, L->f_id[k], L->f_id_size[k], 0) : k;
         int x = get_bits(data, datalen, L->f_x[k], L->tp_x_size, 0);
         int y = get_bits(data, datalen, L->f_y[k], L->tp_y_size, 0);
+        int conf = L->f_conf[k] >= 0 ? get_bits(data, datalen, L->f_conf[k], 1, 0) : 1;
         int i = contact_slot(id);
         if (i < 0) continue;
         if (!tip) {                                         /* this finger lifted */
@@ -539,19 +550,35 @@ static void handle_touchpad(const uint8_t *data, int datalen) {
             if (i == pad.primary) pad.primary = -1;
             continue;
         }
+        if (!conf || (pad.c[i].down && pad.c[i].palm)) {    /* a palm: tracked, never used */
+            if (!pad.c[i].down || !pad.c[i].palm) {
+                if (i == pad.primary) pad.primary = -1;
+                pad.c[i].down = pad.c[i].palm = 1;
+                pad.c[i].id = id;
+            }
+            pad.c[i].seen = now;
+            continue;
+        }
+        if (!pad.c[i].down) pad.c[i].palm = 0;
         if (pad.c[i].down) {
             int mx = x - pad.c[i].x, my = y - pad.c[i].y;
+            if ((mx < 0 ? -mx : mx) + (my < 0 ? -my : my) > range / 6) {
+                mx = my = 0;                                /* a misread jump: start over from here */
+                if (i == pad.primary) pad.gliding = pad.acc_x = pad.acc_y = 0;
+            }
             if (i == pad.primary) {
                 pad.moved += (mx < 0 ? -mx : mx) + (my < 0 ? -my : my);
                 dx += mx;
                 dy += my;
             } else if (pad.primary < 0) {
                 pad.primary = i;                            /* follow this one from now on */
+                pad.gliding = pad.acc_x = pad.acc_y = 0;
             }
             scroll_dy += my;
             scrolled = 1;
         } else if (pad.primary < 0) {
             pad.primary = i;
+            pad.gliding = pad.acc_x = pad.acc_y = 0;
         }
         pad.c[i].id = id;
         pad.c[i].down = 1;
@@ -574,6 +601,7 @@ static void handle_touchpad(const uint8_t *data, int datalen) {
         pad.moved = pad.clicked = pad.scroll = 0;
         pad.max_fingers = 0;
         pad.rem_x = pad.rem_y = 0;
+        pad.gliding = pad.acc_x = pad.acc_y = 0;
         dx = dy = 0;
     }
     if (n > pad.max_fingers) pad.max_fingers = n;
@@ -596,11 +624,28 @@ static void handle_touchpad(const uint8_t *data, int datalen) {
             while (pad.scroll <= -step) { wheel++; pad.scroll += step; }
         }
     } else if (n == 1 && (int32_t)(now - pad.still_until) >= 0) {
-        /* Ignore the first little bit of a touch (a resting or tapping finger). */
-        if (pad.moved > range / 100 || (uint32_t)(now - pad.since) > TIMER_FREQ / 5) {
-            mdx = pad_scale(dx, &pad.rem_x);
-            mdy = pad_scale(dy, &pad.rem_y);
+        /* A resting finger wobbles a little: the pointer moves only once the
+         * finger has gone a real distance, and stops again when it rests. */
+        if (!pad.gliding) {
+            pad.acc_x += dx;
+            pad.acc_y += dy;
+            if ((pad.acc_x < 0 ? -pad.acc_x : pad.acc_x) + (pad.acc_y < 0 ? -pad.acc_y : pad.acc_y) > range / 80) {
+                pad.gliding = 1;
+                pad.last_glide = now;
+                dx = pad.acc_x;
+                dy = pad.acc_y;
+                pad.acc_x = pad.acc_y = 0;
+            } else {
+                dx = dy = 0;
+            }
+        } else if ((dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy) > range / 400) {
+            pad.last_glide = now;
+        } else if ((uint32_t)(now - pad.last_glide) > TIMER_FREQ / 4) {
+            pad.gliding = 0;                                /* resting again */
+            dx = dy = 0;
         }
+        mdx = pad_scale(dx, &pad.rem_x);
+        mdy = pad_scale(dy, &pad.rem_y);
     }
     mouse_report("I2C touchpad", pad.held, mdx, mdy, wheel);
 
