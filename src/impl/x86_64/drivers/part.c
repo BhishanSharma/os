@@ -15,17 +15,39 @@ static const struct { uint8_t guid[16]; const char *kind; } gpt_types[] = {
     { { 0xAF, 0x3D, 0xC6, 0x0F, 0x83, 0x84, 0x72, 0x47, 0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4 }, "Linux" },
 };
 
-/* Is there a FAT32 file system at `lba`? Fills the label. */
+static void set_label(partition_t *p, const uint8_t *name) {
+    memcpy(p->label, name, 11);
+    p->label[11] = 0;
+    for (int i = 10; i >= 0 && p->label[i] == ' '; i--) p->label[i] = 0;
+    if (!strcmp(p->label, "NO NAME")) p->label[0] = 0;
+}
+
+/* Is there a FAT32 file system at `lba`? Fills the label. Windows writes the
+ * label only into the root folder (a volume-ID entry) and leaves "NO NAME" in
+ * the boot sector, so the root folder's entry wins. */
 static void probe_fat32(sector_reader_t rd, partition_t *p, uint8_t *buf) {
     p->fat32 = 0;
     p->label[0] = 0;
     if (rd(p->start, 1, buf) != 0 || buf[510] != 0x55 || buf[511] != 0xAA) return;
     if (memcmp(buf + 82, "FAT32   ", 8) != 0) return;
     p->fat32 = 1;
-    memcpy(p->label, buf + 71, 11);
-    p->label[11] = 0;
-    for (int i = 10; i >= 0 && p->label[i] == ' '; i--) p->label[i] = 0;
-    if (!strcmp(p->label, "NO NAME")) p->label[0] = 0;
+    set_label(p, buf + 71);
+
+    uint32_t spc = buf[13], reserved = buf[14] | buf[15] << 8, nfats = buf[16];
+    uint32_t fat_size = le32(buf + 36), root = le32(buf + 44);
+    if ((buf[11] | buf[12] << 8) == 512 && spc && root >= 2) {
+        uint64_t lba = p->start + reserved + (uint64_t)nfats * fat_size + (uint64_t)(root - 2) * spc;
+        uint32_t count = spc < 8 ? spc : 8;               /* the start of the root folder */
+        if (rd(lba, count, buf) == 0) {
+            for (uint32_t off = 0; off < count * 512; off += 32) {
+                const uint8_t *e = buf + off;
+                if (e[0] == 0) break;
+                if (e[0] == 0xE5 || (e[11] & 0x3F) == 0x0F || !(e[11] & 0x08)) continue;
+                set_label(p, e);
+                break;
+            }
+        }
+    }
     p->ours = strcmp(p->label, OUR_LABEL) == 0;
 }
 
