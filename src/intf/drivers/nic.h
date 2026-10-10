@@ -3,7 +3,8 @@
 #include <stdint.h>
 
 /* Driver-independent network card interface. nic_probe_init() picks the first
- * supported card it finds (RTL8139 under QEMU, RTL8168/8111 on real PCs); the
+ * supported card it finds (RTL8139 under QEMU, RTL8168/8111 on real PCs,
+ * Intel e1000 under VirtualBox); the
  * network stack only talks to these functions. */
 
 #define NIC_MAX_FRAME 1514   /* largest Ethernet frame without the 4-byte CRC */

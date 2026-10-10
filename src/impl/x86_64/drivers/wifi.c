@@ -59,8 +59,8 @@ static const chip_t chips[] = {
     {0x8086, 0x4DF0, "Wi-Fi 6 AX201 (CNVi)",         WIFI6,  "iwlwifi", 1},
     {0x8086, 0xA0F0, "Wi-Fi 6 AX201 (CNVi)",         WIFI6,  "iwlwifi", 1},
     {0x8086, 0x2725, "Wi-Fi 6E AX210",               WIFI6E, "iwlwifi", 1},
-    {0x8086, 0x51F0, "Wi-Fi 6E AX211 (CNVi)",        WIFI6E, "iwlwifi", 1},
-    {0x8086, 0x51F1, "Wi-Fi 6E AX211 (CNVi)",        WIFI6E, "iwlwifi", 1},
+    {0x8086, 0x51F0, "Wi-Fi 6/6E AX101/AX201/AX211 (CNVi)", WIFI6, "iwlwifi", 1},   // Acer Aspire A325-51: AX101
+    {0x8086, 0x51F1, "Wi-Fi 6/6E AX101/AX201/AX211 (CNVi)", WIFI6, "iwlwifi", 1},
     {0x8086, 0x54F0, "Wi-Fi 6 AX201/AX211 (CNVi)",   WIFI6,  "iwlwifi", 1},
     {0x8086, 0x7A70, "Wi-Fi 6E AX211 (CNVi)",        WIFI6E, "iwlwifi", 1},
     {0x8086, 0x7AF0, "Wi-Fi 6E AX211 (CNVi)",        WIFI6E, "iwlwifi", 1},
@@ -127,10 +127,32 @@ static const chip_t chips[] = {
     {0x14E4, 0x43EC, "BCM4356",                      WIFI5,  "brcmfmac", 1},
 };
 
+/* Intel CNVi: the PCI ID belongs to the chipset; the Wi-Fi module plugged
+ * into it (AX101, AX201, AX211) shows in the board (subsystem) ID. */
+typedef struct {
+    uint16_t sub_device;
+    const char *model, *standard;
+} cnvi_module_t;
+
+static const cnvi_module_t cnvi_modules[] = {
+    {0x0244, "Wi-Fi 6 AX101 (CNVi)", WIFI6},
+    {0x4244, "Wi-Fi 6 AX101 (CNVi)", WIFI6},
+    {0x0070, "Wi-Fi 6 AX201 (CNVi)", WIFI6},
+    {0x0074, "Wi-Fi 6 AX201 (CNVi)", WIFI6},
+    {0x0090, "Wi-Fi 6E AX211 (CNVi)", WIFI6E},
+    {0x0094, "Wi-Fi 6E AX211 (CNVi)", WIFI6E},
+};
+
 static wifi_adapter_t adapters[WIFI_MAX_ADAPTERS];
 static int adapter_count;
 static int scanned;
 static int usb_controllers, xhci_controllers, virtual_machine;
+
+static int is_cnvi(const chip_t *chip) {
+    for (const char *c = chip->model; *c; c++)
+        if (c[0] == 'C' && c[1] == 'N' && c[2] == 'V' && c[3] == 'i') return 1;
+    return 0;
+}
 
 static const chip_t *find_chip(uint16_t vendor, uint16_t device) {
     for (uint32_t i = 0; i < sizeof(chips) / sizeof(chips[0]); i++)
@@ -168,6 +190,11 @@ int wifi_detect(void) {
             a->standard = chip->standard;
             a->family = chip->family;
             a->needs_firmware = chip->firmware;
+            for (uint32_t m = 0; d->vendor == 0x8086 && m < sizeof(cnvi_modules) / sizeof(cnvi_modules[0]); m++)
+                if (cnvi_modules[m].sub_device == d->sub_device && is_cnvi(chip)) {
+                    a->model = cnvi_modules[m].model;
+                    a->standard = cnvi_modules[m].standard;
+                }
         }
         kprintf("Wi-Fi: %04x:%04x at %02x:%02x.%x, class %02x%02x\n", d->vendor, d->device,
                 d->bus, d->slot, d->func, d->class_code, d->subclass);

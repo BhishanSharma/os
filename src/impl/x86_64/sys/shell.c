@@ -1516,6 +1516,8 @@ static const char *pci_driver(const pci_device_t *d)
     if (d->vendor == 0x10EC && d->device == 0x8139) return "rtl8139";
     if (d->vendor == 0x10EC && (d->device == 0x8168 || d->device == 0x8161 || d->device == 0x8169)) return "rtl8168";
     if (d->class_code == 0x01 && d->subclass == 0x01) return "ata";
+    if (d->vendor == 0x8086 && (d->device == 0x100E || d->device == 0x100F || d->device == 0x1004 || d->device == 0x10D3))
+        return "e1000";
     for (int i = 0; i < wifi_count(); i++)
     {
         const pci_device_t *w = &wifi_get(i)->pci;

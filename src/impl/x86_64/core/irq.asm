@@ -157,3 +157,20 @@ irq_nic_stub:
     pop rax
 
     iretq
+
+; Spurious interrupts from the 8259 PICs. When a device drops its interrupt
+; line between the PIC raising it and the CPU acknowledging it (the e1000
+; does when the timer poll clears its interrupt cause first), the PIC
+; delivers its lowest-priority vector instead: IRQ 7 (master) or IRQ 15
+; (slave). Lines 7 and 15 are masked, so these are always spurious.
+global irq_spurious_master
+irq_spurious_master:
+    iretq                   ; no EOI: the master has no interrupt in service
+
+global irq_spurious_slave
+irq_spurious_slave:
+    push rax
+    mov al, 0x20
+    out 0x20, al            ; EOI to the master only (for the cascade line)
+    pop rax
+    iretq

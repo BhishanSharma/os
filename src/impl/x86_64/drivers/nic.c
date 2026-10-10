@@ -1,6 +1,7 @@
 #include "drivers/nic.h"
 #include "drivers/rtl8139.h"
 #include "drivers/rtl8168.h"
+#include "drivers/e1000.h"
 #include "drivers/timer.h"
 #include <stdint.h>
 
@@ -12,6 +13,11 @@ static nic_driver_t rtl8139_drv = {
 static nic_driver_t rtl8168_drv = {
     "RTL8168", NIC_IRQ_NONE, rtl8168_handle_irq, rtl8168_get_mac,
     rtl8168_set_rx_handler, rtl8168_get_stats, rtl8168_send,
+};
+
+static nic_driver_t e1000_drv = {
+    "Intel e1000", NIC_IRQ_NONE, e1000_handle_irq, e1000_get_mac,
+    e1000_set_rx_handler, e1000_get_stats, e1000_send,
 };
 
 static nic_driver_t *active;
@@ -27,6 +33,12 @@ int nic_probe_init(void) {
         active = &rtl8168_drv;
         /* On UEFI machines the legacy PIC line is often unrouted, so poll the
          * receive ring from the timer as well. Handling is idempotent. */
+        timer_set_poll_hook(nic_handle_irq);
+        return 0;
+    }
+    if (e1000_probe_init() == 0) {          /* VirtualBox, QEMU -device e1000 */
+        e1000_drv.irq = e1000_get_irq();
+        active = &e1000_drv;
         timer_set_poll_hook(nic_handle_irq);
         return 0;
     }

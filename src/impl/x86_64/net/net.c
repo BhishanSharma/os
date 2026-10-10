@@ -346,7 +346,7 @@ void net_set_debug(int on) {
 
 void net_print_ifconfig(void) {
     if (!net_up) {
-        print_str("No network interface (is the NIC attached? QEMU needs -device rtl8139; real PCs need an RTL8168)\n");
+        print_str("No network interface (is the NIC attached? QEMU needs -device rtl8139 or e1000; real PCs need an RTL8168; VirtualBox an Intel PRO/1000)\n");
         return;
     }
 
@@ -500,7 +500,7 @@ static int key_pressed(void) {
 
 int net_ping(const uint8_t ip[4], uint32_t count) {
     if (!net_up) {
-        print_str("No network interface (is the NIC attached? QEMU needs -device rtl8139; real PCs need an RTL8168)\n");
+        print_str("No network interface (is the NIC attached? QEMU needs -device rtl8139 or e1000; real PCs need an RTL8168; VirtualBox an Intel PRO/1000)\n");
         return PING_NET_DOWN;
     }
     if (count == 0) count = 4;

@@ -28,6 +28,8 @@ extern void irq0_stub();
 extern void irq1_stub();
 
 extern void irq_nic_stub();
+extern void irq_spurious_master();
+extern void irq_spurious_slave();
 extern void syscall_stub();
 
 // Exported by targets/x86_64/linker.ld: the real extent of the kernel image
@@ -145,6 +147,8 @@ void kernel_main() {
     // Set keyboard IRQ (IRQ1) handler
     idt_set_entry(0x21, irq1_stub, 0x8E);
     idt_set_entry(0x20, irq0_stub, 0x8E);
+    idt_set_entry(0x27, irq_spurious_master, 0x8E);   // spurious PIC interrupts
+    idt_set_entry(0x2F, irq_spurious_slave, 0x8E);
     idt_set_entry(0x80, syscall_stub, 0xEE);   // system calls: DPL 3, so ring 3 may `int 0x80`
 
     // Initialize keyboard and enable interrupts
@@ -189,7 +193,7 @@ void kernel_main() {
         net_fmt_mac(mac, net_get_config()->mac);
         print_boot_status(BOOT_OK, "Network", "%s, MAC %s", nic_name(), mac);
     } else {
-        print_boot_status(BOOT_WARN, "Network", "no supported network card (RTL8139, RTL8168)");
+        print_boot_status(BOOT_WARN, "Network", "no supported network card (RTL8139, RTL8168, Intel e1000)");
     }
 
     if (wifi_detect() > 0) {
