@@ -32,6 +32,7 @@
 #define SYS_KCOMMAND 22  /* kcommand(line): run a built-in kernel command -> 1, 0 if unknown */
 #define SYS_CTRLC   23   /* ctrlc(mode): what Ctrl+C does to this program -> 0         */
 #define SYS_UNAME   24   /* uname(struct os_uname *)                     -> 0          */
+#define SYS_MOUSE   25   /* getmouse(struct os_mouse *): takes the mouse while in the foreground -> 1, 0 if no mouse */
 
 /* open() modes */
 #define OPEN_READ    0
@@ -118,6 +119,17 @@ struct os_task {
     unsigned int cpu_ms;   /* time spent running */
     char name[16];
     char user[16];
+};
+
+/* getmouse() */
+#define MOUSE_BUTTON_LEFT    1
+#define MOUSE_BUTTON_RIGHT   2
+#define MOUSE_BUTTON_MIDDLE  4
+
+struct os_mouse {
+    int col, row;          /* the cell under the pointer (gotoxy coordinates; row -1 = status bar) */
+    int buttons;           /* MOUSE_BUTTON_* held now */
+    int wheel;             /* wheel steps since the last call: negative = up */
 };
 
 struct os_uname {

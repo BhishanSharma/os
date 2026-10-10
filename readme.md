@@ -34,7 +34,8 @@ The ISO ends up at `dist/x86_64/kernel.iso`.
 | Area           | Status                                                                           |
 | -------------- | -------------------------------------------------------------------------------- |
 | Boot           | GRUB (Multiboot2) -> 32-bit stub -> long mode -> `kernel_main`                   |
-| Display        | Framebuffer console (BIOS and UEFI) or VGA text, boot screen, status bar, 8 themes, scrollback; output mirrored to COM1 |
+| Display        | Framebuffer console (BIOS and UEFI) or VGA text, boot screen, status bar, 8 themes, scrollback; output mirrored to COM1; `resolution`/`font`, follows the VirtualBox window |
+| Mouse          | PS/2 mouse with wheel (and VirtualBox mouse integration): pointer, wheel scrolls the output, drag to select and copy, right/middle click pastes; programs read it with `getmouse` (try `paint`) |
 | Exceptions     | Handlers for CPU vectors 0-31, panic screen with register dump, stack guard page  |
 | Input          | PS/2 keyboard, command history, arrow keys                                       |
 | Memory         | Paging, heap sized from the bootloader memory map (`kmalloc`/`kfree`)            |

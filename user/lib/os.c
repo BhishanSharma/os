@@ -38,6 +38,7 @@ int getcwd(char *buf, size_t size)              { return (int)os_syscall(SYS_GET
 int kcommand(const char *line)                  { return (int)os_syscall(SYS_KCOMMAND, (long)line, 0, 0); }
 int ctrlc(int mode)                             { return (int)os_syscall(SYS_CTRLC, mode, 0, 0); }
 int uname(struct os_uname *u)                   { return (int)os_syscall(SYS_UNAME, (long)u, 0, 0); }
+int getmouse(struct os_mouse *m)                { return (int)os_syscall(SYS_MOUSE, (long)m, 0, 0); }
 
 const char *os_strerror(int err) {
     switch (err) {

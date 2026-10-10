@@ -17,6 +17,8 @@
 #define KEY_CTRL_D  4
 #define KEY_CTRL_E  5
 #define KEY_CTRL_C  3
+#define KEY_SCROLL_UP    1001   /* Shift+Up: show older output */
+#define KEY_SCROLL_DOWN  1002   /* Shift+Down */
 
 void keyboard_handler(void);
 void init_keyboard(void);
@@ -35,6 +37,9 @@ void keyboard_idle(void);
 
 /* Throw away the keys typed but not read yet. */
 void keyboard_flush(void);
+
+/* Queue a key as if it had been typed (mouse paste). 0 if the buffer is full. */
+int keyboard_inject(int key);
 
 /* Set by the keyboard interrupt on Ctrl+C (also queued as KEY_CTRL_C). */
 extern volatile int keyboard_ctrl_c;

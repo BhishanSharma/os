@@ -158,6 +158,56 @@ irq_nic_stub:
 
     iretq
 
+extern mouse_irq
+
+; IRQ 12: the PS/2 mouse (slave PIC).
+global irq_mouse_stub
+irq_mouse_stub:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rsp
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    sub rsp, 8          ; keep rsp 16-byte aligned for the C ABI
+    call mouse_irq
+    add rsp, 8
+
+    ; IRQ 12 is on the slave PIC: EOI both.
+    mov al, 0x20
+    out 0xA0, al
+    out 0x20, al
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rsp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+
+    iretq
+
 ; Spurious interrupts from the 8259 PICs. When a device drops its interrupt
 ; line between the PIC raising it and the CPU acknowledging it (the e1000
 ; does when the timer poll clears its interrupt cause first), the PIC

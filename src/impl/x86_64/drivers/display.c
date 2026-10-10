@@ -8,6 +8,7 @@
 #include "sys/sysinfo.h"
 #include "../lib/ports.h"
 #include "lib/serial.h"
+#include "drivers/vmmdev.h"
 
 /* ---- Bochs VBE ("DISPI") registers ---------------------------------------- */
 
@@ -162,32 +163,10 @@ int display_set_font_scale(uint32_t scale) {
     return relayout();
 }
 
-/* ---- VirtualBox guest device (VMMDev, PCI 80ee:cafe) ------------------------
- * Requests are structures in memory; writing one's physical address to the
- * device's I/O port makes VirtualBox process it and fill in the answer. */
+/* ---- Following the VirtualBox window (drivers/vmmdev.h) ------------------- */
 
-#define VMMDEV_REQUEST_VERSION        0x10001
-#define VMMDEV_INTERFACE_VERSION      0x00010004
-#define REQ_REPORT_GUEST_INFO         50
-#define REQ_GET_DISPLAY_CHANGE2       54
-#define REQ_SET_GUEST_CAPABILITIES    56
-#define REQ_REPORT_GUEST_STATUS       59
-#define FACILITY_GUEST_DRIVER         20       /* makes the "additions run level" System */
-#define FACILITY_GRAPHICS             1100
-#define FACILITY_ACTIVE               50
 #define GUEST_SUPPORTS_GRAPHICS       (1u << 2)
 #define EVENT_DISPLAY_CHANGE_REQUEST  (1u << 2)
-
-typedef struct {
-    uint32_t size, version, type;
-    int32_t rc;
-    uint32_t reserved1, requestor;
-} __attribute__((packed)) vmmdev_header_t;
-
-typedef struct {
-    vmmdev_header_t header;
-    uint32_t interface_version, os_type;
-} __attribute__((packed)) req_guest_info_t;
 
 typedef struct {
     vmmdev_header_t header;
@@ -199,63 +178,21 @@ typedef struct {
     uint32_t xres, yres, bpp, event_ack, display;
 } __attribute__((packed)) req_display_change_t;
 
-typedef struct {
-    vmmdev_header_t header;
-    uint32_t facility, status, flags;
-} __attribute__((packed)) req_guest_status_t;
-
-static uint16_t vmmdev_port;
 static int follows_window;
 static uint32_t last_poll, last_w, last_h;
-
-/* Below 4 GiB (the kernel image is at 1-2 MiB), as the device needs. */
-static union {
-    req_guest_info_t info;
-    req_caps_t caps;
-    req_display_change_t display;
-    req_guest_status_t status;
-} request __attribute__((aligned(16)));
-
-static int vmmdev_call(uint32_t type, uint32_t size) {
-    request.info.header = (vmmdev_header_t){ size, VMMDEV_REQUEST_VERSION, type, -1, 0, 0 };
-    outl(vmmdev_port, (uint32_t)(uintptr_t)&request);
-    return request.info.header.rc;
-}
+static req_display_change_t change;                    /* static: below 4 GiB */
 
 void display_init(void) {
-    uint8_t bus, slot, func;
-    if (pci_find_device(0x80EE, 0xCAFE, &bus, &slot, &func) != 0) return;
-    uint32_t bar0 = pci_config_read_dword(bus, slot, func, 0x10);
-    if (!(bar0 & 1)) return;
-    uint32_t cmd = pci_config_read_dword(bus, slot, func, 0x04);
-    pci_config_write_dword(bus, slot, func, 0x04, cmd | 0x1);
-    vmmdev_port = (uint16_t)(bar0 & ~3u);
-
-    memset(&request, 0, sizeof(request));
-    request.info.interface_version = VMMDEV_INTERFACE_VERSION;
-    request.info.os_type = 0;                          // "other"
-    int rc_info = vmmdev_call(REQ_REPORT_GUEST_INFO, sizeof(req_guest_info_t));
-
-    memset(&request, 0, sizeof(request));
-    request.caps.or_mask = GUEST_SUPPORTS_GRAPHICS;   // "resize me to the window"
-    request.caps.not_mask = 0;
-    int rc_caps = vmmdev_call(REQ_SET_GUEST_CAPABILITIES, sizeof(req_caps_t));
-
+    if (!vmmdev_present() || !has_dispi) return;
+    static req_caps_t caps;
+    memset(&caps, 0, sizeof(caps));
+    caps.or_mask = GUEST_SUPPORTS_GRAPHICS;            // "resize me to the window"
+    int rc_caps = vmmdev_request(&caps, VMMDEV_SET_GUEST_CAPABILITIES, sizeof(caps));
     // The VirtualBox window only sends its size ("Auto-resize Guest Display")
-    // once the guest's additions are running and its graphics facility is active.
-    static const uint32_t facilities[] = { FACILITY_GUEST_DRIVER, FACILITY_GRAPHICS };
-    int rc_status = 0;
-    for (unsigned i = 0; i < sizeof(facilities) / sizeof(facilities[0]); i++) {
-        memset(&request, 0, sizeof(request));
-        request.status.facility = facilities[i];
-        request.status.status = FACILITY_ACTIVE;
-        int rc = vmmdev_call(REQ_REPORT_GUEST_STATUS, sizeof(req_guest_status_t));
-        if (rc < 0) rc_status = rc;
-    }
-
-    follows_window = rc_info >= 0 && rc_caps >= 0 && has_dispi;
-    kprintf("VirtualBox guest device at port 0x%x: guest info rc=%d, capabilities rc=%d, status rc=%d\n",
-            vmmdev_port, rc_info, rc_caps, rc_status);
+    // once the guest's additions run and their graphics facility is active.
+    int rc_status = vmmdev_report_facility(VMMDEV_FACILITY_GRAPHICS);
+    follows_window = rc_caps >= 0;
+    kprintf("VirtualBox display: capabilities rc=%d, graphics status rc=%d\n", rc_caps, rc_status);
 }
 
 int display_follows_window(void) { return follows_window; }
@@ -266,11 +203,11 @@ void display_poll(void) {
     if ((uint32_t)(now - last_poll) < 25) return;      // 4 times a second
     last_poll = now;
 
-    memset(&request, 0, sizeof(request));
-    request.display.event_ack = EVENT_DISPLAY_CHANGE_REQUEST;
-    if (vmmdev_call(REQ_GET_DISPLAY_CHANGE2, sizeof(req_display_change_t)) < 0) return;
-    uint32_t w = request.display.xres, h = request.display.yres;
-    if (request.display.display != 0 || w == 0 || h == 0) return;   // no wish, or another monitor
+    memset(&change, 0, sizeof(change));
+    change.event_ack = EVENT_DISPLAY_CHANGE_REQUEST;
+    if (vmmdev_request(&change, VMMDEV_GET_DISPLAY_CHANGE2, sizeof(change)) < 0) return;
+    uint32_t w = change.xres, h = change.yres;
+    if (change.display != 0 || w == 0 || h == 0) return;   // no wish, or another monitor
     if (w == last_w && h == last_h) return;            // already handled
     last_w = w;
     last_h = h;

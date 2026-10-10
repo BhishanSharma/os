@@ -130,6 +130,22 @@ keeps its scrollback). Under VirtualBox the screen follows the VM window by itse
 > Filenames are FAT32 short names (8.3). The disk stores them upper-case, so
 > `test.txt` is listed as `TEST.TXT`.
 
+## Mouse
+
+A PS/2 mouse (QEMU, VirtualBox, most PCs with a legacy mouse or touchpad) moves a
+pointer, shown as an inverted cell, over the console:
+
+| Action                     | What happens                                             |
+| -------------------------- | -------------------------------------------------------- |
+| Wheel                      | Scrolls through earlier output (like Shift+Up/Down); typing or new output jumps back |
+| Drag with the left button  | Selects text, highlighted; releasing copies it            |
+| Right or middle click      | Pastes the copied text as if it were typed               |
+
+A program that reads the mouse (`getmouse`, e.g. `paint`) takes it over while it is
+in the foreground. Under VirtualBox the pointer follows the host's pointer directly
+(mouse integration), so the VM does not capture the mouse. The pointer needs the
+framebuffer console; in VGA text mode only the wheel and paste work.
+
 ## Editor
 
 `edit <file>` opens a line-based editor (up to 8000 lines; the view scrolls with the cursor and

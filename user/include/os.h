@@ -46,6 +46,7 @@ int getcwd(char *buf, size_t size);
 int kcommand(const char *line);              /* a command built into the kernel: 1 ran, 0 unknown */
 int ctrlc(int mode);                         /* CTRLC_END (default) or CTRLC_KEY */
 int uname(struct os_uname *u);
+int getmouse(struct os_mouse *m);            /* 1 if there is a mouse; takes it from the console */
 const char *os_strerror(int err);            /* text for a negative SYSERR_* result */
 
 /* Console */

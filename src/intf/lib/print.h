@@ -55,6 +55,14 @@ void print_flush(void);
 /* The screen mode changed: `cols` x `total_rows` cells, status bar included
  * (framebuffer console only). Keeps the scrollback and the current line. */
 void print_resize(size_t cols, size_t total_rows);
+
+/* Mouse support (framebuffer console only): the pointer cell and a selection,
+ * both drawn inverted, in whole-grid coordinates (row 0 = status bar). */
+int print_pointer_supported(void);
+size_t print_grid_rows(void);                   /* rows including the status bar */
+void print_set_pointer(int col, int row);       /* -1: hide */
+void print_set_selection(int c0, int r0, int c1, int r1);   /* c0 < 0: clear */
+size_t print_selection_text(char *out, size_t size);
 void print_hide_cursor(void);   /* framebuffer console: stop drawing the cursor (panic screen) */
 /* Group many screen updates (e.g. a full-screen redraw) into one framebuffer
  * redraw at print_batch_end(). Calls nest. */

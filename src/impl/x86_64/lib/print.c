@@ -111,15 +111,28 @@ volatile uint16_t* print_text_cells(void) {
     return (volatile uint16_t*)buffer;
 }
 
+/* Mouse pointer and selection (whole-grid cell indexes, status row included):
+ * drawn with foreground and background swapped. */
+static int pointer_cell = -1;
+static int select_from = -1, select_to = -1;
+
+static uint8_t shown_color(int i) {
+    uint8_t c = shadow[i].color;
+    int selected = select_from >= 0 && i >= select_from && i <= select_to;
+    if (selected != (i == pointer_cell)) c = (uint8_t)((c >> 4) | (c << 4));
+    return c;
+}
+
 void print_flush(void) {
     if (screen != shadow || !fbcon_active()) return;
     int cursor = (!cursor_hidden && col < NUM_COLS) ? (int)((row + status_rows) * NUM_COLS + col) : -1;
     for (int i = 0; i < (VISIBLE_ROWS + status_rows) * VISIBLE_COLS; i++) {
+        uint8_t c = shown_color(i);
         int changed = !drawn_valid || shadow[i].character != drawn[i].character ||
-                      shadow[i].color != drawn[i].color || i == cursor || i == drawn_cursor;
+                      c != drawn[i].color || i == cursor || i == drawn_cursor;
         if (!changed) continue;
-        fbcon_draw_cell(i % VISIBLE_COLS, i / VISIBLE_COLS, shadow[i].character, shadow[i].color, i == cursor);
-        drawn[i] = shadow[i];
+        fbcon_draw_cell(i % VISIBLE_COLS, i / VISIBLE_COLS, shadow[i].character, c, i == cursor);
+        drawn[i] = (struct Char){ shadow[i].character, c };
     }
     drawn_valid = 1;
     drawn_cursor = cursor;
@@ -272,6 +285,8 @@ void print_char(char character) {
     serial_putc(character);   // mirror everything to COM1 (survives crashes)
     if (bootlog_on && bootlog_len < BOOTLOG_SIZE) bootlog[bootlog_len++] = character;
     if (console_muted) return;
+    if (scrollback_view_offset) scroll_to_bottom();   // new output: back to the live screen
+    select_from = select_to = -1;                      // the selection would point at old text
 
     if (character == '\n') {
         print_newLine();
@@ -723,11 +738,27 @@ void print_box_themed(const char* title, const char* content) {
     color = old_color;
 }
 
+/* While the scrollback is shown, the live screen waits here (with the line
+ * being typed, which is not in the scrollback yet) and comes back unchanged. */
+static struct Char live_screen[MAX_ROWS * MAX_COLS];
+
+static void save_live_screen(void) {
+    if (scrollback_view_offset == 0)
+        memcpy(live_screen, buffer, (size_t)VISIBLE_ROWS * VISIBLE_COLS * sizeof(struct Char));
+}
+
+static void restore_live_screen(void) {
+    memcpy(buffer, live_screen, (size_t)VISIBLE_ROWS * VISIBLE_COLS * sizeof(struct Char));
+    move_cursor();
+}
+
 // Scroll up in history (Shift+Up or Mouse Wheel Up)
 void scroll_up_lines(int lines) {
     int max_scroll = scrollback_total_lines - VISIBLE_ROWS;
     if (max_scroll < 0) max_scroll = 0;
-    
+    if (max_scroll == 0) return;
+
+    save_live_screen();
     scrollback_view_offset += lines;
     if (scrollback_view_offset > max_scroll) {
         scrollback_view_offset = max_scroll;
@@ -738,11 +769,13 @@ void scroll_up_lines(int lines) {
 
 // Scroll down in history (Shift+Down or Mouse Wheel Down)
 void scroll_down_lines(int lines) {
+    if (scrollback_view_offset == 0) return;
     scrollback_view_offset -= lines;
-    if (scrollback_view_offset < 0) {
+    if (scrollback_view_offset <= 0) {
         scrollback_view_offset = 0;
+        restore_live_screen();
+        return;
     }
-    
     refresh_display();
 }
 
@@ -753,14 +786,17 @@ int is_at_bottom(void) {
 
 // Jump to bottom (end of scrollback)
 void scroll_to_bottom(void) {
+    if (scrollback_view_offset == 0) return;
     scrollback_view_offset = 0;
-    refresh_display();
+    restore_live_screen();
 }
 
 // Jump to top of scrollback
 void scroll_to_top(void) {
     int max_scroll = scrollback_total_lines - VISIBLE_ROWS;
     if (max_scroll < 0) max_scroll = 0;
+    if (max_scroll == 0) return;
+    save_live_screen();
     scrollback_view_offset = max_scroll;
     refresh_display();
 }
@@ -943,4 +979,62 @@ void print_resize(size_t cols, size_t total_rows) {
     drawn_valid = 0;
     drawn_cursor = -1;
     move_cursor();
+}
+
+/* ---- Mouse: pointer, selection, screen text ------------------------------ */
+
+int print_pointer_supported(void) {
+    return screen == shadow && fbcon_active();
+}
+
+size_t print_grid_rows(void) {
+    return num_rows + status_rows;
+}
+
+void print_set_pointer(int c, int r) {
+    int cell = (c >= 0 && r >= 0 && (size_t)c < num_cols && (size_t)r < num_rows + status_rows)
+             ? r * (int)num_cols + c : -1;
+    if (cell == pointer_cell) return;
+    pointer_cell = cell;
+    if (!flush_deferred) print_flush();
+}
+
+/* Cells from (c0, r0) to (c1, r1) in reading order, either way round; a
+ * negative c0 clears it. */
+void print_set_selection(int c0, int r0, int c1, int r1) {
+    if (c0 < 0) {
+        select_from = select_to = -1;
+    } else {
+        int a = r0 * (int)num_cols + c0, b = r1 * (int)num_cols + c1;
+        select_from = a < b ? a : b;
+        select_to = a < b ? b : a;
+    }
+    if (!flush_deferred) print_flush();
+}
+
+/* The text of the selection: one line per screen row, trailing spaces
+ * dropped. Returns its length. */
+size_t print_selection_text(char *out, size_t size) {
+    size_t n = 0;
+    if (select_from < 0 || size == 0) {
+        if (size) out[0] = 0;
+        return 0;
+    }
+    int total = (int)((num_rows + status_rows) * num_cols);
+    int line_start = select_from;
+    while (line_start <= select_to && line_start < total) {
+        int r = line_start / (int)num_cols;
+        int line_end = (r + 1) * (int)num_cols - 1;
+        if (line_end > select_to) line_end = select_to;
+        int last = line_end;
+        while (last >= line_start && shadow[last].character == ' ') last--;
+        for (int i = line_start; i <= last && n + 1 < size; i++) {
+            uint8_t ch = shadow[i].character;
+            out[n++] = (ch >= 32 && ch < 127) ? (char)ch : '?';
+        }
+        if (line_end < select_to && n + 1 < size) out[n++] = '\n';
+        line_start = line_end + 1;
+    }
+    out[n] = 0;
+    return n;
 }

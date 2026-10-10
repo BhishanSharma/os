@@ -88,6 +88,7 @@ which has the same commands.
 | `ticker [s] [every]`  | Prints the time every second; run it with `&`                  |
 | `spin [s]`            | Keeps the CPU busy; the timer still shares it with everyone    |
 | `shell`               | The command line itself: `spawn`, `wait`, `kcommand`, line editing |
+| `paint`               | Draw with the mouse (`getmouse`): left paints, right erases, wheel picks the colour |
 
 ## Writing your own
 
@@ -116,7 +117,7 @@ The C library (`user/include`, `user/lib`) has:
 * `os.h`: who is running it (`getuser`), files (`open`, `read`, `write`, `close`, `unlink`, `readdir`), time (`sleep_ms`,
   `uptime_ms`, `gettime`), keys (`getkey`, which does not wait, and `waitkey`), the screen
   (`clear_screen`, `gotoxy`, `set_color`, `set_theme_color`, `reset_color`, `console_size`,
-  `cursor_column`, `show_cursor`), and programs: `spawn(path, argv, as_user)`,
+  `cursor_column`, `show_cursor`), the mouse (`getmouse`: pointer cell, buttons, wheel), and programs: `spawn(path, argv, as_user)`,
   `wait(pid, &status, flags)` (`WAIT_NOHANG`, `WAIT_FOREGROUND`; pid -1 = any child),
   `kill`, `taskinfo`, `chdir`, `getcwd`, `kcommand`, `ctrlc`, `uname`, `os_strerror`
 

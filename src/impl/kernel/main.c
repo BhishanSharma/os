@@ -24,12 +24,15 @@
 #include "sys/task.h"
 #include "drivers/wifi.h"
 #include "drivers/display.h"
+#include "drivers/mouse.h"
+#include "drivers/vmmdev.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
 
 extern void irq_nic_stub();
 extern void irq_spurious_master();
+extern void irq_mouse_stub();
 extern void irq_spurious_slave();
 extern void syscall_stub();
 
@@ -86,6 +89,7 @@ static void report_clock(void) {
 
 static void statusbar_idle(void) {
     display_poll();          // VirtualBox window resized?
+    mouse_poll();            // pointer, wheel, selection
     statusbar_update(0);
 }
 
@@ -152,11 +156,13 @@ void kernel_main() {
     idt_set_entry(0x20, irq0_stub, 0x8E);
     idt_set_entry(0x27, irq_spurious_master, 0x8E);   // spurious PIC interrupts
     idt_set_entry(0x2F, irq_spurious_slave, 0x8E);
+    idt_set_entry(0x2C, irq_mouse_stub, 0x8E);        // IRQ 12: PS/2 mouse
     idt_set_entry(0x80, syscall_stub, 0xEE);   // system calls: DPL 3, so ring 3 may `int 0x80`
 
     // Initialize keyboard and enable interrupts
     init_keyboard();
     timer_init();
+    int have_mouse = mouse_init() == 0;      // interrupts are still off: answers are read directly
 
     paging_init((uint64_t)kernel_start, (uint64_t)kernel_end, heap_start, heap_size);
     heap_init(heap_start, heap_size);
@@ -185,9 +191,16 @@ void kernel_main() {
     }
 
     expand_scrollback();
-    if (have_fb) display_init();
+    if (vmmdev_init() == 0) {              // VirtualBox guest device: window size, mouse position
+        if (have_fb) display_init();
+        mouse_init_vbox();
+    }
     print_boot_status(BOOT_OK, "Interrupts", "IDT, 8259 PIC, PIT timer at 100 Hz");
     print_boot_status(BOOT_OK, "Keyboard", "PS/2, US layout");
+    if (have_mouse)
+        print_boot_status(BOOT_OK, "Mouse", "%s", mouse_description());
+    else
+        print_boot_status(BOOT_WARN, "Mouse", "no PS/2 mouse (USB-only mice need a USB driver)");
 
     if (nic_probe_init() == 0) {
         if (nic_get_irq() != NIC_IRQ_NONE)

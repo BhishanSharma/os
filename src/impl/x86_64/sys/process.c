@@ -18,6 +18,7 @@
 #include "drivers/heap.h"
 #include "drivers/fat32.h"
 #include "drivers/disk.h"
+#include "drivers/mouse.h"
 #include "drivers/keyboard.h"
 #include "drivers/timer.h"
 #include "drivers/rtc.h"
@@ -250,6 +251,7 @@ static void __attribute__((noreturn)) process_exit(int code) {
     t->root = paging_kernel_root();
     paging_switch(t->root);
     paging_free_address_space(root);
+    if (mouse_owner() == t->pid) mouse_set_owner(0);  // the console gets the mouse back
     // Its programs live on; pid 1 (login) collects them when they end.
     for (int i = 0; i < MAX_TASKS; i++) {
         task_t *c = task_at(i);
@@ -312,14 +314,22 @@ static void wait_for_foreground(void) {
     }
 }
 
+/* Shift+Up/Down scroll the console for every program; they never see them. */
+static int scroll_key(int c) {
+    if (c == KEY_SCROLL_UP) scroll_up_lines(1);
+    else if (c == KEY_SCROLL_DOWN) scroll_down_lines(1);
+    else return 0;
+    return 1;
+}
+
 static void read_keyboard_line(process_t *p) {
     p->line_len = p->line_pos = 0;
     while (1) {
         wait_for_foreground();
         check_killed();
         int c = get_char();
-        if (!c) {
-            task_sleep(10);
+        if (!c || scroll_key(c)) {
+            if (!c) task_sleep(10);
             continue;
         }
         if (c == KEY_CTRL_C) {
@@ -436,6 +446,7 @@ static int64_t sys_getkey(uint64_t wait) {
         if (wait) wait_for_foreground();
         else if (foreground_pid != task_current()->pid) return 0;
         c = get_char();
+        if (scroll_key(c)) continue;
         if (c || !wait) break;
         check_killed();
         task_sleep(10);
@@ -520,6 +531,7 @@ static int64_t sys_chdir(uint64_t path_ptr);
 static int64_t sys_getcwd(uint64_t buf, uint64_t size);
 static int64_t sys_kcommand(uint64_t line_ptr);
 static int64_t sys_uname(uint64_t ptr);
+static int64_t sys_mouse(uint64_t ptr);
 
 /* int 0x80 (usermode.asm). Runs with interrupts on, so a blocking call
  * (keyboard, sleep) still gets timer and keyboard interrupts. */
@@ -553,6 +565,7 @@ void syscall_dispatch(struct exc_frame *f) {
         case SYS_KCOMMAND: r = sys_kcommand(f->rdi); break;
         case SYS_CTRLC:   r = f->rdi <= CTRLC_KEY ? (P()->ctrlc_mode = (int)f->rdi, 0) : SYSERR_BADCALL; break;
         case SYS_UNAME:   r = sys_uname(f->rdi); break;
+        case SYS_MOUSE:   r = sys_mouse(f->rdi); break;
         default:          r = SYSERR_BADCALL; break;
     }
     f->rax = (uint64_t)r;
@@ -960,4 +973,18 @@ static int64_t sys_uname(uint64_t ptr) {
     k_snprintf(u->release, sizeof(u->release), "%s", OS_VERSION);
     k_snprintf(u->hostname, sizeof(u->hostname), "%s", OS_HOSTNAME);
     return 0;
+}
+
+/* getmouse(): the pointer for this program, which takes the mouse from the
+ * console (selection, paste, wheel scrolling) while it is in the foreground. */
+static int64_t sys_mouse(uint64_t ptr) {
+    if (!user_range_ok(ptr, sizeof(struct os_mouse), 1)) return SYSERR_FAULT;
+    struct os_mouse *m = (struct os_mouse *)ptr;
+    if (!mouse_present()) {
+        memset(m, 0, sizeof(*m));
+        return 0;
+    }
+    mouse_set_owner(task_current()->pid);
+    mouse_read(&m->col, &m->row, &m->buttons, &m->wheel);
+    return 1;
 }

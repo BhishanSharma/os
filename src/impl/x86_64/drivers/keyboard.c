@@ -4,13 +4,14 @@
 #include "lib/string.h"
 #include "drivers/pic.h"
 #include "sys/task.h"
+#include "drivers/mouse.h"
 
 #define KEYBOARD_DATA_PORT 0x60
 #define HISTORY_SIZE 20
 #define MAX_CMD_LEN 256
 
-#define SHIFT_UP_COMBO   1001
-#define SHIFT_DOWN_COMBO 1002
+#define SHIFT_UP_COMBO   KEY_SCROLL_UP
+#define SHIFT_DOWN_COMBO KEY_SCROLL_DOWN
 
 static int ctrl_pressed = 0;
 static int shift_pressed = 0;
@@ -44,6 +45,11 @@ unsigned char kbdus_shift[128] = {
 };
 
 void keyboard_handler() {
+    // The controller also carries the mouse: a byte from it is not a key.
+    if (inb(0x64) & 0x20) {
+        mouse_handle_byte(inb(KEYBOARD_DATA_PORT));
+        return;
+    }
     uint8_t scancode = inb(KEYBOARD_DATA_PORT);
 
     // Check for extended scancode prefix (0xE0)
@@ -171,6 +177,15 @@ void keyboard_flush(void) {
     buffer_index = 0;
     keyboard_ctrl_c = 0;
     if (flags & 0x200) __asm__ volatile("sti");
+}
+
+int keyboard_inject(int key) {
+    uint64_t flags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+    int ok = buffer_index < (int)(sizeof(key_buffer) / sizeof(key_buffer[0])) - 2;
+    if (ok) key_buffer[buffer_index++] = key;
+    if (flags & 0x200) __asm__ volatile("sti");
+    return ok;
 }
 
 int get_char() {
