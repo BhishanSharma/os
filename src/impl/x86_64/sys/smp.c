@@ -215,7 +215,7 @@ void smp_print(void) {
                 pid = t->pid;
             }
         }
-        kprintf("  core %d  APIC ID %-3u  %s", c, cpu_apic[c], c == 0 ? "boot core (devices)  " : "                     ");
+        kprintf("  core %-2d  APIC ID %-3u  %s", c, cpu_apic[c], c == 0 ? "boot core (devices)  " : "                     ");
         if (pid) kprintf("running %s (pid %d)\n", what, pid);
         else kprintf("%s\n", what);
     }
