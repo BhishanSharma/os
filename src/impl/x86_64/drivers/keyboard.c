@@ -50,8 +50,12 @@ void keyboard_handler() {
         mouse_handle_byte(inb(KEYBOARD_DATA_PORT));
         return;
     }
-    uint8_t scancode = inb(KEYBOARD_DATA_PORT);
+    keyboard_scancode(inb(KEYBOARD_DATA_PORT));
+}
 
+/* One byte of PS/2 scan code set 1, from the keyboard port or translated
+ * from a USB keyboard. */
+void keyboard_scancode(uint8_t scancode) {
     // Check for extended scancode prefix (0xE0)
     if (scancode == 0xE0) {
         extended_scancode = 1;

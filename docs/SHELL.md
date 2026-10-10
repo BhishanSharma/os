@@ -87,6 +87,9 @@ disk the accounts last until reboot.
 | `sysinfo` / `neofetch`     | OS, boot mode (UEFI/BIOS), CPU model, memory, display, network, disk, theme, time |
 | `dmesg`                    | The full boot log, including the driver messages hidden at boot |
 | `lspci`                    | Every device on the PCI bus: address, IDs, kind, maker, and the driver of this OS that runs it |
+| `lsusb`                    | The USB controller and what is plugged into each port (keyboards and mice are used; plug-in and removal are noticed) |
+| `touchpad`                 | Find the laptop's I2C touchpad: controllers, addresses that answer, its report layout, then 8 seconds of raw reports |
+| `clock [local\|utc]`       | Whether the hardware clock holds local time (Windows) or UTC (Linux, VMs); real PCs default to local |
 | `clear`                    | Clear the screen                                         |
 | `echo <text>`              | Print text                                               |
 | `uptime`                   | Seconds since boot                                       |

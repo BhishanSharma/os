@@ -37,7 +37,8 @@ The ISO ends up at `dist/x86_64/kernel.iso`.
 | Display        | Framebuffer console (BIOS and UEFI) or VGA text, boot screen, status bar, 8 themes, scrollback; output mirrored to COM1; `resolution`/`font`, follows the VirtualBox window |
 | Mouse          | PS/2 mouse with wheel (and VirtualBox mouse integration): pointer, wheel scrolls the output, drag to select and copy, right/middle click pastes; programs read it with `getmouse` (try `paint`) |
 | Exceptions     | Handlers for CPU vectors 0-31, panic screen with register dump, stack guard page  |
-| Input          | PS/2 keyboard, command history, arrow keys                                       |
+| Input          | PS/2 keyboard and mouse; USB keyboards and mice (xHCI driver); I2C laptop touchpads (HID over I2C, Precision Touchpad gestures: tap, two-finger scroll and right click); command history, arrow keys |
+| Real hardware  | Boots from a USB stick on UEFI laptops: falls back to the local APIC timer when the PIT gives no interrupts, reads the hardware clock as local time (as Windows keeps it), assigns PCI addresses the firmware left out, reads ACPI tables |
 | Memory         | Paging, heap sized from the bootloader memory map (`kmalloc`/`kfree`)            |
 | User space     | Programs run in ring 3, each with its own address space; preemptive multitasking with background jobs (`&`, `jobs`, `ps`, `fg`, `kill`); system calls (`int 0x80`) including `spawn`/`wait`, a small C library; the shell itself is a user program started at login; faults, Ctrl+C and `kill` end only the program. See [docs/USERSPACE.md](docs/USERSPACE.md) |
 | Storage        | ATA PIO disk or a RAM disk loaded by GRUB; FAT32 read/write, directories, 8.3 names |

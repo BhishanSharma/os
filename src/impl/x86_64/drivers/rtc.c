@@ -71,6 +71,26 @@ void rtc_add_minutes(rtc_time_t *t, int minutes) {
     }
 }
 
+/* What the hardware clock holds. Linux and VMs keep it in UTC; Windows keeps
+ * it in local time. -1 = not decided yet: then real PCs are assumed to run
+ * Windows too, and VMs (CPUID "hypervisor" bit) to hold UTC. */
+static int clock_local = -1;
+
+static int running_in_vm(void) {
+    uint32_t a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+    return (c >> 31) & 1;
+}
+
+int rtc_is_local(void) {
+    if (clock_local < 0) clock_local = !running_in_vm();
+    return clock_local;
+}
+
+void rtc_set_local(int local) {
+    clock_local = local ? 1 : 0;
+}
+
 static uint8_t from_bcd(uint8_t v) {
     return (uint8_t)((v >> 4) * 10 + (v & 0x0F));
 }
@@ -112,5 +132,6 @@ int rtc_read(rtc_time_t *out) {
     if (out->month < 1 || out->month > 12 || out->day < 1 || out->day > 31 ||
         out->hour > 23 || out->minute > 59 || out->second > 59)
         return -1;
+    if (rtc_is_local()) rtc_add_minutes(out, -RTC_LOCAL_OFFSET_MIN);
     return 0;
 }

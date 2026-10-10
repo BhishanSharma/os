@@ -74,6 +74,14 @@ int mb2_get_module(const char *name, uint64_t *start, uint64_t *end) {
     return -1;
 }
 
+/* The firmware's ACPI root pointer: GRUB copies it into tag 15 (ACPI 2.0+,
+ * with the XSDT) or tag 14 (ACPI 1.0). */
+const void *mb2_get_rsdp(void) {
+    const uint8_t *tag = find_tag(15);
+    if (!tag) tag = find_tag(14);
+    return tag ? tag + 8 : 0;
+}
+
 /* GRUB passes the EFI system table (tag 11 for 32-bit, 12 for 64-bit EFI)
  * only when the firmware is UEFI. */
 int mb2_booted_from_uefi(void) {

@@ -22,6 +22,8 @@
 #include "sys/task.h"
 #include "drivers/pci.h"
 #include "drivers/wifi.h"
+#include "drivers/usb.h"
+#include "drivers/touchpad.h"
 #include "drivers/display.h"
 #include "lib/fbcon.h"
 
@@ -190,10 +192,13 @@ static void cmd_help(void)
     print_str("sysinfo            - this machine at a glance (also: neofetch)\n");
     print_str("dmesg              - full boot log, including driver messages\n");
     print_str("lspci              - every device on the PCI bus, and its driver\n");
+    print_str("lsusb              - the USB controller and what is plugged into it\n");
+    print_str("touchpad           - find the I2C touchpad and show what it sends\n");
     print_str("clear              - clear screen\n");
     print_str("echo <text>        - print text\n");
     print_str("uptime             - seconds since boot\n");
     print_str("date [-u]          - current date and time (IST, or UTC with -u)\n");
+    print_str("clock [local|utc]  - does the hardware clock hold local time (Windows) or UTC?\n");
     print_str("sleep <seconds>    - wait\n");
     print_str("status             - uptime and allocation count\n");
     print_str("reboot             - reboot system\n");
@@ -543,6 +548,20 @@ static int kernel_command(const char *line, int run_programs) {
                     t.hour < 10 ? "0" : "", t.hour, t.minute < 10 ? "0" : "", t.minute,
                     t.second < 10 ? "0" : "", t.second, utc ? "UTC" : RTC_LOCAL_TZ_NAME);
         }
+    }
+    else if (strcmp(line, "clock") == 0 || strncmp(line, "clock ", 6) == 0)
+    {
+        const char *arg = line[5] ? line + 6 : "";
+        if (strcmp(arg, "local") == 0 || strcmp(arg, "utc") == 0) {
+            if (!need_root("clock")) return 1;
+            rtc_set_local(arg[0] == 'l');
+        } else if (arg[0]) {
+            print_str("Usage: clock [local|utc]\n");
+            return 1;
+        }
+        kprintf("The hardware clock holds %s.\n", rtc_is_local()
+                ? "local time (" RTC_LOCAL_TZ_NAME "), as Windows keeps it. `clock utc` if the time is wrong"
+                : "UTC, as Linux and VMs keep it. `clock local` if the time is wrong");
     }
     else if (strcmp(line, "reboot") == 0)
     {
@@ -1131,6 +1150,14 @@ static int kernel_command(const char *line, int run_programs) {
     else if (strcmp(line, "lspci") == 0)
     {
         cmd_lspci();
+    }
+    else if (strcmp(line, "lsusb") == 0)
+    {
+        usb_print_devices();
+    }
+    else if (strcmp(line, "touchpad") == 0)
+    {
+        touchpad_diagnose();
     }
     else if (strcmp(line, "ifconfig") == 0)
     {

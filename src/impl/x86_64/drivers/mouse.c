@@ -3,6 +3,7 @@
 #include "drivers/keyboard.h"
 #include "drivers/pic.h"
 #include "drivers/vmmdev.h"
+#include "drivers/touchpad.h"
 #include "drivers/timer.h"
 #include "sys/process.h"
 #include "lib/print.h"
@@ -71,6 +72,7 @@ static packet_t queue[QUEUE_SIZE];
 static volatile uint32_t queue_head, queue_tail;
 
 static int present, packet_size = 3, has_wheel;
+static const char *other_source;      /* "USB", "I2C touchpad": a mouse that is not PS/2 */
 static uint8_t packet[4];
 static int packet_len;
 
@@ -102,6 +104,7 @@ int mouse_present(void) { return present; }
 
 const char *mouse_description(void) {
     if (!present) return "none";
+    if (other_source && !packet_size) return other_source;
     if (vbox_absolute) return has_wheel ? "PS/2, wheel, VirtualBox integration" : "PS/2, VirtualBox integration";
     return has_wheel ? "PS/2, wheel" : "PS/2";
 }
@@ -174,6 +177,23 @@ void mouse_handle_byte(uint8_t byte) {
     queue_head = next;
 }
 
+void mouse_report(const char *source, int buttons, int dx, int dy, int wheel) {
+    if (!present) {                                            // no PS/2 mouse: this one only
+        present = 1;
+        packet_size = 0;
+    }
+    other_source = source;
+    packet_t p;
+    p.buttons = (uint8_t)(buttons & 7);
+    p.dx = (int16_t)dx;
+    p.dy = (int16_t)-dy;                                       // queue holds PS/2 sense: up positive
+    p.wheel = (int8_t)-wheel;                                  // and PS/2 wheel: negative = up
+    uint32_t next = (queue_head + 1) % QUEUE_SIZE;
+    if (next == queue_tail) return;
+    queue[queue_head] = p;
+    queue_head = next;
+}
+
 void mouse_irq(void) {
     for (int i = 0; i < 16; i++) {
         uint8_t status = inb(PS2_STATUS);
@@ -225,6 +245,7 @@ static void button_changes(uint8_t old, uint8_t now) {
 }
 
 void mouse_poll(void) {
+    touchpad_poll();                                           // I2C touchpads are polled
     if (!present) return;
     int cols = grid_cols(), rows = grid_rows();
     int moved = 0;

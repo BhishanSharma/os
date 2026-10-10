@@ -21,6 +21,9 @@
 #define KEY_SCROLL_DOWN  1002   /* Shift+Down */
 
 void keyboard_handler(void);
+/* Feed one byte of PS/2 scan code set 1 (0xE0 prefix, 0x80 = release), as
+ * the USB keyboard driver does. Call with interrupts off. */
+void keyboard_scancode(uint8_t scancode);
 void init_keyboard(void);
 int get_char(void);
 void get_line(char* buffer, size_t max_len);

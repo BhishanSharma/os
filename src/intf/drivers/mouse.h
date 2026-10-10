@@ -22,6 +22,12 @@ int mouse_init(void);
  * position (no mouse capture needed in the VM window). */
 void mouse_init_vbox(void);
 
+/* A report from a USB mouse or I2C touchpad (`source` names it): buttons
+ * (MOUSE_*), movement (positive dy = down) and wheel steps (positive = away
+ * from the user). The first one turns the pointer on even without a PS/2
+ * mouse. */
+void mouse_report(const char *source, int buttons, int dx, int dy, int wheel);
+
 int mouse_present(void);
 const char *mouse_description(void);   /* "PS/2, wheel" */
 

@@ -4,6 +4,7 @@
 #include "../lib/ports.h"
 #include "core/idt.h"
 #include "drivers/pic.h"
+#include "drivers/apic.h"
 #include <stdint.h>
 
 
@@ -17,16 +18,27 @@ typedef struct registers {
 
 static uint32_t tick = 0;
 static void (*poll_hook)(void);
+static void (*more_hooks[4])(void);
 
 void timer_set_poll_hook(void (*hook)(void)) {
     poll_hook = hook;
 }
 
+void timer_add_poll_hook(void (*hook)(void)) {
+    for (int i = 0; i < 4; i++)
+        if (!more_hooks[i] || more_hooks[i] == hook) {
+            more_hooks[i] = hook;
+            return;
+        }
+}
+
 // Called on every timer interrupt (IRQ0)
 void isr_timer(registers_t regs) {
+    apic_timer_ack();
     tick++;
     task_tick();
     if (poll_hook) poll_hook();
+    for (int i = 0; i < 4 && more_hooks[i]; i++) more_hooks[i]();
 }
 
 // Initialize PIT (Programmable Interval Timer)

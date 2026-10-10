@@ -25,6 +25,10 @@
 #include "drivers/wifi.h"
 #include "drivers/display.h"
 #include "drivers/mouse.h"
+#include "drivers/apic.h"
+#include "drivers/usb.h"
+#include "drivers/touchpad.h"
+#include "drivers/acpi.h"
 #include "drivers/vmmdev.h"
 
 extern void irq0_stub();
@@ -83,12 +87,14 @@ static void report_clock(void) {
         return;
     }
     rtc_add_minutes(&t, RTC_LOCAL_OFFSET_MIN);
-    print_boot_status(BOOT_OK, "Clock", "%u-%02u-%02u %02u:%02u %s", t.year, t.month, t.day,
-                      t.hour, t.minute, RTC_LOCAL_TZ_NAME);
+    print_boot_status(BOOT_OK, "Clock", "%u-%02u-%02u %02u:%02u %s (hardware clock in %s: `clock` to change)",
+                      t.year, t.month, t.day, t.hour, t.minute, RTC_LOCAL_TZ_NAME,
+                      rtc_is_local() ? "local time, like Windows" : "UTC");
 }
 
 static void statusbar_idle(void) {
     display_poll();          // VirtualBox window resized?
+    usb_service();           // USB device plugged in or out?
     mouse_poll();            // pointer, wheel, selection
     statusbar_update(0);
 }
@@ -108,6 +114,7 @@ void kernel_main() {
         paging_add_identity_region(fb.addr, display_early_init(&fb));
     }
     boot_info.uefi = mb2_booted_from_uefi();
+    acpi_save_rsdp();   // the boot information is not mapped after paging_init
     // The memory map is in the multiboot info, which the heap may overwrite.
     int mem_regions = memory_init();
     uint64_t heap_start = HEAP_LOW, heap_size = HEAP_FALLBACK;
@@ -156,6 +163,7 @@ void kernel_main() {
     idt_set_entry(0x20, irq0_stub, 0x8E);
     idt_set_entry(0x27, irq_spurious_master, 0x8E);   // spurious PIC interrupts
     idt_set_entry(0x2F, irq_spurious_slave, 0x8E);
+    idt_set_entry(0xFF, irq_spurious_master, 0x8E);   // local APIC spurious interrupt (no EOI)
     idt_set_entry(0x2C, irq_mouse_stub, 0x8E);        // IRQ 12: PS/2 mouse
     idt_set_entry(0x80, syscall_stub, 0xEE);   // system calls: DPL 3, so ring 3 may `int 0x80`
 
@@ -200,7 +208,7 @@ void kernel_main() {
     if (have_mouse)
         print_boot_status(BOOT_OK, "Mouse", "%s", mouse_description());
     else
-        print_boot_status(BOOT_WARN, "Mouse", "no PS/2 mouse (USB-only mice need a USB driver)");
+        print_boot_status(BOOT_WARN, "Mouse", "no PS/2 mouse (a USB mouse works; a touchpad may need Basic mode in the firmware)");
 
     if (nic_probe_init() == 0) {
         if (nic_get_irq() != NIC_IRQ_NONE)
@@ -227,8 +235,25 @@ void kernel_main() {
 
     __asm__ volatile("sti");
 
+    // Real PCs do not always deliver the PIT's interrupt the way VMs do;
+    // everything that waits (DHCP, sleep, the scheduler) needs the ticks.
+    char timer_how[96];
+    int have_ticks = timer_check(timer_how, sizeof(timer_how)) == 0;
+    print_boot_status(have_ticks ? BOOT_OK : BOOT_FAIL, "Timer", "%s", timer_how);
+
+    // USB waits for the controller's answers, so it needs the ticks too.
+    if (have_ticks) {
+        int mice = usb_init();
+        print_boot_status(mice > 0 ? BOOT_OK : BOOT_WARN, "USB", "%s%s", usb_description(),
+                          mice == 0 ? " (plug a mouse in any time)" : "");
+        int tp = touchpad_init();
+        print_boot_status(tp == 0 ? BOOT_OK : BOOT_WARN, "Touchpad", "%s", touchpad_description());
+    }
+
     // DHCP needs the timer and NIC interrupts, so it runs after sti.
-    if (net_is_up()) {
+    if (net_is_up() && !have_ticks) {
+        print_boot_status(BOOT_WARN, "DHCP", "skipped: no timer to time it out");
+    } else if (net_is_up()) {
         char ip[16], gw[16];
         int ok = net_configure() == 0;
         net_fmt_ip(ip, net_get_config()->ip);
