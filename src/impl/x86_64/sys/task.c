@@ -11,7 +11,7 @@ extern void task_switch(uint64_t *save_rsp, uint64_t new_rsp);   // taskswitch.a
 extern void task_start_user(void);
 extern void task_start_kernel(void);
 
-#define KSTACK_SIZE (32 * 1024)
+#define KSTACK_SIZE (64 * 1024)   // kernel commands run on it too (kcommand: TLS, FAT32)
 
 static task_t tasks[MAX_TASKS];
 static task_t *current;
@@ -81,8 +81,9 @@ static void idle_loop(void) {
 }
 
 void task_init(void) {
-    // The code running now (kernel_main -> shell) becomes the shell task.
-    task_t *shell = alloc_task("shell");
+    // The code running now (kernel_main -> shell_run) becomes task 1: it logs
+    // users in and starts their shell.
+    task_t *shell = alloc_task("login");
     shell->pid = 1;
     shell->state = TASK_READY;
     current = shell;

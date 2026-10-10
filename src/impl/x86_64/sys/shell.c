@@ -42,41 +42,86 @@ static void cmd_kill(const char *arg);
 static void cmd_fg(const char *arg);
 static void cmd_programs(void);
 int shell_execute_command(const char* line);
+static int kernel_command(const char *line, int run_programs);
 
-void shell_run(void)
+/* The built-in kernel shell: used when the user-mode shell (SHELL.ELF) is
+ * missing or crashed. Returns at logout. */
+static void kernel_shell(void)
 {
     char line[128];
+    while (1)
+    {
+        char cwd[256], who[32];
+        reap_background();
+        cwd[0] = 0;
+        fat32_get_current_directory(cwd, sizeof(cwd));
+        if (print_get_col() != 0) print_str("\n");   // never start the prompt mid-line
+        statusbar_update(1);
+        k_snprintf(who, sizeof(who), "%s@%s", user_current()->name, OS_HOSTNAME);
+        print_shell_prompt(who, cwd[0] ? cwd : "/", user_is_root());
+        get_line(line, sizeof(line));
 
+        const char *cmd = line;
+        while (*cmd == ' ') cmd++;
+        if (strcmp(cmd, "logout") == 0 || strcmp(cmd, "exit") == 0)
+        {
+            if (users_logout())
+            {
+                kprintf("Back to %s.\n", user_current()->name);
+                continue;
+            }
+            return;
+        }
+        shell_execute_command(line);
+    }
+}
+
+/* Run the user-mode shell (SHELL.ELF from the root folder or the RAM disk) as
+ * the logged-in user, in their home folder, until it exits. Returns its exit
+ * code, or -1 if it could not be started. */
+static int user_shell(void)
+{
+    char home[256] = "/";
+    fat32_get_current_directory(home, sizeof(home));
+    fat32_change_directory("/");          // only root can put programs here
+    uint32_t size = 0;
+    uint8_t *image = process_find_program("shell", &size);
+    fat32_change_directory(home);
+    if (!image) return -1;
+
+    char name[] = "shell";
+    char *argv[] = { name, 0 };
+    int pid = process_spawn(image, size, 1, argv);
+    kfree(image);
+    if (pid < 0)
+    {
+        kprintf("Cannot start the shell: %s\n", process_error_text(pid));
+        return -1;
+    }
+    int code = process_wait(pid, 1);
+    process_end_all();                    // logout ends the session's programs
+    return code;
+}
+
+/* pid 1: log a user in, run their shell, repeat. */
+void shell_run(void)
+{
     users_init();
     while (1)
     {
         users_login();
-        while (1)
+        int code = user_shell();
+        if (code < 0 || code == EXIT_SEGFAULT || code == EXIT_ILLEGAL || code == EXIT_ARITHMETIC)
         {
-            char cwd[256], who[32];
-            reap_background();
-            cwd[0] = 0;
-            fat32_get_current_directory(cwd, sizeof(cwd));
-            if (print_get_col() != 0) print_str("\n");   // never start the prompt mid-line
-            statusbar_update(1);
-            k_snprintf(who, sizeof(who), "%s@%s", user_current()->name, OS_HOSTNAME);
-            print_shell_prompt(who, cwd[0] ? cwd : "/", user_is_root());
-            get_line(line, sizeof(line));
-
-            const char *cmd = line;
-            while (*cmd == ' ') cmd++;
-            if (strcmp(cmd, "logout") == 0 || strcmp(cmd, "exit") == 0)
-            {
-                if (users_logout())
-                {
-                    kprintf("Back to %s.\n", user_current()->name);
-                    continue;
-                }
-                print_clear();
-                break;   // back to the login prompt
-            }
-            shell_execute_command(line);
+            if (code >= 0)
+                print_warning("The shell program crashed; continuing with the kernel's built-in shell.");
+            else
+                print_warning("No shell program (SHELL.ELF); using the kernel's built-in shell.");
+            kernel_shell();
         }
+        users_logout();
+        reap_background();
+        print_clear();
     }
 }
 
@@ -411,11 +456,11 @@ static void cmd_crash(const char *what)
     }
 }
 
-int shell_execute_command(const char* line) {
+static int kernel_command(const char *line, int run_programs) {
     while (*line == ' ') line++;
     if (*line == '\0')
     {
-        return 0;   // empty line: just show a new prompt
+        return 1;   // empty line: just show a new prompt
     }
     else if (strcmp(line, "help") == 0)
     {
@@ -482,7 +527,7 @@ int shell_execute_command(const char* line) {
     }
     else if (strcmp(line, "reboot") == 0)
     {
-        if (!need_root("reboot")) return 0;
+        if (!need_root("reboot")) return 1;
         print_str("Rebooting...\n");
         reboot();
     }
@@ -692,7 +737,7 @@ int shell_execute_command(const char* line) {
     }
     else if (strcmp(line, "mount") == 0 || strncmp(line, "mount ", 6) == 0)
     {
-        if (line[5] && !need_root("mount")) return 0;
+        if (line[5] && !need_root("mount")) return 1;
         cmd_mount(line[5] ? line + 6 : "");
     }
     else if (strcmp(line, "diskinfo") == 0)
@@ -1057,7 +1102,7 @@ int shell_execute_command(const char* line) {
     }
     else if (strncmp(line, "crash ", 6) == 0)
     {
-        if (!need_root("crash")) return 0;
+        if (!need_root("crash")) return 1;
         cmd_crash(line + 6);
     }
     else if (strcmp(line, "ifconfig") == 0)
@@ -1066,7 +1111,7 @@ int shell_execute_command(const char* line) {
     }
     else if (strcmp(line, "dhcp") == 0)
     {
-        if (!need_root("dhcp")) return 0;
+        if (!need_root("dhcp")) return 1;
         net_configure();
     }
     else if (strcmp(line, "nettest") == 0)
@@ -1083,7 +1128,7 @@ int shell_execute_command(const char* line) {
     }
     else if (strncmp(line, "netdebug ", 9) == 0)
     {
-        if (!need_root("netdebug")) return 0;
+        if (!need_root("netdebug")) return 1;
         const char *arg = line + 9;
         if (strcmp(arg, "on") == 0)
         {
@@ -1100,6 +1145,10 @@ int shell_execute_command(const char* line) {
             print_str("Usage: netdebug <on|off>\n");
         }
     }
+    else if (!run_programs)
+    {
+        return 0;
+    }
     else if (strncmp(line, "run ", 4) == 0)
     {
         run_program(line + 4, 1);
@@ -1108,62 +1157,28 @@ int shell_execute_command(const char* line) {
     {
         kprintf("Unknown command: %s\n", line);
     }
+    return 1;
+}
+
+int shell_execute_command(const char *line)
+{
+    kernel_command(line, 1);
     return 0;
 }
 
-/* Read `name` or `name.elf` from the current directory into a kmalloc'd buffer. */
-static uint8_t *read_program_file(const char *name, uint32_t *size)
+/* For user programs (kcommand(), e.g. the user-mode shell): the commands
+ * built into the kernel, run as the calling program's user. Programs are left
+ * to the caller, and so are the commands that change the shell itself. */
+int shell_kernel_command(const char *line)
 {
-    char path[32];
-    k_snprintf(path, sizeof(path), "%s", name);
-    if (!fat32_file_exists(path))
+    while (*line == ' ') line++;
+    static const char *const not_here[] = { "su", "logout", "exit", "cd", "run", "fg" };
+    for (size_t i = 0; i < sizeof(not_here) / sizeof(not_here[0]); i++)
     {
-        k_snprintf(path, sizeof(path), "%s.elf", name);
-        if (!fat32_file_exists(path)) return 0;
+        size_t n = strlen(not_here[i]);
+        if (strncmp(line, not_here[i], n) == 0 && (line[n] == 0 || line[n] == ' ')) return 0;
     }
-    uint32_t n = fat32_get_file_size(path);
-    if (n == 0 || n == 0xFFFFFFFF) return 0;
-    uint8_t *data = kmalloc(n);
-    if (!data) return 0;
-    if (fat32_read_file(path, data, n) < 0)
-    {
-        kfree(data);
-        return 0;
-    }
-    *size = n;
-    return data;
-}
-
-/* Find a program: in the current directory first, then in the root of the RAM
- * disk, which works as the system's program directory even while the files
- * are on another disk. Returns the whole file (kfree it) or 0. */
-static uint8_t *find_program(const char *name, uint32_t *size)
-{
-    uint8_t *data = read_program_file(name, size);
-    if (data || !disk_ramdisk_size()) return data;
-
-    char cwd[256] = "/";
-    fat32_get_current_directory(cwd, sizeof(cwd));
-    disk_kind_t old = disk_selected();
-    if (old != DISK_RAM)
-    {
-        disk_select(DISK_RAM);
-        if (fat32_init(0) != 0)
-        {
-            disk_select(old);
-            if (old != DISK_NONE) fat32_init(0);
-            return 0;
-        }
-    }
-    fat32_change_directory("/");
-    data = read_program_file(name, size);
-    if (old != DISK_RAM)
-    {
-        disk_select(old);
-        if (old != DISK_NONE) fat32_init(0);
-    }
-    fat32_change_directory(cwd);
-    return data;
+    return kernel_command(line, 0);
 }
 
 /* `programs`: the .ELF files in the current directory and on the RAM disk. */
@@ -1264,7 +1279,7 @@ static int run_program(const char *line, int report_missing)
     }
 
     uint32_t size;
-    uint8_t *image = find_program(argv[0], &size);
+    uint8_t *image = process_find_program(argv[0], &size);
     if (!image)
     {
         if (!report_missing) return 0;
@@ -1307,7 +1322,7 @@ static void reap_background(void)
     for (int i = 0; i < MAX_TASKS; i++)
     {
         task_t *t = task_at(i);
-        if (t->state != TASK_ZOMBIE || !t->is_user) continue;
+        if (t->state != TASK_ZOMBIE || !t->is_user || t->parent != 1) continue;
         char name[16];
         k_snprintf(name, sizeof(name), "%s", t->name);
         int pid = t->pid, code = t->exit_code;

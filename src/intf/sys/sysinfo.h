@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #define OS_NAME     "Terminal OS"
-#define OS_VERSION  "0.8"
+#define OS_VERSION  "0.9"
 #define OS_HOSTNAME "terminal-os"
 
 /* Facts only kernel_main knows, recorded during boot for `sysinfo`. */

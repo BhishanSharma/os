@@ -29,7 +29,18 @@ int process_wait(int pid, int foreground);
 /* Ask program `pid` to end with exit code `code` (at its next safe point). */
 int process_kill(int pid, int code);
 
-int process_foreground(void);   /* pid with the keyboard, 0 for the shell */
+int process_foreground(void);   /* pid with the keyboard, 0 for the kernel */
+
+/* Find a program by name: `name` or `name.elf` in the current directory, else
+ * in the root of the RAM disk (the system's program folder). Returns the
+ * whole file, to kfree, or 0. */
+uint8_t *process_find_program(const char *name, uint32_t *size);
+
+/* Free programs that ended after their parent did (they belong to pid 1). */
+void process_reap_orphans(void);
+
+/* Logout: stop every program and free them. */
+void process_end_all(void);
 
 #define PROC_ERR_NOT_FOUND  -1
 #define PROC_ERR_NOT_ELF    -2

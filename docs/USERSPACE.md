@@ -37,15 +37,42 @@ alice@terminal-os:/HOME/ALICE$ ticker 30 &
 alice@terminal-os:/HOME/ALICE$ spin 20 &
 [3] spin running in the background
 alice@terminal-os:/HOME/ALICE$ ps
-    PID  USER      STATE          CPU  NAME
-      1  kernel    running     0.12s  shell
-      0  kernel    ready       3.40s  idle
-      2  alice     sleeping    0.01s  ticker
-      3  alice     ready       1.95s  spin
+    PID  PPID  USER      STATE           CPU  NAME
+      1     0  kernel    ready         0.16s  login
+      0     0  kernel    ready         3.40s  idle
+      2     1  alice     running       0.64s  shell  (this shell)
+      4     2  alice     sleeping      0.01s  ticker
+      5     2  alice     ready         1.95s  spin
 ```
 
-The shell looks in the current directory first, then in the root of the RAM disk, which
-works as the system's program directory even when the files are on the ATA disk.
+Programs are looked up in the current directory first, then in the root of the RAM disk,
+which works as the system's program directory even when the files are on the ATA disk.
+
+## The shell is a user program
+
+Like `login` and `bash` on Linux, the kernel only logs you in: pid 1 (`login`) checks the
+password, then starts `SHELL.ELF` (`user/programs/shell.c`) as you, in your home folder, and
+waits for it. Everything you type goes to that ring-3 program. For each command it:
+
+1. runs it itself if it is a shell command: `cd`, `pwd`, `jobs`, `ps`, `fg`, `kill`, `su`,
+   `history`, `exit`;
+2. otherwise asks the kernel to run it if it is one of the commands built into the kernel
+   (`ls`, `cat`, `edit`, `ping`, `download`, ...) with the `kcommand` system call, which runs
+   it as you, in the shell's directory;
+3. otherwise starts the program of that name with `spawn` and `wait`s for it, or leaves it
+   in the background for a trailing `&`.
+
+It also has `a ; b`, `a && b`, "quoted arguments", `$?`, `$USER`, `$HOME`, `$PWD`, and
+history on Up/Down. Ctrl+C clears the line you are typing (the shell asks for Ctrl+C as a
+key with `ctrlc(CTRLC_KEY)`), and stops the program in the foreground.
+
+`su [user]` starts a second shell as that user: `spawn("shell", argv, "root")` makes the
+kernel ask for that user's password (unless you are root) and run the new program as them.
+`exit` ends it and you are back in your own shell. `exit` in the login shell logs you out;
+any programs still running are stopped.
+
+If `SHELL.ELF` is missing or crashes, pid 1 falls back to the shell built into the kernel,
+which has the same commands.
 
 ## Included programs
 
@@ -60,6 +87,7 @@ works as the system's program directory even when the files are on the ATA disk.
 | `fault <kind>`        | Breaks a rule on purpose: `kernel`, `write`, `null`, `div`, `cli`, `loop` |
 | `ticker [s] [every]`  | Prints the time every second; run it with `&`                  |
 | `spin [s]`            | Keeps the CPU busy; the timer still shares it with everyone    |
+| `shell`               | The command line itself: `spawn`, `wait`, `kcommand`, line editing |
 
 ## Writing your own
 
@@ -86,8 +114,11 @@ The C library (`user/include`, `user/lib`) has:
 * `stdlib.h`: `malloc`, `calloc`, `realloc`, `free`, `atoi`, `atol`, `rand`, `srand`, `exit`
 * `string.h`, `ctype.h`: the usual string, memory and character functions
 * `os.h`: who is running it (`getuser`), files (`open`, `read`, `write`, `close`, `unlink`, `readdir`), time (`sleep_ms`,
-  `uptime_ms`, `gettime`), keys (`getkey`, which does not wait) and the screen (`clear_screen`,
-  `gotoxy`, `set_color`, `reset_color`, `console_size`, `show_cursor`)
+  `uptime_ms`, `gettime`), keys (`getkey`, which does not wait, and `waitkey`), the screen
+  (`clear_screen`, `gotoxy`, `set_color`, `set_theme_color`, `reset_color`, `console_size`,
+  `cursor_column`, `show_cursor`), and programs: `spawn(path, argv, as_user)`,
+  `wait(pid, &status, flags)` (`WAIT_NOHANG`, `WAIT_FOREGROUND`; pid -1 = any child),
+  `kill`, `taskinfo`, `chdir`, `getcwd`, `kcommand`, `ctrlc`, `uname`, `os_strerror`
 
 Programs are compiled with `-mgeneral-regs-only`: no `float`/`double` yet.
 
@@ -100,7 +131,10 @@ Programs are compiled with `-mgeneral-regs-only`: no `float`/`double` yet.
   the *user* bit; the kernel heap stays below 1 GiB. When a program ends, its page tables and
   pages are freed.
 * **Tasks and scheduling** (`sys/task.c`). Every program is a task with its own kernel
-  stack; the shell is task 1 and an idle task (pid 0) halts the CPU when nobody has work.
+  stack; task 1 (`login`) logs users in and an idle task (pid 0) halts the CPU when nobody
+  has work. Every program has a parent: the one that spawned it, which collects its exit
+  code with `wait`. When a parent ends first, its programs are handed to pid 1, which frees
+  them once they end.
   The timer interrupt switches programs every 5 ticks (50 ms), but only when it interrupts
   user code. Kernel code is never preempted: it gives up the CPU only where it waits
   (keyboard, `sleep`, waiting for a program), so drivers and the file system need no locks.
@@ -127,7 +161,7 @@ Programs are compiled with `-mgeneral-regs-only`: no `float`/`double` yet.
 
 ## Limits (next steps)
 
-* Up to 14 programs at once. Programs cannot start other programs yet (no `spawn`/`exec`
-  system call), so a shell written as a user program is the next step.
+* Up to 14 programs at once (counting the shells). There are no pipes (`a | b`) or output
+  redirection (`> file`) yet, and no `exec` (replacing the running program).
 * No floating point in programs, and no priorities: every program gets the same time slice.
 * Files are read whole into memory on `open` and written back on `close`.

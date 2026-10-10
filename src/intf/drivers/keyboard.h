@@ -33,6 +33,9 @@ const char* history_next(void);
 void keyboard_set_idle_hook(void (*hook)(void));
 void keyboard_idle(void);
 
+/* Throw away the keys typed but not read yet. */
+void keyboard_flush(void);
+
 /* Set by the keyboard interrupt on Ctrl+C (also queued as KEY_CTRL_C). */
 extern volatile int keyboard_ctrl_c;
 

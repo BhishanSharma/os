@@ -3,6 +3,11 @@
 The prompt is `root@terminal-os:<directory>#`. Up/Down arrows browse command history;
 Shift+Up/Down scroll the screen.
 
+The shell is an ordinary user-mode program (`SHELL.ELF`) that the kernel starts after you
+log in; see [USERSPACE.md](USERSPACE.md#the-shell-is-a-user-program). Besides the commands
+below it understands `a ; b`, `a && b`, "quoted arguments", `$?` (the last exit code),
+`$USER`, `$HOME`, `$PWD` and `history`. Ctrl+C clears the line being typed.
+
 The top row is a status bar: OS version, IP address, kernel heap in use, the disk the files
 are on, uptime, and the date and time (IST). It updates every second while the shell or the
 editor waits for a key.
@@ -34,7 +39,7 @@ editor, `download`, scripts and user programs. `mount <disk>`, `reboot`, `dhcp`,
 | ------------------ | ---------------------------------------------------------------- |
 | `whoami`, `id`     | Your name, or uid and home folder                                |
 | `users`            | All accounts                                                     |
-| `su [user]`        | Become another user (default root); asks their password unless you are root. `exit` goes back |
+| `su [user]`        | Start a shell as another user (default root); asks their password unless you are root. `exit` goes back |
 | `passwd [user]`    | Change your password; root can change anyone's                   |
 | `useradd <name>`   | Create an account and its home folder (root; 1-8 lower-case letters/digits) |
 | `userdel <name>`   | Delete an account; its files stay (root)                         |

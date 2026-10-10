@@ -10,11 +10,14 @@
 #include "sys/syscall_nums.h"
 #include "sys/task.h"
 #include "sys/users.h"
+#include "sys/shell.h"
+#include "sys/sysinfo.h"
 #include "core/exceptions.h"
 #include "drivers/paging.h"
 #include "drivers/memory.h"
 #include "drivers/heap.h"
 #include "drivers/fat32.h"
+#include "drivers/disk.h"
 #include "drivers/keyboard.h"
 #include "drivers/timer.h"
 #include "drivers/rtc.h"
@@ -47,9 +50,10 @@ typedef struct {
     char line_buf[256];               // keyboard input for read(0), one line at a time
     uint32_t line_len, line_pos;
     char cwd[128];                    // its own current directory
+    int ctrlc_mode;                   // CTRLC_END / CTRLC_KEY
 } process_t;
 
-static int foreground_pid;            // 0: the shell has the keyboard
+static int foreground_pid;            // 0: the kernel (login, kernel shell) has the keyboard
 
 /* ---- ELF ---------------------------------------------------------------- */
 
@@ -75,6 +79,11 @@ typedef struct {
 
 static process_t *P(void) {
     return (process_t *)task_current()->process;
+}
+
+/* 1 if Ctrl+C is a key for this task rather than the end of it. */
+static int takes_ctrl_c(task_t *t) {
+    return t->process && ((process_t *)t->process)->ctrlc_mode == CTRLC_KEY;
 }
 
 /* ---- User memory -------------------------------------------------------- */
@@ -241,8 +250,14 @@ static void __attribute__((noreturn)) process_exit(int code) {
     t->root = paging_kernel_root();
     paging_switch(t->root);
     paging_free_address_space(root);
+    // Its programs live on; pid 1 (login) collects them when they end.
+    for (int i = 0; i < MAX_TASKS; i++) {
+        task_t *c = task_at(i);
+        if (c->state != TASK_FREE && c->parent == t->pid) c->parent = 1;
+    }
     if (foreground_pid == t->pid) {
-        foreground_pid = 0;
+        task_t *parent = task_by_pid(t->parent);
+        foreground_pid = parent && parent->is_user && parent->state != TASK_ZOMBIE ? parent->pid : 0;
         print_set_theme_colors();
         print_set_cursor_visible(1);
     }
@@ -308,6 +323,13 @@ static void read_keyboard_line(process_t *p) {
             continue;
         }
         if (c == KEY_CTRL_C) {
+            if (p->ctrlc_mode == CTRLC_KEY) {      // drop the line, return an empty one
+                keyboard_ctrl_c = 0;
+                print_str("^C\n");
+                p->line_buf[0] = '\n';
+                p->line_len = 1;
+                return;
+            }
             task_current()->kill_code = EXIT_INTERRUPTED;
             check_killed();
         }
@@ -407,10 +429,22 @@ static int64_t sys_time(uint64_t ptr) {
     return 0;
 }
 
-static int64_t sys_getkey(void) {
-    if (foreground_pid != task_current()->pid) return 0;
-    int c = get_char();
+/* With `wait`, block until there is a key (and this program has the keyboard). */
+static int64_t sys_getkey(uint64_t wait) {
+    int c;
+    while (1) {
+        if (wait) wait_for_foreground();
+        else if (foreground_pid != task_current()->pid) return 0;
+        c = get_char();
+        if (c || !wait) break;
+        check_killed();
+        task_sleep(10);
+    }
     if (c == KEY_CTRL_C) {
+        if (P()->ctrlc_mode == CTRLC_KEY) {
+            keyboard_ctrl_c = 0;
+            return c;
+        }
         task_current()->kill_code = EXIT_INTERRUPTED;
         check_killed();
     }
@@ -425,6 +459,8 @@ static int64_t sys_console(uint64_t op, uint64_t a, uint64_t b) {
         case CON_RESET:  print_set_theme_colors(); return 0;
         case CON_SIZE:   return (int64_t)((print_get_cols() << 16) | print_get_rows());
         case CON_CURSOR: print_set_cursor_visible((int)a); return 0;
+        case CON_THEME:  print_use_theme_color((int)a); return 0;
+        case CON_COLUMN: return (int64_t)print_get_col();
         default:         return SYSERR_BADCALL;
     }
 }
@@ -476,6 +512,15 @@ static int64_t sys_getuser(uint64_t ptr) {
     return 0;
 }
 
+static int64_t sys_spawn(uint64_t path_ptr, uint64_t argv_ptr, uint64_t user_ptr);
+static int64_t sys_wait(int64_t pid, uint64_t status_ptr, uint64_t flags);
+static int64_t sys_kill(int64_t pid);
+static int64_t sys_taskinfo(uint64_t slot, uint64_t ptr);
+static int64_t sys_chdir(uint64_t path_ptr);
+static int64_t sys_getcwd(uint64_t buf, uint64_t size);
+static int64_t sys_kcommand(uint64_t line_ptr);
+static int64_t sys_uname(uint64_t ptr);
+
 /* int 0x80 (usermode.asm). Runs with interrupts on, so a blocking call
  * (keyboard, sleep) still gets timer and keyboard interrupts. */
 void syscall_dispatch(struct exc_frame *f) {
@@ -492,13 +537,22 @@ void syscall_dispatch(struct exc_frame *f) {
         case SYS_SLEEP:   r = sys_sleep(f->rdi); break;
         case SYS_UPTIME:  r = (int64_t)get_tick() * 10; break;
         case SYS_TIME:    r = sys_time(f->rdi); break;
-        case SYS_GETKEY:  r = sys_getkey(); break;
+        case SYS_GETKEY:  r = sys_getkey(f->rdi); break;
         case SYS_CONSOLE: r = sys_console(f->rdi, f->rsi, f->rdx); break;
         case SYS_READDIR: r = sys_readdir(f->rdi, f->rsi); break;
         case SYS_UNLINK:  r = sys_unlink(f->rdi); break;
         case SYS_GETUSER: r = sys_getuser(f->rdi); break;
         case SYS_GETPID:  r = task_current()->pid; break;
         case SYS_YIELD:   task_yield(); r = 0; break;
+        case SYS_SPAWN:   r = sys_spawn(f->rdi, f->rsi, f->rdx); break;
+        case SYS_WAIT:    r = sys_wait((int64_t)f->rdi, f->rsi, f->rdx); break;
+        case SYS_KILL:    r = sys_kill((int64_t)f->rdi); break;
+        case SYS_TASKINFO: r = sys_taskinfo(f->rdi, f->rsi); break;
+        case SYS_CHDIR:   r = sys_chdir(f->rdi); break;
+        case SYS_GETCWD:  r = sys_getcwd(f->rdi, f->rsi); break;
+        case SYS_KCOMMAND: r = sys_kcommand(f->rdi); break;
+        case SYS_CTRLC:   r = f->rdi <= CTRLC_KEY ? (P()->ctrlc_mode = (int)f->rdi, 0) : SYSERR_BADCALL; break;
+        case SYS_UNAME:   r = sys_uname(f->rdi); break;
         default:          r = SYSERR_BADCALL; break;
     }
     f->rax = (uint64_t)r;
@@ -573,7 +627,8 @@ static uint64_t build_stack(uint64_t root, int argc, char **argv) {
     return sp;
 }
 
-int process_spawn(const uint8_t *data, uint32_t size, int argc, char **argv) {
+/* Start a program as `user`, in the FAT32 current directory. */
+static int spawn_as(const uint8_t *data, uint32_t size, int argc, char **argv, const user_t *user) {
     if (!paging_user_range_free()) return PROC_ERR_NO_WINDOW;
     if (argc > MAX_ARGS) argc = MAX_ARGS;
 
@@ -599,10 +654,14 @@ int process_spawn(const uint8_t *data, uint32_t size, int argc, char **argv) {
     p->brk_start = p->brk = p->brk_mapped = image_end;
     fat32_get_current_directory(p->cwd, sizeof(p->cwd));
 
-    // Name for ps and messages: the file name without the extension.
+    // Name for ps and messages: the file name without folders and extension.
+    const char *base = argv[0];
+    for (const char *s = argv[0]; *s; s++)
+        if (*s == '/') base = s + 1;
     char name[16];
     int n = 0;
-    for (const char *s = argv[0]; *s && *s != '.' && n < (int)sizeof(name) - 1; s++) name[n++] = *s;
+    for (const char *s = base; *s && *s != '.' && n < (int)sizeof(name) - 1; s++)
+        name[n++] = (*s >= 'A' && *s <= 'Z') ? *s + 32 : *s;
     name[n] = 0;
 
     // The task starts running at the next switch, so set it up before it can.
@@ -615,39 +674,290 @@ int process_spawn(const uint8_t *data, uint32_t size, int argc, char **argv) {
         return PROC_ERR_BUSY;
     }
     t->process = p;
-    t->user = *user_current();
+    t->user = *user;
     __asm__ volatile("sti");
     return t->pid;
+}
+
+int process_spawn(const uint8_t *data, uint32_t size, int argc, char **argv) {
+    return spawn_as(data, size, argc, argv, user_current());
 }
 
 int process_foreground(void) {
     return foreground_pid;
 }
 
-int process_wait(int pid, int foreground) {
-    task_t *t = task_by_pid(pid);
-    if (!t || !t->is_user) return PROC_ERR_NOT_FOUND;
+/* Wait until `t` ends, reap it and return its exit code. With `foreground`,
+ * it has the keyboard meanwhile, and Ctrl+C ends it (unless it takes Ctrl+C
+ * as a key, like the shell). */
+static int wait_for(task_t *t, int foreground) {
+    task_t *me = task_current();
+    int pid = t->pid, previous = foreground_pid;
     if (foreground) {
         foreground_pid = pid;
         keyboard_ctrl_c = 0;
     }
+    int interrupted = 0;
     while (t->state != TASK_ZOMBIE) {
-        if (foreground && keyboard_ctrl_c) {
+        if (keyboard_ctrl_c && foreground_pid == pid && !takes_ctrl_c(t)) {
             keyboard_ctrl_c = 0;
             t->kill_code = EXIT_INTERRUPTED;
+            interrupted = 1;
         }
+        if (me->is_user && me->kill_code) {        // the waiter itself is being stopped
+            if (foreground_pid == pid) foreground_pid = previous;
+            check_killed();
+        }
+        if (me->pid == 1) process_reap_orphans();
         keyboard_idle();       // status bar, then sleep a tick
     }
-    if (foreground_pid == pid) foreground_pid = 0;
+    if (foreground && foreground_pid == pid) foreground_pid = previous;
+    if (interrupted) keyboard_flush();   // the Ctrl+C has been dealt with
     int code = t->exit_code;
     task_reap(t);
     if (print_get_col() != 0) print_str("\n");
     return code;
 }
 
+int process_wait(int pid, int foreground) {
+    task_t *t = task_by_pid(pid);
+    if (!t || !t->is_user) return PROC_ERR_NOT_FOUND;
+    return wait_for(t, foreground);
+}
+
 int process_kill(int pid, int code) {
     task_t *t = task_by_pid(pid);
     if (!t || !t->is_user || t->state == TASK_ZOMBIE) return PROC_ERR_NOT_FOUND;
     t->kill_code = code;
+    return 0;
+}
+
+/* Programs whose parent ended belong to pid 1: free them once they end. */
+void process_reap_orphans(void) {
+    for (int i = 0; i < MAX_TASKS; i++) {
+        task_t *t = task_at(i);
+        if (t->state == TASK_ZOMBIE && t->is_user && t->parent == 1 && t != task_current()) task_reap(t);
+    }
+}
+
+/* End of a login session: stop every program still running, and free them. */
+void process_end_all(void) {
+    for (int i = 0; i < MAX_TASKS; i++) {
+        task_t *t = task_at(i);
+        if (t->is_user && t->state != TASK_FREE && t->state != TASK_ZOMBIE) t->kill_code = EXIT_KILLED;
+    }
+    for (int i = 0; i < MAX_TASKS; i++) {
+        task_t *t = task_at(i);
+        if (!t->is_user || t->state == TASK_FREE) continue;
+        while (t->state != TASK_ZOMBIE) task_sleep(10);
+        task_reap(t);
+    }
+    foreground_pid = 0;
+}
+
+/* ---- Finding programs --------------------------------------------------- */
+
+/* Read `name` or `name.elf` from the current directory into a kmalloc'd buffer. */
+static uint8_t *read_program_file(const char *name, uint32_t *size) {
+    char path[MAX_PATH + 8];
+    k_snprintf(path, sizeof(path), "%s", name);
+    if (!fat32_file_exists(path)) {
+        k_snprintf(path, sizeof(path), "%s.elf", name);
+        if (!fat32_file_exists(path)) return 0;
+    }
+    uint32_t n = fat32_get_file_size(path);
+    if (n == 0 || n == 0xFFFFFFFF) return 0;
+    uint8_t *data = kmalloc(n);
+    if (!data) return 0;
+    if (fat32_read_file(path, data, n) < 0) {
+        kfree(data);
+        return 0;
+    }
+    *size = n;
+    return data;
+}
+
+uint8_t *process_find_program(const char *name, uint32_t *size) {
+    uint8_t *data = read_program_file(name, size);
+    int has_folder = 0;
+    for (const char *c = name; *c; c++)
+        if (*c == '/') has_folder = 1;
+    if (data || !disk_ramdisk_size() || has_folder) return data;
+
+    char cwd[256] = "/";
+    fat32_get_current_directory(cwd, sizeof(cwd));
+    disk_kind_t old = disk_selected();
+    if (old != DISK_RAM) {
+        disk_select(DISK_RAM);
+        if (fat32_init(0) != 0) {
+            disk_select(old);
+            if (old != DISK_NONE) fat32_init(0);
+            return 0;
+        }
+    }
+    fat32_change_directory("/");
+    data = read_program_file(name, size);
+    if (old != DISK_RAM) {
+        disk_select(old);
+        if (old != DISK_NONE) fat32_init(0);
+    }
+    fat32_change_directory(cwd);
+    return data;
+}
+
+/* ---- System calls for programs that run programs ----------------------- */
+
+static int64_t proc_error(int err) {
+    switch (err) {
+        case PROC_ERR_NOT_FOUND: return SYSERR_NOENT;
+        case PROC_ERR_NOT_ELF:   return SYSERR_NOEXEC;
+        case PROC_ERR_BUSY:      return SYSERR_AGAIN;
+        default:                 return SYSERR_NOMEM;
+    }
+}
+
+/* spawn(path, argv, as_user) */
+static int64_t sys_spawn(uint64_t path_ptr, uint64_t argv_ptr, uint64_t user_ptr) {
+    char path[MAX_PATH], saved[256];
+    if (copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
+
+    // The arguments: copied into one kernel buffer before anything can change.
+    char *strings = kmalloc(1024), *argv[MAX_ARGS];
+    if (!strings) return SYSERR_NOMEM;
+    int argc = 0;
+    size_t used = 0;
+    if (argv_ptr) {
+        for (; argc < MAX_ARGS; argc++) {
+            uint64_t slot = argv_ptr + (uint64_t)argc * 8;
+            if (!user_range_ok(slot, 8, 0)) { kfree(strings); return SYSERR_FAULT; }
+            uint64_t s = *(const uint64_t *)slot;
+            if (!s) break;
+            if (used >= 1024 || copy_user_string(strings + used, s, 1024 - used) != 0) {
+                kfree(strings);
+                return SYSERR_FAULT;
+            }
+            argv[argc] = strings + used;
+            used += strlen(argv[argc]) + 1;
+        }
+    }
+    if (argc == 0) argv[argc++] = path;
+
+    user_t as = *user_current();
+    if (user_ptr) {
+        char name[32];
+        if (copy_user_string(name, user_ptr, sizeof(name)) != 0) {
+            kfree(strings);
+            return SYSERR_FAULT;
+        }
+        int r = users_authenticate(name, &as);
+        if (r != 0) {
+            kfree(strings);
+            return r == USERS_NO_SUCH_USER ? SYSERR_NOUSER : SYSERR_AUTH;
+        }
+    }
+
+    enter_cwd(saved, sizeof(saved));
+    uint32_t size = 0;
+    // As another user (su): only system programs, never one from this folder.
+    if (user_ptr) fat32_change_directory("/");
+    uint8_t *image = process_find_program(path, &size);
+    if (user_ptr && fat32_change_directory(P()->cwd) != 0) fat32_change_directory("/");
+    int64_t result = image ? spawn_as(image, size, argc, argv, &as) : PROC_ERR_NOT_FOUND;
+    leave_cwd(saved);
+    kfree(image);
+    kfree(strings);
+    return result < 0 ? proc_error((int)result) : result;
+}
+
+/* wait(pid, &status, flags): a child of the caller; pid -1 = any of them. */
+static int64_t sys_wait(int64_t pid, uint64_t status_ptr, uint64_t flags) {
+    if (status_ptr && !user_range_ok(status_ptr, sizeof(int), 1)) return SYSERR_FAULT;
+    if (pid == -1 && (flags & WAIT_FOREGROUND)) return SYSERR_BADCALL;
+    task_t *me = task_current();
+    while (1) {
+        task_t *child = 0, *ended = 0;
+        for (int i = 0; i < MAX_TASKS; i++) {
+            task_t *t = task_at(i);
+            if (t->state == TASK_FREE || !t->is_user || t->parent != me->pid) continue;
+            if (pid != -1 && t->pid != pid) continue;
+            child = t;
+            if (t->state == TASK_ZOMBIE) { ended = t; break; }
+        }
+        if (!child) return SYSERR_CHILD;
+        if (pid != -1 && !(flags & WAIT_NOHANG)) ended = child;   // wait for this one
+        if (ended) {
+            int ended_pid = ended->pid;
+            int code = wait_for(ended, (flags & WAIT_FOREGROUND) != 0);
+            if (status_ptr) *(int *)status_ptr = code;
+            return ended_pid;
+        }
+        if (flags & WAIT_NOHANG) return 0;
+        check_killed();
+        task_sleep(20);
+    }
+}
+
+static int64_t sys_kill(int64_t pid) {
+    task_t *t = task_by_pid((int)pid);
+    if (!t || t->state == TASK_ZOMBIE) return SYSERR_SRCH;
+    if (!t->is_user) return SYSERR_PERM;                // part of the kernel
+    if (!user_is_root() && t->user.uid != user_current()->uid) return SYSERR_PERM;
+    t->kill_code = EXIT_KILLED;
+    return 0;
+}
+
+static int64_t sys_taskinfo(uint64_t slot, uint64_t ptr) {
+    if (slot >= MAX_TASKS) return SYSERR_SRCH;
+    if (!user_range_ok(ptr, sizeof(struct os_task), 1)) return SYSERR_FAULT;
+    task_t *t = task_at((int)slot);
+    if (t->state == TASK_FREE) return 0;
+    struct os_task *out = (struct os_task *)ptr;
+    memset(out, 0, sizeof(*out));
+    out->pid = t->pid;
+    out->parent = t->parent;
+    out->state = t->state == TASK_ZOMBIE ? TASKSTATE_DONE
+               : t->state == TASK_SLEEPING ? TASKSTATE_SLEEPING
+               : t == task_current() ? TASKSTATE_RUNNING : TASKSTATE_READY;
+    out->is_program = t->is_user;
+    out->foreground = t->pid == foreground_pid || (!foreground_pid && t->pid == 1);
+    out->cpu_ms = t->ticks * 10;
+    k_snprintf(out->name, sizeof(out->name), "%s", t->name);
+    k_snprintf(out->user, sizeof(out->user), "%s", t->is_user ? t->user.name : "kernel");
+    return 1;
+}
+
+static int64_t sys_chdir(uint64_t path_ptr) {
+    char path[128], saved[256];
+    if (copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
+    enter_cwd(saved, sizeof(saved));
+    int ok = fat32_change_directory(path) == 0;
+    if (ok) fat32_get_current_directory(P()->cwd, sizeof(P()->cwd));
+    leave_cwd(saved);
+    return ok ? 0 : SYSERR_NOENT;
+}
+
+static int64_t sys_getcwd(uint64_t buf, uint64_t size) {
+    if (size == 0 || !user_range_ok(buf, size, 1)) return SYSERR_FAULT;
+    k_snprintf((char *)buf, size, "%s", P()->cwd[0] ? P()->cwd : "/");
+    return (int64_t)strlen((char *)buf);
+}
+
+/* kcommand(line): one of the kernel's built-in commands (ls, cat, ping, ...),
+ * run in the caller's directory, as the caller's user. */
+static int64_t sys_kcommand(uint64_t line_ptr) {
+    char line[256], saved[256];
+    if (copy_user_string(line, line_ptr, sizeof(line)) != 0) return SYSERR_FAULT;
+    enter_cwd(saved, sizeof(saved));
+    int known = shell_kernel_command(line);
+    leave_cwd(saved);
+    return known;
+}
+
+static int64_t sys_uname(uint64_t ptr) {
+    if (!user_range_ok(ptr, sizeof(struct os_uname), 1)) return SYSERR_FAULT;
+    struct os_uname *u = (struct os_uname *)ptr;
+    k_snprintf(u->sysname, sizeof(u->sysname), "%s", OS_NAME);
+    k_snprintf(u->release, sizeof(u->release), "%s", OS_VERSION);
+    k_snprintf(u->hostname, sizeof(u->hostname), "%s", OS_HOSTNAME);
     return 0;
 }

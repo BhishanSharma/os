@@ -30,10 +30,23 @@ unsigned long uptime_ms(void);
 int gettime(struct os_time *t);              /* local date and time */
 
 int getkey(void);                            /* next key or 0, does not wait */
+int waitkey(void);                           /* next key, waits for one */
 int readdir(int index, struct os_dirent *entry);   /* 1 = filled, 0 = no more */
 int getuser(struct os_user *user);           /* who is running this program */
 int getpid(void);                            /* this program's process id */
 void yield(void);                            /* let other programs run now */
+
+/* Programs that run programs */
+int spawn(const char *path, char *const argv[], const char *as_user);  /* -> pid */
+int wait(int pid, int *status, int flags);   /* WAIT_NOHANG, WAIT_FOREGROUND; pid -1 = any child */
+int kill(int pid);
+int taskinfo(int slot, struct os_task *task);   /* slots 0.. until < 0; 1 = used */
+int chdir(const char *path);
+int getcwd(char *buf, size_t size);
+int kcommand(const char *line);              /* a command built into the kernel: 1 ran, 0 unknown */
+int ctrlc(int mode);                         /* CTRLC_END (default) or CTRLC_KEY */
+int uname(struct os_uname *u);
+const char *os_strerror(int err);            /* text for a negative SYSERR_* result */
 
 /* Console */
 void clear_screen(void);
@@ -42,6 +55,8 @@ void set_color(int fg, int bg);              /* VGA colours 0-15, see below */
 void reset_color(void);
 void console_size(int *cols, int *rows);
 void show_cursor(int visible);
+void set_theme_color(int role);
+int cursor_column(void);              /* THEME_TEXT, THEME_ACCENT, THEME_GOOD, ... */
 
 enum {
     COLOR_BLACK, COLOR_BLUE, COLOR_GREEN, COLOR_CYAN, COLOR_RED, COLOR_MAGENTA,

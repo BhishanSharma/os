@@ -556,6 +556,13 @@ static void cmd_userdel(const char *name) {
             kprintf("userdel: %s is logged in\n", name);
             return;
         }
+    for (int i = 0; i < MAX_TASKS; i++) {
+        task_t *t = task_at(i);
+        if (t->is_user && t->state != TASK_FREE && t->state != TASK_ZOMBIE && strcmp(t->user.name, name) == 0) {
+            kprintf("userdel: %s has programs running (pid %d)\n", name, t->pid);
+            return;
+        }
+    }
     char home[48];
     k_snprintf(home, sizeof(home), "%s", a->user.home);
     *a = accounts[--account_count];
@@ -621,6 +628,25 @@ static void cmd_su(const char *name) {
     }
     push_session(a);
     kprintf("Now %s. Type exit to go back.\n", name);
+}
+
+int users_authenticate(const char *name, user_t *out) {
+    account_t *a = find_account(name);
+    if (!a) return USERS_NO_SUCH_USER;
+    const user_t *me = user_current();
+    if (me->uid != 0 && strcmp(me->name, a->user.name) != 0) {
+        char password[64];
+        print_str("Password: ");
+        if (read_input(password, sizeof(password), 0) < 0) return USERS_AUTH_FAILED;
+        int ok = check_password(a, password);
+        memset(password, 0, sizeof(password));
+        if (!ok) {
+            sleep(1000);
+            return USERS_AUTH_FAILED;
+        }
+    }
+    *out = a->user;
+    return 0;
 }
 
 static const char *argument(const char *line, const char *cmd) {

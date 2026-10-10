@@ -165,6 +165,14 @@ void keyboard_idle(void) {
         __asm__ volatile("hlt");
 }
 
+void keyboard_flush(void) {
+    uint64_t flags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+    buffer_index = 0;
+    keyboard_ctrl_c = 0;
+    if (flags & 0x200) __asm__ volatile("sti");
+}
+
 int get_char() {
     // The keyboard interrupt appends to the same buffer: keep it out meanwhile.
     uint64_t flags;

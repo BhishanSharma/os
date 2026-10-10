@@ -869,6 +869,12 @@ void print_set_theme_colors(void) {
     color = theme_fg | (theme_bg << 4);
 }
 
+void print_use_theme_color(int role) {
+    uint8_t fg = role == 1 ? theme_accent : role == 2 ? theme_success : role == 3 ? theme_error
+               : role == 4 ? theme_warning : theme_fg;
+    color = fg | (theme_bg << 4);
+}
+
 void print_set_cursor_visible(int visible) {
     cursor_hidden = !visible;
     move_cursor();

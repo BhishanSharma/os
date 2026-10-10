@@ -111,5 +111,8 @@ void print_highlight(const char *text);   /* theme success colour */
 void print_shell_prompt(const char *user_host, const char *path, int root);   /* "#" for root, else "$" */
 void print_set_theme_colors(void);         /* back to the theme's text colours */
 void print_set_cursor_visible(int visible);
+/* Text colour from the theme: 0 text, 1 accent, 2 success, 3 error, 4 warning
+ * (THEME_* in sys/syscall_nums.h). */
+void print_use_theme_color(int role);
 
 #endif
