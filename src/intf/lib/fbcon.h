@@ -30,6 +30,13 @@ int  fbcon_active(void);
 void fbcon_set_scale(uint32_t scale);
 uint32_t fbcon_get_scale(void);
 
+/* Pixel access for programs (sys/process.c, the `gfx` system call):
+ * screen size, the size of one text cell and where the grid starts. */
+void fbcon_geometry(uint32_t *width, uint32_t *height, uint32_t *cell_w, uint32_t *cell_h,
+                    uint32_t *grid_x, uint32_t *grid_y);
+void fbcon_fill(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t rgb);   /* 0x00RRGGBB */
+void fbcon_blit(int x, int y, int w, int h, const uint32_t *src, int stride);
+
 /* Draw one cell; `cursor` draws an underline cursor in it. */
 void fbcon_draw_cell(int col, int row, uint8_t ch, uint8_t attr, int cursor);
 

@@ -47,6 +47,12 @@ int kcommand(const char *line);              /* a command built into the kernel:
 int ctrlc(int mode);                         /* CTRLC_END (default) or CTRLC_KEY */
 int uname(struct os_uname *u);
 int getmouse(struct os_mouse *m);            /* 1 if there is a mouse; takes it from the console */
+
+/* Pixels (framebuffer console only): see GFX_* in sys/syscall_nums.h */
+int gfx_info(struct os_gfx_info *info);      /* 0, or SYSERR_NOENT in VGA text mode */
+int gfx_begin(void);                         /* take the screen below the status bar */
+int gfx_blit(int x, int y, int w, int h, const unsigned int *pixels, int stride);   /* 0x00RRGGBB */
+int gfx_end(void);                           /* the console redraws itself */
 const char *os_strerror(int err);            /* text for a negative SYSERR_* result */
 
 /* Console */

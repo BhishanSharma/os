@@ -33,6 +33,7 @@
 #define SYS_CTRLC   23   /* ctrlc(mode): what Ctrl+C does to this program -> 0         */
 #define SYS_UNAME   24   /* uname(struct os_uname *)                     -> 0          */
 #define SYS_MOUSE   25   /* getmouse(struct os_mouse *): takes the mouse while in the foreground -> 1, 0 if no mouse */
+#define SYS_GFX     26   /* gfx(op, arg): pixels on the screen, op = GFX_* -> see below */
 
 /* open() modes */
 #define OPEN_READ    0
@@ -119,6 +120,25 @@ struct os_task {
     unsigned int cpu_ms;   /* time spent running */
     char name[16];
     char user[16];
+};
+
+/* gfx() operations. Coordinates are screen pixels; the status bar stays the
+ * console's (rows above `top`). Only the foreground program may draw. */
+#define GFX_INFO     0   /* arg = struct os_gfx_info *        -> 0, SYSERR_NOENT in VGA text mode */
+#define GFX_BEGIN    1   /* take the screen below the status bar (cleared to black) -> 0 */
+#define GFX_BLIT     2   /* arg = struct os_blit *: 0x00RRGGBB pixels -> 0 */
+#define GFX_END      3   /* give it back: the console redraws (also when the program ends) */
+
+struct os_gfx_info {
+    int width, height;     /* the whole screen, in pixels */
+    int top;               /* first row below the status bar */
+    int cell_w, cell_h;    /* one text cell */
+};
+
+struct os_blit {
+    int x, y, w, h;        /* where on the screen, and the size */
+    int stride;            /* pixels from one row of `pixels` to the next */
+    const unsigned int *pixels;
 };
 
 /* getmouse() */

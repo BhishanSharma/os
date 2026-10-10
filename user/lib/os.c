@@ -40,6 +40,15 @@ int ctrlc(int mode)                             { return (int)os_syscall(SYS_CTR
 int uname(struct os_uname *u)                   { return (int)os_syscall(SYS_UNAME, (long)u, 0, 0); }
 int getmouse(struct os_mouse *m)                { return (int)os_syscall(SYS_MOUSE, (long)m, 0, 0); }
 
+int gfx_info(struct os_gfx_info *info)          { return (int)os_syscall(SYS_GFX, GFX_INFO, (long)info, 0); }
+int gfx_begin(void)                             { return (int)os_syscall(SYS_GFX, GFX_BEGIN, 0, 0); }
+int gfx_end(void)                               { return (int)os_syscall(SYS_GFX, GFX_END, 0, 0); }
+
+int gfx_blit(int x, int y, int w, int h, const unsigned int *pixels, int stride) {
+    struct os_blit b = { x, y, w, h, stride, pixels };
+    return (int)os_syscall(SYS_GFX, GFX_BLIT, (long)&b, 0);
+}
+
 const char *os_strerror(int err) {
     switch (err) {
         case SYSERR_BADCALL: return "invalid request";

@@ -19,6 +19,7 @@
 #include "drivers/fat32.h"
 #include "drivers/disk.h"
 #include "drivers/mouse.h"
+#include "lib/fbcon.h"
 #include "drivers/keyboard.h"
 #include "drivers/timer.h"
 #include "drivers/rtc.h"
@@ -54,6 +55,7 @@ typedef struct {
     int ctrlc_mode;                   // CTRLC_END / CTRLC_KEY
 } process_t;
 
+static int graphics_owner;            // pid drawing pixels (gfx), 0: the console
 static int foreground_pid;            // 0: the kernel (login, kernel shell) has the keyboard
 
 /* ---- ELF ---------------------------------------------------------------- */
@@ -252,6 +254,10 @@ static void __attribute__((noreturn)) process_exit(int code) {
     paging_switch(t->root);
     paging_free_address_space(root);
     if (mouse_owner() == t->pid) mouse_set_owner(0);  // the console gets the mouse back
+    if (graphics_owner == t->pid) {                    // and the screen
+        graphics_owner = 0;
+        print_set_graphics(0);
+    }
     // Its programs live on; pid 1 (login) collects them when they end.
     for (int i = 0; i < MAX_TASKS; i++) {
         task_t *c = task_at(i);
@@ -532,6 +538,7 @@ static int64_t sys_getcwd(uint64_t buf, uint64_t size);
 static int64_t sys_kcommand(uint64_t line_ptr);
 static int64_t sys_uname(uint64_t ptr);
 static int64_t sys_mouse(uint64_t ptr);
+static int64_t sys_gfx(uint64_t op, uint64_t arg);
 
 /* int 0x80 (usermode.asm). Runs with interrupts on, so a blocking call
  * (keyboard, sleep) still gets timer and keyboard interrupts. */
@@ -566,6 +573,7 @@ void syscall_dispatch(struct exc_frame *f) {
         case SYS_CTRLC:   r = f->rdi <= CTRLC_KEY ? (P()->ctrlc_mode = (int)f->rdi, 0) : SYSERR_BADCALL; break;
         case SYS_UNAME:   r = sys_uname(f->rdi); break;
         case SYS_MOUSE:   r = sys_mouse(f->rdi); break;
+        case SYS_GFX:     r = sys_gfx(f->rdi, f->rsi); break;
         default:          r = SYSERR_BADCALL; break;
     }
     f->rax = (uint64_t)r;
@@ -987,4 +995,58 @@ static int64_t sys_mouse(uint64_t ptr) {
     mouse_set_owner(task_current()->pid);
     mouse_read(&m->col, &m->row, &m->buttons, &m->wheel);
     return 1;
+}
+
+/* gfx(op, arg): pixels for programs such as the image viewer. */
+static int64_t sys_gfx(uint64_t op, uint64_t arg) {
+    uint32_t width, height, cell_w, cell_h, grid_x, grid_y;
+    fbcon_geometry(&width, &height, &cell_w, &cell_h, &grid_x, &grid_y);
+    if (!width || !fbcon_active()) return SYSERR_NOENT;            // VGA text mode
+    uint32_t top = grid_y + (uint32_t)print_status_rows() * cell_h;
+    int me = task_current()->pid;
+
+    switch (op) {
+        case GFX_INFO: {
+            if (!user_range_ok(arg, sizeof(struct os_gfx_info), 1)) return SYSERR_FAULT;
+            struct os_gfx_info *info = (struct os_gfx_info *)arg;
+            info->width = (int)width;
+            info->height = (int)height;
+            info->top = (int)top;
+            info->cell_w = (int)cell_w;
+            info->cell_h = (int)cell_h;
+            return 0;
+        }
+        case GFX_BEGIN:
+            if (foreground_pid != me) return SYSERR_PERM;
+            if (graphics_owner && graphics_owner != me) return SYSERR_AGAIN;
+            graphics_owner = me;
+            print_set_graphics(1);
+            fbcon_fill(0, top, width, height - top, 0);
+            return 0;
+        case GFX_BLIT: {
+            if (graphics_owner != me) return SYSERR_PERM;
+            if (!user_range_ok(arg, sizeof(struct os_blit), 0)) return SYSERR_FAULT;
+            struct os_blit b = *(const struct os_blit *)arg;
+            if (b.w <= 0 || b.h <= 0 || b.stride < b.w || b.w > 16384 || b.h > 16384) return SYSERR_BADCALL;
+            uint64_t bytes = ((uint64_t)(b.h - 1) * (uint64_t)b.stride + (uint64_t)b.w) * 4;
+            if (!user_range_ok((uint64_t)(uintptr_t)b.pixels, bytes, 0)) return SYSERR_FAULT;
+            // Keep off the status bar: skip rows above `top`.
+            if (b.y < (int)top) {
+                int skip = (int)top - b.y;
+                if (skip >= b.h) return 0;
+                b.pixels += (uint64_t)skip * (uint64_t)b.stride;
+                b.h -= skip;
+                b.y = (int)top;
+            }
+            fbcon_blit(b.x, b.y, b.w, b.h, (const uint32_t *)b.pixels, b.stride);
+            return 0;
+        }
+        case GFX_END:
+            if (graphics_owner != me) return SYSERR_PERM;
+            graphics_owner = 0;
+            print_set_graphics(0);
+            return 0;
+        default:
+            return SYSERR_BADCALL;
+    }
 }

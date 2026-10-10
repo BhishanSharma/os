@@ -114,6 +114,7 @@ volatile uint16_t* print_text_cells(void) {
 /* Mouse pointer and selection (whole-grid cell indexes, status row included):
  * drawn with foreground and background swapped. */
 static int pointer_cell = -1;
+static int graphics_mode;        /* a program draws pixels: leave the text area alone */
 static int select_from = -1, select_to = -1;
 
 static uint8_t shown_color(int i) {
@@ -126,7 +127,8 @@ static uint8_t shown_color(int i) {
 void print_flush(void) {
     if (screen != shadow || !fbcon_active()) return;
     int cursor = (!cursor_hidden && col < NUM_COLS) ? (int)((row + status_rows) * NUM_COLS + col) : -1;
-    for (int i = 0; i < (VISIBLE_ROWS + status_rows) * VISIBLE_COLS; i++) {
+    int last = graphics_mode ? status_rows * VISIBLE_COLS : (VISIBLE_ROWS + status_rows) * VISIBLE_COLS;
+    for (int i = 0; i < last; i++) {
         uint8_t c = shown_color(i);
         int changed = !drawn_valid || shadow[i].character != drawn[i].character ||
                       c != drawn[i].color || i == cursor || i == drawn_cursor;
@@ -1037,4 +1039,27 @@ size_t print_selection_text(char *out, size_t size) {
     }
     out[n] = 0;
     return n;
+}
+
+/* ---- Graphics mode (a program draws images) ------------------------------ */
+
+void print_set_graphics(int on) {
+    if (screen != shadow || !fbcon_active() || graphics_mode == on) return;
+    graphics_mode = on;
+    if (!on) {                                   // give the screen back: redraw it all
+        uint32_t w, h, cw, ch, gx, gy;
+        fbcon_geometry(&w, &h, &cw, &ch, &gx, &gy);
+        fbcon_fill(0, 0, w, h, 0);
+        drawn_valid = 0;
+        drawn_cursor = -1;
+    }
+    print_flush();
+}
+
+int print_graphics_mode(void) {
+    return graphics_mode;
+}
+
+size_t print_status_rows(void) {
+    return (size_t)status_rows;
 }

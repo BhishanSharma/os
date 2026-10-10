@@ -63,6 +63,12 @@ size_t print_grid_rows(void);                   /* rows including the status bar
 void print_set_pointer(int col, int row);       /* -1: hide */
 void print_set_selection(int c0, int r0, int c1, int r1);   /* c0 < 0: clear */
 size_t print_selection_text(char *out, size_t size);
+
+/* Graphics mode: a program draws pixels below the status bar, so the console
+ * stops drawing its text area; switching it off redraws the whole screen. */
+void print_set_graphics(int on);
+int print_graphics_mode(void);
+size_t print_status_rows(void);
 void print_hide_cursor(void);   /* framebuffer console: stop drawing the cursor (panic screen) */
 /* Group many screen updates (e.g. a full-screen redraw) into one framebuffer
  * redraw at print_batch_end(). Calls nest. */

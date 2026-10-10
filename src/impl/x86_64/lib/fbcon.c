@@ -92,3 +92,41 @@ void fbcon_draw_cell(int col, int row, uint8_t ch, uint8_t attr, int cursor) {
         }
     }
 }
+
+/* ---- Pixels for programs (image viewer) ---------------------------------- */
+
+void fbcon_geometry(uint32_t *width, uint32_t *height, uint32_t *cell_w, uint32_t *cell_h,
+                    uint32_t *grid_x, uint32_t *grid_y) {
+    *width = active ? fb.width : 0;
+    *height = active ? fb.height : 0;
+    *cell_w = GLYPH_W * scale;
+    *cell_h = GLYPH_H * scale;
+    *grid_x = origin_x;
+    *grid_y = origin_y;
+}
+
+void fbcon_fill(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t rgb) {
+    if (!active || x >= fb.width || y >= fb.height) return;
+    if (w > fb.width - x) w = fb.width - x;
+    if (h > fb.height - y) h = fb.height - y;
+    uint32_t v = pack((uint8_t)(rgb >> 16), (uint8_t)(rgb >> 8), (uint8_t)rgb);
+    for (uint32_t j = 0; j < h; j++)
+        for (uint32_t i = 0; i < w; i++) put_pixel(x + i, y + j, v);
+}
+
+/* `w` x `h` pixels of 0x00RRGGBB from `src` (rows `stride` pixels apart) at
+ * (x, y), clipped to the screen. */
+void fbcon_blit(int x, int y, int w, int h, const uint32_t *src, int stride) {
+    if (!active) return;
+    for (int j = 0; j < h; j++) {
+        int sy = y + j;
+        if (sy < 0 || (uint32_t)sy >= fb.height) continue;
+        const uint32_t *row = src + (int64_t)j * stride;
+        for (int i = 0; i < w; i++) {
+            int sx = x + i;
+            if (sx < 0 || (uint32_t)sx >= fb.width) continue;
+            uint32_t c = row[i];
+            put_pixel((uint32_t)sx, (uint32_t)sy, pack((uint8_t)(c >> 16), (uint8_t)(c >> 8), (uint8_t)c));
+        }
+    }
+}
