@@ -35,9 +35,9 @@ The ISO ends up at `dist/x86_64/kernel.iso`.
 | -------------- | -------------------------------------------------------------------------------- |
 | Boot           | GRUB (Multiboot2) -> 32-bit stub -> long mode -> `kernel_main`                   |
 | Display        | Framebuffer console (BIOS and UEFI) or VGA text, boot screen, status bar, 8 themes, scrollback; output mirrored to COM1; `resolution`/`font`, follows the VirtualBox window |
-| Mouse          | PS/2 mouse with wheel (and VirtualBox mouse integration): pointer, wheel scrolls the output, drag to select and copy, right/middle click pastes; programs read it with `getmouse` (try `paint`) |
+| Mouse          | PS/2 mouse with wheel (and VirtualBox mouse integration): pointer, wheel scrolls the output, drag to select, Ctrl+C copies the selection, Ctrl+V pastes; programs read it with `getmouse` (try `paint`) |
 | Exceptions     | Handlers for CPU vectors 0-31, panic screen with register dump, stack guard page  |
-| Input          | PS/2 keyboard and mouse; USB keyboards and mice (xHCI driver); I2C laptop touchpads (HID over I2C, Precision Touchpad gestures: tap, two-finger scroll and right click); command history, arrow keys |
+| Input          | PS/2 keyboard and mouse; USB keyboards and mice (xHCI driver); I2C laptop touchpads (HID over I2C, Precision Touchpad gestures: tap to click, two-finger scroll, press-and-drag to select); command history, arrow keys |
 | Real hardware  | Boots from a USB stick on UEFI laptops: falls back to the local APIC timer when the PIT gives no interrupts, reads the hardware clock as local time (as Windows keeps it), assigns PCI addresses the firmware left out, reads ACPI tables |
 | Memory         | Paging, heap sized from the bootloader memory map (`kmalloc`/`kfree`)            |
 | User space     | Programs run in ring 3, each with its own address space; preemptive multitasking with background jobs (`&`, `jobs`, `ps`, `fg`, `kill`); system calls (`int 0x80`) including `spawn`/`wait`, a small C library; the shell itself is a user program started at login; faults, Ctrl+C and `kill` end only the program. See [docs/USERSPACE.md](docs/USERSPACE.md) |
@@ -49,6 +49,7 @@ The ISO ends up at `dist/x86_64/kernel.iso`.
 | C subset       | `compile <file.c>` runs a tiny C subset on a stack VM (`printf` of a literal, `return N`) |
 | Networking     | RTL8139 / RTL8168 / Intel e1000, DHCP, DNS, TCP, `ping`, and `download` over HTTP or HTTPS (BearSSL TLS 1.2); see [docs/NETWORKING.md](docs/NETWORKING.md) |
 | Wi-Fi          | Intel AX101/AX201/AX211 ("So" family, iwlwifi firmware loaded from the RAM disk): scans, joins open and WPA2-Personal (AES) networks, then serves the network stack like an Ethernet card (DHCP, ping, DNS, HTTPS downloads). The WPA2 handshake is in `net/wpa.c`; the card encrypts. The joined network is saved in `/WIFI.CFG` and rejoined at boot and after a drop. Legacy 802.11a/g rates for now (up to 54 Mbit/s). Other chips: detection only (`wifi` names them) |
+| Sound          | Intel High Definition Audio (also the "smart sound" DSP controllers, used as plain HDA): codec graph walk from the speaker/headphone pins to a DAC, 48 kHz 16-bit stereo DMA playback; `beep`, `play` for WAV files (resampled), `volume` |
 
 See [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) for the honest list of rough edges.
 

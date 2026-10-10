@@ -124,9 +124,16 @@ void keyboard_scancode(uint8_t scancode) {
                 case 0x20: key_buffer[buffer_index++] = KEY_CTRL_D; break;  // D
                 case 0x12: key_buffer[buffer_index++] = KEY_CTRL_E; break;  // E
                 case 0x2E:                                                   // C
+                    if (mouse_selection_active()) {                          // copy the selection
+                        mouse_request_copy();
+                        return;
+                    }
                     key_buffer[buffer_index++] = KEY_CTRL_C;
                     keyboard_ctrl_c = 1;
                     break;
+                case 0x2F:                                                   // V: paste
+                    mouse_request_paste();
+                    return;
                 default: return;
             }
         } else {

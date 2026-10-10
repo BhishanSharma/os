@@ -25,6 +25,7 @@
 #include "drivers/usb.h"
 #include "drivers/touchpad.h"
 #include "drivers/iwlwifi.h"
+#include "drivers/hda.h"
 #include "drivers/display.h"
 #include "lib/fbcon.h"
 
@@ -49,6 +50,8 @@ static void cmd_kill(const char *arg);
 static void cmd_fg(const char *arg);
 static void cmd_programs(void);
 static void cmd_lspci(void);
+static int cmd_sound(const char *line);
+static int play_file(const char *name);
 static void cmd_resolution(const char *arg);
 static void cmd_font(const char *arg);
 int shell_execute_command(const char* line);
@@ -216,6 +219,11 @@ static void cmd_help(void)
     print_str("fat32info          - FAT32 volume parameters\n");
     print_str("crash <kind>       - trigger a CPU exception on purpose\n");
     print_str("                     (div0 ud gp pf null stack int3 irq panic)\n");
+    print_str("\n=== Sound ===\n");
+    print_str("sound              - the sound card, codec and speaker/headphone paths\n");
+    print_str("beep [hz] [ms]     - play a tone (default 880 Hz, 300 ms)\n");
+    print_str("play <file.wav>    - play a WAV file (Ctrl+C stops), e.g. play /CHIME.WAV\n");
+    print_str("volume [0-100]     - show or set the volume\n");
     print_str("\n=== Network ===\n");
     print_str("ifconfig           - show MAC, IP settings and packet counters\n");
     print_str("wifi               - Wi-Fi adapters in this machine and what they need\n");
@@ -1219,6 +1227,16 @@ static int kernel_command(const char *line, int run_programs) {
         if (!need_root("wifi forget")) return 1;
         iwl_forget();
     }
+    else if (strcmp(line, "sound") == 0 || strncmp(line, "beep", 4) == 0 || strncmp(line, "play ", 5) == 0 ||
+             strncmp(line, "volume", 6) == 0)
+    {
+        if ((line[0] == 'b' && line[4] && line[4] != ' ') || (line[0] == 'v' && line[6] && line[6] != ' '))
+        {
+            kprintf("%s: unknown command (`help` lists them, `programs` the programs)\n", line);
+            return 1;
+        }
+        cmd_sound(line);
+    }
     else if (strcmp(line, "lspci") == 0)
     {
         cmd_lspci();
@@ -1740,4 +1758,107 @@ static void cmd_font(const char *arg)
         print_str("font: too large for this screen (needs at least 40x10 cells)\n");
     else
         show_display();
+}
+
+/* sound, beep, play, volume */
+static uint32_t parse_number(const char **p, uint32_t fallback)
+{
+    while (**p == ' ') (*p)++;
+    if (**p < '0' || **p > '9') return fallback;
+    uint32_t v = 0;
+    while (**p >= '0' && **p <= '9') v = v * 10 + (uint32_t)(*(*p)++ - '0');
+    return v;
+}
+
+static int cmd_sound(const char *line)
+{
+    if (strcmp(line, "sound") == 0)
+    {
+        sound_print_info();
+        return 0;
+    }
+    if (strncmp(line, "volume", 6) == 0)
+    {
+        const char *p = line + 6;
+        uint32_t v = parse_number(&p, 1000);
+        if (v != 1000) sound_set_volume((int)v);
+        kprintf("Volume %d%%\n", sound_get_volume());
+        return 0;
+    }
+    if (!sound_ready())
+    {
+        print_str("No sound output (`sound` says why).\n");
+        return 1;
+    }
+    if (strncmp(line, "beep", 4) == 0)
+    {
+        const char *p = line + 4;
+        uint32_t hz = parse_number(&p, 880), ms = parse_number(&p, 300);
+        if (ms > 10000) ms = 10000;
+        int r = sound_beep(hz, ms);
+        if (r < 0) print_str("beep: the sound card did not play (`sound` for details)\n");
+        return r < 0;
+    }
+    const char *name = line + 5;
+    while (*name == ' ') name++;
+    /* The FAT32 calls look a name up in the current folder: go to the file's
+     * folder for the read, and back afterwards. */
+    char cwd[256], dir[256];
+    cwd[0] = 0;
+    const char *slash = 0;
+    for (const char *q = name; *q; q++)
+        if (*q == '/') slash = q;
+    if (slash)
+    {
+        size_t n = (size_t)(slash - name);
+        if (n >= sizeof(dir)) n = sizeof(dir) - 1;
+        memcpy(dir, name, n);
+        dir[n] = 0;
+        if (n == 0) { dir[0] = '/'; dir[1] = 0; }
+        if (fat32_get_current_directory(cwd, sizeof(cwd)) != 0) cwd[0] = 0;
+        if (fat32_change_directory(dir) != 0)
+        {
+            kprintf("play: %s: no such folder\n", dir);
+            return 1;
+        }
+        name = slash + 1;
+    }
+    int r = play_file(name);
+    if (cwd[0]) fat32_change_directory(cwd);
+    return r;
+}
+
+static int play_file(const char *name)
+{
+    if (!fat32_file_exists(name))
+    {
+        kprintf("play: %s: no such file\n", name);
+        return 1;
+    }
+    uint32_t size = fat32_get_file_size(name);
+    if (size == 0 || size > 64u * 1024 * 1024)
+    {
+        kprintf("play: %s: %s\n", name, size ? "too large (64 MiB at most)" : "empty file");
+        return 1;
+    }
+    uint8_t *data = kmalloc(size);
+    if (!data)
+    {
+        print_str("play: out of memory\n");
+        return 1;
+    }
+    int got = fat32_read_file(name, data, size);
+    int r = -1;
+    const char *error = 0;
+    if (got == FAT32_ERR_PERMISSION) kprintf("play: %s: permission denied\n", name);
+    else if (got < (int)size) kprintf("play: %s: could not read it\n", name);
+    else
+    {
+        r = sound_play_wav(data, size, &error);
+        if (error) kprintf("play: %s: %s\n", name, error);
+        else if (r < 0) print_str("play: the sound card did not play (`sound` for details)\n");
+        else if (r == 1) print_str("^C\n");
+    }
+    kfree(data);
+    return r < 0;
 }

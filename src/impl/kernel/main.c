@@ -24,6 +24,7 @@
 #include "sys/task.h"
 #include "drivers/wifi.h"
 #include "drivers/iwlwifi.h"
+#include "drivers/hda.h"
 #include "drivers/display.h"
 #include "drivers/mouse.h"
 #include "drivers/apic.h"
@@ -248,6 +249,9 @@ void kernel_main() {
         int mice = usb_init();
         print_boot_status(mice > 0 ? BOOT_OK : BOOT_WARN, "USB", "%s%s", usb_description(),
                           mice == 0 ? " (plug a mouse in any time)" : "");
+        char sound_how[96];
+        int snd = sound_init(sound_how, sizeof(sound_how));
+        print_boot_status(snd == 0 ? BOOT_OK : BOOT_WARN, "Sound", "%s", sound_how);
         int tp = touchpad_init();
         print_boot_status(tp == 0 ? BOOT_OK : BOOT_WARN, "Touchpad", "%s", touchpad_description());
     }

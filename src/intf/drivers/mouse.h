@@ -1,10 +1,11 @@
 // mouse.h - PS/2 mouse (and VirtualBox mouse integration)
 //
 // The mouse moves a pointer over the text console. Without a program that
-// asks for the mouse: the wheel scrolls through earlier output, dragging with
-// the left button selects text (and copies it), and the right or middle
-// button pastes it as if it were typed. A program that calls getmouse() gets
-// the pointer and buttons instead while it is in the foreground.
+// asks for the mouse: the wheel scrolls through earlier output and dragging
+// with the left button selects text. Copying and pasting are keyboard only:
+// Ctrl+C copies the selection (without one it interrupts, as always), Ctrl+V
+// types the copied text. A program that calls getmouse() gets the pointer and
+// buttons instead while it is in the foreground.
 #ifndef MOUSE_H
 #define MOUSE_H
 
@@ -37,6 +38,12 @@ void mouse_handle_byte(uint8_t byte);
 
 /* Called often while idle: move the pointer, scroll, select, paste. */
 void mouse_poll(void);
+
+/* For the keyboard interrupt: is text selected? Then Ctrl+C copies it. The
+ * copy and the paste happen at the next mouse_poll(), outside the interrupt. */
+int mouse_selection_active(void);
+void mouse_request_copy(void);
+void mouse_request_paste(void);
 
 /* For programs (getmouse): the pointer cell in text-area coordinates (row -1
  * is the status bar), buttons held, wheel steps since the last call

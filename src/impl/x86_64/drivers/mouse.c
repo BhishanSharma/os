@@ -98,6 +98,11 @@ static req_mouse_t vbox_req;          /* static: below 4 GiB */
 
 /* Console use: selection and clipboard. */
 static int selecting, select_c, select_r, select_moved;
+static volatile int has_selection, copy_request, paste_request;
+
+int mouse_selection_active(void) { return has_selection; }
+void mouse_request_copy(void) { copy_request = 1; }
+void mouse_request_paste(void) { paste_request = 1; }
 static char clipboard[4096];
 
 int mouse_present(void) { return present; }
@@ -231,21 +236,35 @@ static void button_changes(uint8_t old, uint8_t now) {
     if ((now & MOUSE_LEFT) && !(old & MOUSE_LEFT)) {           // press: start a selection
         selecting = 1;
         select_moved = 0;
+        has_selection = 0;
         select_c = c;
         select_r = r;
         print_set_selection(-1, 0, 0, 0);
     }
-    if (!(now & MOUSE_LEFT) && (old & MOUSE_LEFT) && selecting) {   // release: copy it
+    if (!(now & MOUSE_LEFT) && (old & MOUSE_LEFT) && selecting) {   // release: keep it shown
         selecting = 0;
-        if (select_moved) print_selection_text(clipboard, sizeof(clipboard));
-        else print_set_selection(-1, 0, 0, 0);                 // a plain click
+        if (!select_moved) print_set_selection(-1, 0, 0, 0);   // a plain click
     }
-    if (((now & MOUSE_RIGHT) && !(old & MOUSE_RIGHT)) || ((now & MOUSE_MIDDLE) && !(old & MOUSE_MIDDLE)))
+    // Other buttons do nothing here: copy and paste are Ctrl+C and Ctrl+V.
+}
+
+/* Ctrl+C with text selected, Ctrl+V: asked for by the keyboard interrupt. */
+static void clipboard_requests(void) {
+    if (copy_request) {
+        copy_request = 0;
+        if (has_selection) print_selection_text(clipboard, sizeof(clipboard));
+        has_selection = 0;
+        print_set_selection(-1, 0, 0, 0);
+    }
+    if (paste_request) {
+        paste_request = 0;
         paste();
+    }
 }
 
 void mouse_poll(void) {
     touchpad_poll();                                           // I2C touchpads are polled
+    clipboard_requests();
     if (!present) return;
     int cols = grid_cols(), rows = grid_rows();
     int moved = 0;
@@ -304,7 +323,10 @@ void mouse_poll(void) {
     cell_of_pointer(&c, &r);
     if (moved && selecting && console_owns_mouse()) {
         if (c != select_c || r != select_r) select_moved = 1;
-        if (select_moved) print_set_selection(select_c, select_r, c, r);
+        if (select_moved) {
+            print_set_selection(select_c, select_r, c, r);
+            has_selection = 1;
+        }
     }
     print_set_pointer(c, r);
 }

@@ -118,6 +118,10 @@ disk the accounts last until reboot.
 | `wifi disconnect`          | (root) Leave the network and stop reconnecting |
 | `wifi forget`              | (root) Delete the saved network (`/WIFI.CFG`) |
 | `wifi start`               | (root) Start the card step by step, printing each stage (for diagnosing) |
+| `sound`                    | The sound controller, codec, and the paths from the speaker/headphone pins to a DAC |
+| `beep [hz] [ms]`           | Play a tone (default 880 Hz, 300 ms) |
+| `play <file.wav>`          | Play an uncompressed WAV file (8/16-bit, mono/stereo, any rate); Ctrl+C stops. Try `play /CHIME.WAV` |
+| `volume [0-100]`           | Show or set the playback volume |
 | `nettest`                  | Send an ARP request to the gateway and wait for the reply (proves TX + RX work) |
 | `ping <ip> [count]`        | ICMP echo to a dotted IPv4 address (default 4, max 1000), one per second; any key stops it. Prints per-reply RTT and a loss/min/avg/max summary. |
 | `download <url> [file]`    | Download an `http://` or `https://` URL and save it to FAT32 (HTTPS uses BearSSL TLS 1.2). |
@@ -147,13 +151,14 @@ pointer, shown as an inverted cell, over the console:
 | Action                     | What happens                                             |
 | -------------------------- | -------------------------------------------------------- |
 | Wheel                      | Scrolls through earlier output (like Shift+Up/Down); typing or new output jumps back |
-| Drag with the left button  | Selects text, highlighted; releasing copies it            |
-| Right or middle click      | Pastes the copied text as if it were typed               |
+| Drag with the left button  | Selects text, highlighted until the next click            |
+| Ctrl+C                     | With text selected: copies it. Without: interrupts, as always |
+| Ctrl+V                     | Types the copied text                                    |
 
 A program that reads the mouse (`getmouse`, e.g. `paint`) takes it over while it is
 in the foreground. Under VirtualBox the pointer follows the host's pointer directly
 (mouse integration), so the VM does not capture the mouse. The pointer needs the
-framebuffer console; in VGA text mode only the wheel and paste work.
+framebuffer console; in VGA text mode only the wheel and Ctrl+V work.
 
 ## Editor
 
