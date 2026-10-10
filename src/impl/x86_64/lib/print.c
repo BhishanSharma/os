@@ -879,3 +879,68 @@ void print_set_cursor_visible(int visible) {
     cursor_hidden = !visible;
     move_cursor();
 }
+
+/* ---- Resizing (the screen mode changed) ---------------------------------- */
+
+extern void kfree(void *ptr);
+
+/* New grid size: `cols` x `total_rows` cells, status bar included. The
+ * scrollback is copied to the new width (long lines are cut, short ones
+ * padded) and the newest lines fill the screen again. */
+void print_resize(size_t cols, size_t total_rows) {
+    if (screen != shadow) return;                 // VGA text mode is fixed at 80x25
+    if (cols < 40) cols = 40;
+    if (cols > MAX_COLS) cols = MAX_COLS;
+    if (total_rows < 10) total_rows = 10;
+    if (total_rows > MAX_ROWS) total_rows = MAX_ROWS;
+
+    // The line being typed, which is not in the scrollback yet.
+    struct Char current[MAX_COLS];
+    size_t old_cols = num_cols;
+    for (size_t c = 0; c < MAX_COLS; c++)
+        current[c] = c < old_cols ? buffer[c + old_cols * row] : (struct Char){ ' ', color };
+
+    // Scrollback at the new width, oldest line first.
+    int lines = scrollback_total_lines < scrollback_capacity ? scrollback_total_lines : scrollback_capacity;
+    int capacity = scrollback_capacity;
+    struct Char *old = scrollback_buffer;
+    struct Char *fresh = scrollback_expanded ? kmalloc((size_t)capacity * cols * sizeof(struct Char)) : 0;
+    if (!fresh) {                                  // early buffer, or no memory: reuse it, drop the history
+        fresh = old;
+        capacity = old == early_buffer ? EARLY_SCROLLBACK_LINES
+                                       : (int)((size_t)scrollback_capacity * old_cols / cols);
+        lines = 0;
+    } else {
+        int oldest = (scrollback_write_line - lines + scrollback_capacity) % scrollback_capacity;
+        for (int i = 0; i < lines; i++) {
+            const struct Char *src = &old[(size_t)((oldest + i) % scrollback_capacity) * old_cols];
+            for (size_t c = 0; c < cols; c++)
+                fresh[(size_t)i * cols + c] = c < old_cols ? src[c] : (struct Char){ ' ', color };
+        }
+        kfree(old);
+    }
+    scrollback_buffer = fresh;
+    scrollback_capacity = capacity;
+    scrollback_total_lines = lines;
+    scrollback_write_line = lines % capacity;
+    scrollback_view_offset = 0;
+
+    num_cols = cols;
+    num_rows = total_rows - status_rows;
+    buffer = screen + num_cols * status_rows;
+    for (size_t i = 0; i < total_rows * num_cols; i++) shadow[i] = (struct Char){ ' ', color };
+
+    // The newest lines, then the current one on the last used row.
+    size_t shown = (size_t)lines < num_rows - 1 ? (size_t)lines : num_rows - 1;
+    for (size_t r = 0; r < shown; r++) {
+        int line = lines - (int)shown + (int)r;
+        for (size_t c = 0; c < num_cols; c++) buffer[c + num_cols * r] = SB(line, c);
+    }
+    row = shown;
+    for (size_t c = 0; c < num_cols; c++) buffer[c + num_cols * row] = current[c];
+    if (col >= num_cols) col = num_cols - 1;
+
+    drawn_valid = 0;
+    drawn_cursor = -1;
+    move_cursor();
+}

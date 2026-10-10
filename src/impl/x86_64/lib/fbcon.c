@@ -31,11 +31,21 @@ static void put_pixel(uint32_t x, uint32_t y, uint32_t value) {
     else { p[0] = (uint8_t)value; p[1] = (uint8_t)(value >> 8); p[2] = (uint8_t)(value >> 16); }
 }
 
+static uint32_t forced_scale;   /* 0: automatic */
+
+void fbcon_set_scale(uint32_t s) { forced_scale = s > 4 ? 4 : s; }
+uint32_t fbcon_get_scale(void) { return scale; }
+
 static uint32_t pick_scale(const fb_info_t *info) {
-    /* Largest whole-number scale that still leaves room for 80x25 characters. */
-    uint32_t sx = info->width / (80 * GLYPH_W), sy = info->height / (25 * GLYPH_H);
-    uint32_t s = sx < sy ? sx : sy;
-    return s ? s : 1;
+    if (forced_scale) return forced_scale;
+    /* Normal size (x1), made larger only on big screens, where the text would
+     * otherwise be more than 160 columns wide and tiny: 1920x1080 gives 120x33
+     * at x2, 1280x800 gives 160x50 at x1. Never less than 80x25. */
+    uint32_t s = 1;
+    while (info->width / (GLYPH_W * s) > 160 && info->width / (GLYPH_W * (s + 1)) >= 80 &&
+           info->height / (GLYPH_H * (s + 1)) >= 25)
+        s++;
+    return s;
 }
 
 void fbcon_grid_size(const fb_info_t *info, uint32_t *cols, uint32_t *rows) {

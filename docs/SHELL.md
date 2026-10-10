@@ -119,6 +119,11 @@ disk the accounts last until reboot.
 `monokai`, `gruvbox`, `solarized`, `matrix`, `cyberpunk`. `demo` shows the
 message styles.
 
+`resolution` shows the screen mode and text grid; `resolution 1280x800` changes it on
+QEMU's standard VGA and VirtualBox (the console gets more or fewer rows and columns, and
+keeps its scrollback). Under VirtualBox the screen follows the VM window by itself.
+`font 1`..`font 4` sets the text size (`font auto`: x1, larger only past 160 columns).
+
 > Files live on the ATA disk when there is one (QEMU's `disk.img`), otherwise on the
 > **RAM disk** GRUB loads from the boot medium. RAM disk changes are lost at reboot.
 >

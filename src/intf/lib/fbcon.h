@@ -11,9 +11,9 @@ typedef struct {
 } fb_info_t;
 
 /* Text console drawn into a framebuffer: a grid of VGA-style cells (CP437
- * character + attribute byte) rendered with an 8x16 font. The font is scaled by
- * the largest whole number that still fits 80x25 characters, and the grid fills
- * the rest of the screen (e.g. 100x37 at 800x600, 120x33 at 1920x1080). */
+ * character + attribute byte) rendered with an 8x16 font, scaled up only on
+ * big screens (more than 160 columns at x1); the grid fills the screen
+ * (e.g. 100x37 at 800x600, 160x50 at 1280x800, 120x33 at 1920x1080). */
 #define FBCON_MAX_COLS 256
 #define FBCON_MAX_ROWS 100
 
@@ -24,6 +24,11 @@ void fbcon_grid_size(const fb_info_t *fb, uint32_t *cols, uint32_t *rows);
  * unsupported pixel format or a screen too small for a usable grid. */
 int  fbcon_init(const fb_info_t *fb);
 int  fbcon_active(void);
+
+/* Font scale: 1-4, or 0 for automatic (x1, larger past 160 columns). Takes
+ * effect at the next fbcon_init. */
+void fbcon_set_scale(uint32_t scale);
+uint32_t fbcon_get_scale(void);
 
 /* Draw one cell; `cursor` draws an underline cursor in it. */
 void fbcon_draw_cell(int col, int row, uint8_t ch, uint8_t attr, int cursor);

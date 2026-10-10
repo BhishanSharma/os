@@ -89,6 +89,10 @@ QEMU is the supported way to run it; `.\build.ps1 -Uefi` boots it with UEFI firm
 `dist\x86_64\kernel.iso` as an optical drive, and keep the default network card (Intel PRO/1000 MT
 Desktop, NAT). Turn on "Hardware Clock in UTC Time" (`VBoxManage modifyvm <vm> --rtc-use-utc on`),
 or the clock is 5:30 ahead. After a rebuild, just restart the VM: the ISO is replaced in place.
+Resize the VM window and the console follows: the OS asks VirtualBox's guest device for the window
+size (what Guest Additions do) and switches the screen mode, so a bigger window means more rows and
+columns (View > Auto-resize Guest Display must be on; give the VM 64 MB of video memory). Under QEMU
+or anywhere else, `resolution 1280x800` changes the mode by hand and `font 1`..`font 4` the text size.
 
 To try a real UEFI PC: write `dist\x86_64\kernel.iso` to a USB stick in DD/raw mode (e.g. Rufus
 "DD Image"), turn off Secure Boot (GRUB here is unsigned) and boot from USB. Laptops

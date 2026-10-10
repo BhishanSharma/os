@@ -22,6 +22,8 @@
 #include "sys/task.h"
 #include "drivers/pci.h"
 #include "drivers/wifi.h"
+#include "drivers/display.h"
+#include "lib/fbcon.h"
 
 #define MAX_TEST_ALLOCS 16
 static void *test_allocs[MAX_TEST_ALLOCS];
@@ -44,6 +46,8 @@ static void cmd_kill(const char *arg);
 static void cmd_fg(const char *arg);
 static void cmd_programs(void);
 static void cmd_lspci(void);
+static void cmd_resolution(const char *arg);
+static void cmd_font(const char *arg);
 int shell_execute_command(const char* line);
 static int kernel_command(const char *line, int run_programs);
 
@@ -216,6 +220,8 @@ static void cmd_help(void)
     print_str("netdebug <on|off>  - print a line for every received frame\n");
     print_str("\n=== Appearance ===\n");
     print_str("theme <name>       - change color theme\n");
+    print_str("resolution [WxH]   - show or change the screen mode, e.g. resolution 1280x800\n");
+    print_str("font [1-4|auto]    - text size (scale of the 8x16 font)\n");
     print_str("themes             - list available themes\n");
     print_str("demo               - show themed message examples\n");
 }
@@ -482,6 +488,14 @@ static int kernel_command(const char *line, int run_programs) {
     else if (users_command(line))
     {
         // whoami, id, users, useradd, userdel, passwd, su
+    }
+    else if (strcmp(line, "resolution") == 0 || strncmp(line, "resolution ", 11) == 0)
+    {
+        cmd_resolution(line + 10);
+    }
+    else if (strcmp(line, "font") == 0 || strncmp(line, "font ", 5) == 0)
+    {
+        cmd_font(line + 4);
     }
     else if (strcmp(line, "sysinfo") == 0 || strcmp(line, "neofetch") == 0)
     {
@@ -1554,4 +1568,77 @@ static void cmd_lspci(void)
     }
     kprintf("%d devices\n", n);
     kfree(devs);
+}
+
+static void show_display(void)
+{
+    uint32_t w, h;
+    display_get_mode(&w, &h);
+    kprintf("Screen %ux%u, text %ux%u, font x%u, adapter: %s\n", w, h, (uint32_t)print_get_cols(),
+            (uint32_t)print_get_rows() + 1, fbcon_get_scale(), display_adapter_name());
+    if (display_follows_window())
+        print_str("The screen follows the VirtualBox window: resize the window to change it.\n");
+}
+
+/* resolution [WxH] */
+static void cmd_resolution(const char *arg)
+{
+    while (*arg == ' ') arg++;
+    if (!fbcon_active())
+    {
+        print_str("resolution: VGA text mode (no framebuffer): fixed at 80x25\n");
+        return;
+    }
+    if (!*arg)
+    {
+        show_display();
+        if (display_can_resize()) print_str("Change it with e.g. `resolution 1280x800`.\n");
+        return;
+    }
+    uint32_t w = 0, h = 0;
+    while (*arg >= '0' && *arg <= '9') w = w * 10 + (uint32_t)(*arg++ - '0');
+    if (*arg == 'x' || *arg == 'X') arg++;
+    while (*arg >= '0' && *arg <= '9') h = h * 10 + (uint32_t)(*arg++ - '0');
+    if (!w || !h)
+    {
+        print_str("Usage: resolution <width>x<height>, e.g. resolution 1024x768\n");
+        return;
+    }
+    if (!display_can_resize())
+    {
+        kprintf("resolution: the mode was set by the firmware and this adapter (%s) cannot change it\n",
+                display_adapter_name());
+        return;
+    }
+    if (display_set_mode(w, h) != 0)
+        print_str("resolution: that mode does not fit in video memory\n");
+    else
+        show_display();
+}
+
+/* font [1-4|auto] */
+static void cmd_font(const char *arg)
+{
+    while (*arg == ' ') arg++;
+    if (!fbcon_active())
+    {
+        print_str("font: VGA text mode has a fixed font\n");
+        return;
+    }
+    if (!*arg)
+    {
+        kprintf("Font scale x%u (8x16 pixels per cell at x1). Use `font 1`..`font 4` or `font auto`.\n",
+                fbcon_get_scale());
+        return;
+    }
+    uint32_t scale = strcmp(arg, "auto") == 0 ? 0 : (*arg >= '1' && *arg <= '4' && !arg[1]) ? (uint32_t)(*arg - '0') : 99;
+    if (scale == 99)
+    {
+        print_str("Usage: font <1-4|auto>\n");
+        return;
+    }
+    if (display_set_font_scale(scale) != 0)
+        print_str("font: too large for this screen (needs at least 40x10 cells)\n");
+    else
+        show_display();
 }

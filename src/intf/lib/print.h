@@ -52,6 +52,9 @@ void vkprintf(const char* fmt, va_list args);
  * then lives in RAM and print_flush() draws what changed. */
 void print_use_shadow_buffer(size_t cols, size_t rows);   /* grid size, see fbcon_grid_size */
 void print_flush(void);
+/* The screen mode changed: `cols` x `total_rows` cells, status bar included
+ * (framebuffer console only). Keeps the scrollback and the current line. */
+void print_resize(size_t cols, size_t total_rows);
 void print_hide_cursor(void);   /* framebuffer console: stop drawing the cursor (panic screen) */
 /* Group many screen updates (e.g. a full-screen redraw) into one framebuffer
  * redraw at print_batch_end(). Calls nest. */

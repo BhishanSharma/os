@@ -23,6 +23,7 @@
 #include "sys/sysinfo.h"
 #include "sys/task.h"
 #include "drivers/wifi.h"
+#include "drivers/display.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
@@ -84,6 +85,7 @@ static void report_clock(void) {
 }
 
 static void statusbar_idle(void) {
+    display_poll();          // VirtualBox window resized?
     statusbar_update(0);
 }
 
@@ -98,7 +100,8 @@ void kernel_main() {
         uint32_t cols, rows;
         fbcon_grid_size(&fb, &cols, &rows);
         print_use_shadow_buffer(cols, rows);
-        paging_add_identity_region(fb.addr, (uint64_t)fb.pitch * fb.height);
+        // All of video memory if the mode can be changed later (`resolution`).
+        paging_add_identity_region(fb.addr, display_early_init(&fb));
     }
     boot_info.uefi = mb2_booted_from_uefi();
     // The memory map is in the multiboot info, which the heap may overwrite.
@@ -182,6 +185,7 @@ void kernel_main() {
     }
 
     expand_scrollback();
+    if (have_fb) display_init();
     print_boot_status(BOOT_OK, "Interrupts", "IDT, 8259 PIC, PIT timer at 100 Hz");
     print_boot_status(BOOT_OK, "Keyboard", "PS/2, US layout");
 
