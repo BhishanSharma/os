@@ -22,6 +22,7 @@
 #include "drivers/rtc.h"
 #include "sys/sysinfo.h"
 #include "sys/task.h"
+#include "drivers/wifi.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
@@ -189,6 +190,14 @@ void kernel_main() {
         print_boot_status(BOOT_OK, "Network", "%s, MAC %s", nic_name(), mac);
     } else {
         print_boot_status(BOOT_WARN, "Network", "no supported network card (RTL8139, RTL8168)");
+    }
+
+    if (wifi_detect() > 0) {
+        char name[80];
+        wifi_describe(wifi_get(0), name, sizeof(name));
+        print_boot_status(BOOT_OK, "Wi-Fi", "%s found (no driver yet: type `wifi`)", name);
+    } else {
+        print_boot_status(BOOT_WARN, "Wi-Fi", "no Wi-Fi adapter on PCI");
     }
 
     mount_filesystem();

@@ -46,6 +46,7 @@ The ISO ends up at `dist/x86_64/kernel.iso`.
 | Scripts        | Shell scripts with variables (`sh <file>`)                                       |
 | C subset       | `compile <file.c>` runs a tiny C subset on a stack VM (`printf` of a literal, `return N`) |
 | Networking     | RTL8139 / RTL8168, DHCP, DNS, TCP, `ping`, and `download` over HTTP or HTTPS (BearSSL TLS 1.2); see [docs/NETWORKING.md](docs/NETWORKING.md) |
+| Wi-Fi          | Detection only: the PCI bus is scanned at boot and `wifi` names the adapter (Intel, Qualcomm Atheros, Realtek, MediaTek, Broadcom chips), its Wi-Fi generation and the driver it would need; `lspci` lists every PCI device. No Wi-Fi driver yet |
 
 See [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) for the honest list of rough edges.
 

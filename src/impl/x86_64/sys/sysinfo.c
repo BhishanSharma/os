@@ -1,5 +1,6 @@
 // sysinfo.c - logo, status bar and the `sysinfo` command
 #include "sys/sysinfo.h"
+#include "drivers/wifi.h"
 #include "lib/print.h"
 #include "lib/string.h"
 #include "drivers/rtc.h"
@@ -199,11 +200,17 @@ void sysinfo_print(void) {
     } else {
         info_line("Network", "no supported network card");
     }
+    if (wifi_count() > 0) {
+        wifi_describe(wifi_get(0), buf, sizeof(buf));
+        info_line("Wi-Fi", "%s (no driver yet)", buf);
+    } else {
+        info_line("Wi-Fi", "none found");
+    }
     if (disk_selected() == DISK_RAM)
         info_line("Disk", "FAT32 on RAM disk (%u MiB, not saved)", (uint32_t)(disk_ramdisk_size() >> 20));
     else
         info_line("Disk", disk_selected() == DISK_ATA ? "FAT32 on ATA disk" : "none");
-    info_line("Shell", "tsh (type `help`)");
+    info_line("Shell", "SHELL.ELF, a user program (type `help`)");
     color_theme_t theme = print_get_current_theme();
     info_line("Theme", "%s", (unsigned)theme < sizeof(theme_names) / sizeof(theme_names[0]) ? theme_names[theme] : "?");
     rtc_time_t t;

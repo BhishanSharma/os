@@ -86,6 +86,7 @@ disk the accounts last until reboot.
 | `help`                     | List every command                                       |
 | `sysinfo` / `neofetch`     | OS, boot mode (UEFI/BIOS), CPU model, memory, display, network, disk, theme, time |
 | `dmesg`                    | The full boot log, including the driver messages hidden at boot |
+| `lspci`                    | Every device on the PCI bus: address, IDs, kind, maker, and the driver of this OS that runs it |
 | `clear`                    | Clear the screen                                         |
 | `echo <text>`              | Print text                                               |
 | `uptime`                   | Seconds since boot                                       |
@@ -107,6 +108,7 @@ disk the accounts last until reboot.
 | Command                    | Description                                              |
 | -------------------------- | -------------------------------------------------------- |
 | `ifconfig`                 | MAC address, IP settings, RX/TX packet counters          |
+| `wifi`                     | The Wi-Fi adapter in this machine: chip, Wi-Fi generation, PCI IDs, and what a driver for it needs (detection only; no Wi-Fi driver yet) |
 | `nettest`                  | Send an ARP request to the gateway and wait for the reply (proves TX + RX work) |
 | `ping <ip> [count]`        | ICMP echo to a dotted IPv4 address (default 4, max 1000), one per second; any key stops it. Prints per-reply RTT and a loss/min/avg/max summary. |
 | `download <url> [file]`    | Download an `http://` or `https://` URL and save it to FAT32 (HTTPS uses BearSSL TLS 1.2). |

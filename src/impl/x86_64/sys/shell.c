@@ -20,6 +20,8 @@
 #include "sys/process.h"
 #include "sys/users.h"
 #include "sys/task.h"
+#include "drivers/pci.h"
+#include "drivers/wifi.h"
 
 #define MAX_TEST_ALLOCS 16
 static void *test_allocs[MAX_TEST_ALLOCS];
@@ -41,6 +43,7 @@ static void cmd_ps(int programs_only);
 static void cmd_kill(const char *arg);
 static void cmd_fg(const char *arg);
 static void cmd_programs(void);
+static void cmd_lspci(void);
 int shell_execute_command(const char* line);
 static int kernel_command(const char *line, int run_programs);
 
@@ -182,6 +185,7 @@ static void cmd_help(void)
     print_str("help               - show this message\n");
     print_str("sysinfo            - this machine at a glance (also: neofetch)\n");
     print_str("dmesg              - full boot log, including driver messages\n");
+    print_str("lspci              - every device on the PCI bus, and its driver\n");
     print_str("clear              - clear screen\n");
     print_str("echo <text>        - print text\n");
     print_str("uptime             - seconds since boot\n");
@@ -204,6 +208,7 @@ static void cmd_help(void)
     print_str("                     (div0 ud gp pf null stack int3 irq panic)\n");
     print_str("\n=== Network ===\n");
     print_str("ifconfig           - show MAC, IP settings and packet counters\n");
+    print_str("wifi               - Wi-Fi adapters in this machine and what they need\n");
     print_str("dhcp               - get an IP address from the network's DHCP server\n");
     print_str("nettest            - send an ARP request to the gateway, wait for the reply\n");
     print_str("ping <ip> [count]  - send ICMP echo requests (default 4), e.g. ping 10.0.2.2\n");
@@ -1105,6 +1110,14 @@ static int kernel_command(const char *line, int run_programs) {
         if (!need_root("crash")) return 1;
         cmd_crash(line + 6);
     }
+    else if (strcmp(line, "wifi") == 0)
+    {
+        wifi_print_status();
+    }
+    else if (strcmp(line, "lspci") == 0)
+    {
+        cmd_lspci();
+    }
     else if (strcmp(line, "ifconfig") == 0)
     {
         net_print_ifconfig();
@@ -1495,4 +1508,48 @@ static void cmd_download(const char *args)
 
     if (strncmp(url, "https://", 8) == 0) net_download_https(url, out);
     else net_download_http(url, out);
+}
+
+/* Which driver of this OS runs a PCI device, if any. */
+static const char *pci_driver(const pci_device_t *d)
+{
+    if (d->vendor == 0x10EC && d->device == 0x8139) return "rtl8139";
+    if (d->vendor == 0x10EC && (d->device == 0x8168 || d->device == 0x8161 || d->device == 0x8169)) return "rtl8168";
+    if (d->class_code == 0x01 && d->subclass == 0x01) return "ata";
+    for (int i = 0; i < wifi_count(); i++)
+    {
+        const pci_device_t *w = &wifi_get(i)->pci;
+        if (w->bus == d->bus && w->slot == d->slot && w->func == d->func) return "Wi-Fi: no driver yet";
+    }
+    return 0;
+}
+
+static void cmd_lspci(void)
+{
+    pci_device_t *devs = kmalloc(64 * sizeof(pci_device_t));
+    if (!devs)
+    {
+        print_str("lspci: out of memory\n");
+        return;
+    }
+    int n = pci_scan(devs, 64);
+    for (int i = 0; i < n; i++)
+    {
+        const pci_device_t *d = &devs[i];
+        const char *vendor = pci_vendor_name(d->vendor), *driver = pci_driver(d);
+        kprintf("%02x:%02x.%x  %04x:%04x  ", d->bus, d->slot, d->func, d->vendor, d->device);
+        char cls[40];
+        k_snprintf(cls, sizeof(cls), "%-30s", pci_class_name(d->class_code, d->subclass, d->prog_if));
+        print_accent(cls);
+        kprintf(" %s", vendor ? vendor : "");
+        if (driver)
+        {
+            print_str("  [");
+            print_highlight(driver);
+            print_str("]");
+        }
+        print_str("\n");
+    }
+    kprintf("%d devices\n", n);
+    kfree(devs);
 }
