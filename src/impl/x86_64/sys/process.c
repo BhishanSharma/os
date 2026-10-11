@@ -1549,6 +1549,9 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
             mouse_pixel(&x, &y);
             return fbcon_cursor_set(c.pixels, c.w, c.h, c.hot_x, c.hot_y, x, y) == 0 ? 0 : SYSERR_NOMEM;
         }
+        case GFX_PRESENT:
+            if (graphics_owner != me) return SYSERR_PERM;
+            return fbcon_present() == 0 ? 0 : SYSERR_AGAIN;
         case GFX_END:
             if (graphics_owner != me) return SYSERR_PERM;
             graphics_owner = 0;

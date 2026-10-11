@@ -3,6 +3,7 @@
 #include "drivers/addr.h"
 #include "drivers/paging.h"
 #include "drivers/heap.h"
+#include "drivers/igfx.h"
 #include "lib/string.h"
 
 #define GLYPH_W 8
@@ -124,10 +125,16 @@ void fbcon_fill(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t rgb) {
 /* `w` x `h` pixels of 0x00RRGGBB from `src` (rows `stride` pixels apart) at
  * (x, y), clipped to the screen. */
 static int cursor_on(void);
+static int flip_on;
 static void cursor_blit(int x, int y, int w, int h, const uint32_t *src, int stride);
+static void flip_blit(int x, int y, int w, int h, const uint32_t *src, int stride);
 
 void fbcon_blit(int x, int y, int w, int h, const uint32_t *src, int stride) {
     if (!active) return;
+    if (flip_on) {
+        flip_blit(x, y, w, h, src, stride);
+        return;
+    }
     if (cursor_on()) {
         cursor_blit(x, y, w, h, src, stride);
         return;
@@ -173,8 +180,10 @@ static uint8_t cur_alpha[CUR_MAX * CUR_MAX];
 static int cur_w, cur_h, cur_hx, cur_hy, cur_x, cur_y, cur_shown;
 static volatile int fb_busy, cur_pending, cur_px, cur_py;
 
+static int hw_cursor;                  /* the graphics card draws it (igfx.c) */
+
 static int cursor_on(void) { return cur_shown && shadow; }
-int fbcon_cursor_active(void) { return cursor_on(); }
+int fbcon_cursor_active(void) { return hw_cursor || cursor_on(); }
 
 static inline uint32_t blend_rgb(uint32_t d, uint32_t c, uint32_t a) {
     uint32_t na = 255 - a;
@@ -234,9 +243,15 @@ static void cursor_blit(int x, int y, int w, int h, const uint32_t *src, int str
 
 /* The pointer's picture: 0xAARRGGBB, at most 64 x 64, hot spot (hx, hy).
  * w = 0 takes it away (and frees the shadow). -> 0, or -1. */
+static void flip_start(void);
+static void flip_stop(void);
+
 int fbcon_cursor_set(const uint32_t *argb, int w, int h, int hx, int hy, int x, int y) {
     if (!active) return -1;
     if (w <= 0) {
+        if (hw_cursor) igfx_cursor_off();
+        hw_cursor = 0;
+        flip_stop();
         cur_shown = 0;
         if (shadow) {
             kfree(shadow);
@@ -245,6 +260,11 @@ int fbcon_cursor_set(const uint32_t *argb, int w, int h, int hx, int hy, int x, 
         return 0;
     }
     if (w > CUR_MAX || h > CUR_MAX) return -1;
+    if (igfx_cursor_set(argb, w, h, hx, hy, x, y) == 0) {   /* the hardware's own cursor */
+        hw_cursor = 1;
+        flip_start();
+        return 0;
+    }
     if (!shadow) {
         shadow = kmalloc((uint64_t)fb.width * fb.height * 4);
         if (!shadow) return -1;
@@ -273,6 +293,10 @@ int fbcon_cursor_set(const uint32_t *argb, int w, int h, int hx, int hy, int x, 
 
 /* Called by the mouse driver, also from the timer interrupt. */
 void fbcon_cursor_move(int x, int y) {
+    if (hw_cursor) {
+        igfx_cursor_move(x, y);
+        return;
+    }
     if (!cursor_on() || (x == cur_x && y == cur_y)) return;
     if (fb_busy) {                         /* in the middle of a blit: right after it */
         cur_px = x;
@@ -295,4 +319,91 @@ void fbcon_cursor_move(int x, int y) {
         repaint(nx, ny, cur_w, cur_h);
     }
     fb_busy = 0;
+}
+
+/* ---- Page flipping ------------------------------------------------------------
+ * With the graphics card's help (igfx.c): programs draw into the shadow, and
+ * fbcon_present() brings the hidden buffer up to date (what changed in this
+ * frame and the one before, which it missed) and shows it at the next
+ * refresh. The screen never shows a frame half drawn. */
+
+#define MAX_RECTS 32
+typedef struct { int x0, y0, x1, y1; } rect_t;
+static rect_t now_rects[MAX_RECTS], last_rects[MAX_RECTS];
+static int now_n, last_n, front;          /* front: 0 the firmware's buffer, 1 ours */
+
+static void add_rect(rect_t *list, int *n, int x0, int y0, int x1, int y1) {
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int)fb.width) x1 = (int)fb.width;
+    if (y1 > (int)fb.height) y1 = (int)fb.height;
+    if (x1 <= x0 || y1 <= y0) return;
+    if (*n == MAX_RECTS) {                 /* full: one rectangle around them all */
+        for (int i = 1; i < *n; i++) {
+            if (list[i].x0 < list[0].x0) list[0].x0 = list[i].x0;
+            if (list[i].y0 < list[0].y0) list[0].y0 = list[i].y0;
+            if (list[i].x1 > list[0].x1) list[0].x1 = list[i].x1;
+            if (list[i].y1 > list[0].y1) list[0].y1 = list[i].y1;
+        }
+        *n = 1;
+    }
+    list[*n].x0 = x0; list[*n].y0 = y0; list[*n].x1 = x1; list[*n].y1 = y1;
+    (*n)++;
+}
+
+static void flip_start(void) {
+    uint32_t *back = igfx_back_buffer();
+    if (!back || !fast_format()) return;
+    if (!shadow) shadow = kmalloc((uint64_t)fb.width * fb.height * 4);
+    if (!shadow) return;
+    memset(shadow, 0, (uint64_t)fb.width * fb.height * 4);   /* the screen is black now */
+    now_n = last_n = 0;
+    add_rect(last_rects, &last_n, 0, 0, (int)fb.width, (int)fb.height);   /* ours holds nothing yet */
+    front = 0;
+    flip_on = 1;
+}
+
+static void flip_stop(void) {
+    if (!flip_on) return;
+    flip_on = 0;
+    if (front) igfx_flip(0);               /* the console draws into the firmware's buffer */
+    front = 0;
+}
+
+static void flip_blit(int x, int y, int w, int h, const uint32_t *src, int stride) {
+    int x0 = x < 0 ? 0 : x, x1 = x + w > (int)fb.width ? (int)fb.width : x + w;
+    if (x1 <= x0) return;
+    for (int j = 0; j < h; j++) {
+        int sy = y + j;
+        if (sy < 0 || (uint32_t)sy >= fb.height) continue;
+        memcpy(shadow + (uint64_t)sy * fb.width + x0, src + (int64_t)j * stride + (x0 - x), (size_t)(x1 - x0) * 4);
+    }
+    add_rect(now_rects, &now_n, x, y, x + w, y + h);
+}
+
+static void copy_rect(uint8_t *dst, const rect_t *r) {
+    for (int j = r->y0; j < r->y1; j++) {
+        const uint32_t *from = shadow + (uint64_t)j * fb.width + r->x0;
+        uint32_t *to = (uint32_t *)(dst + (uint64_t)j * fb.pitch) + r->x0;
+        uint64_t n = (uint64_t)(r->x1 - r->x0);
+        __asm__ volatile("rep movsl" : "+D"(to), "+S"(from), "+c"(n) : : "memory");
+    }
+}
+
+/* -> 0: shown at the next refresh (or nothing to do); -1: the last frame is
+ * not on the screen yet, call again. */
+int fbcon_present(void) {
+    if (!flip_on) return 0;
+    if (!now_n && !last_n) return 0;
+    if (!igfx_flip_done()) return -1;
+    int target = !front;
+    uint8_t *dst = target ? (uint8_t *)igfx_back_buffer() : fb_base;
+    for (int i = 0; i < now_n; i++) copy_rect(dst, &now_rects[i]);
+    for (int i = 0; i < last_n; i++) copy_rect(dst, &last_rects[i]);
+    igfx_flip(target);
+    front = target;
+    memcpy(last_rects, now_rects, sizeof(rect_t) * (size_t)now_n);
+    last_n = now_n;
+    now_n = 0;
+    return 0;
 }

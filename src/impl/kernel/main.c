@@ -1,3 +1,4 @@
+#include "drivers/igfx.h"
 #include "lib/print.h"
 #include "drivers/keyboard.h"
 #include "core/idt.h"
@@ -163,6 +164,7 @@ void kernel_main() {
     boot_info.uefi = mb2_booted_from_uefi();
     acpi_save_rsdp();
     efi_save_boot_info();                     // the firmware's runtime services (boot menu, reset)
+    int no_gpu = mb2_cmdline_has("nogpu");    // `nogpu`: no Intel graphics features (software pointer)
     int no_smp = mb2_cmdline_has("nosmp");    // the `nosmp` boot option (read now, for the same reason)
     // The memory map is in the multiboot info, which the heap may overwrite.
     int mem_regions = memory_init();
@@ -298,6 +300,10 @@ void kernel_main() {
     // Message-signalled interrupts (devices interrupt through the local APIC).
     if (have_ticks) msi_init();
     registry_scan_pci();                       // the device tree (`ioreg`)
+    if (have_fb && fbcon_active() && !no_gpu) {
+        if (igfx_init(&fb) == 0) print_boot_status(BOOT_OK, "Graphics", "%s", igfx_status());
+        else if (strncmp(igfx_status(), "no Intel", 8)) print_boot_status(BOOT_WARN, "Graphics", "%s", igfx_status());
+    }
     registry_add(0, "Memory", "memory", "%u MiB usable", (uint32_t)(get_total_memory() >> 20));
 
     // USB waits for the controller's answers, so it needs the ticks too.

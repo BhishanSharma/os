@@ -25,6 +25,7 @@ void *mmio_map(uint64_t phys, uint64_t size);
 /* Write-combining (the framebuffer); paging_pat_init() on each core first. */
 void *mmio_map_wc(uint64_t phys, uint64_t size);
 void paging_pat_init(void);
+void *paging_map_pages_wc(const uint64_t *phys, uint64_t n);
 #define LARGE_PAGE 0x200000ULL
 void map_large_page(uint64_t virt, uint64_t phys);   // 2 MiB, both 2 MiB aligned
 

@@ -232,6 +232,7 @@ struct os_task {
 #define GFX_BEGIN    1   /* take the screen below the status bar (cleared to black); arg 1: the whole screen -> 0 */
 #define GFX_BLIT     2   /* arg = struct os_blit *: 0x00RRGGBB pixels -> 0 */
 #define GFX_END      3   /* give it back: the console redraws (also when the program ends) */
+#define GFX_PRESENT  5   /* show what was blitted (at the next refresh) -> 0, SYSERR_AGAIN: not yet, call again */
 #define GFX_CURSOR   4   /* arg = struct os_cursor *: the kernel draws the pointer (0: stop) -> 0 */
 
 struct os_gfx_info {

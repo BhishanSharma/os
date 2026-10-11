@@ -42,6 +42,9 @@ void fbcon_blit(int x, int y, int w, int h, const uint32_t *src, int stride);
 int fbcon_cursor_set(const uint32_t *argb, int w, int h, int hx, int hy, int x, int y);
 void fbcon_cursor_move(int x, int y);
 int fbcon_cursor_active(void);
+/* Show what was blitted since the last call (page flipping on Intel
+ * graphics): 0, or -1 while the last frame is not on the screen yet. */
+int fbcon_present(void);
 
 /* Draw one cell; `cursor` draws an underline cursor in it. */
 void fbcon_draw_cell(int col, int row, uint8_t ch, uint8_t attr, int cursor);

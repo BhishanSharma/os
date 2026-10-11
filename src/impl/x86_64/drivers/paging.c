@@ -61,6 +61,15 @@ void paging_pat_init(void) {
     __asm__ volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
 }
 
+/* Scattered RAM pages one after another for the CPU, write-combining (a
+ * buffer the display engine reads). */
+void *paging_map_pages_wc(const uint64_t *phys, uint64_t n) {
+    uint64_t va = mmio_next;
+    for (uint64_t i = 0; i < n; i++) map_page(va + i * PAGE_SIZE, phys[i], PAGE_PRESENT | PAGE_RW | 0x08);
+    mmio_next += (n + 1) * PAGE_SIZE;
+    return (void *)va;
+}
+
 void *mmio_map_wc(uint64_t phys, uint64_t size) {
     uint64_t first = phys & ~0xFFFULL, last = (phys + size + 0xFFF) & ~0xFFFULL;
     uint64_t va = mmio_next;

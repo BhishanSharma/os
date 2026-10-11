@@ -421,6 +421,46 @@ static uint64_t make_page_tables(void) {
 
 /* ---- Entry --------------------------------------------------------------------------------- */
 
+/* The screen's own resolution: the firmware often starts in a small mode
+ * (800x600) that the panel stretches. The screen's EDID names its native
+ * mode (the first detailed timing); without one, the largest mode. */
+typedef struct { uint32_t SizeOfEdid; uint8_t *Edid; } EFI_EDID_ACTIVE_PROTOCOL;
+
+static int edid_native(uint32_t *w, uint32_t *h) {
+    static const EFI_GUID edid_guid = { 0xbd8c1056, 0x9f36, 0x44ec, { 0x92, 0xa8, 0xa6, 0x33, 0x7f, 0x81, 0x79, 0x86 } };
+    EFI_EDID_ACTIVE_PROTOCOL *e;
+    if (EFI_ERROR(BS->LocateProtocol(&edid_guid, 0, (void **)&e)) || !e->Edid || e->SizeOfEdid < 128) return -1;
+    const uint8_t *t = e->Edid + 54;                     /* detailed timing 1 */
+    if (!t[0] && !t[1]) return -1;                       /* not a timing */
+    *w = (uint32_t)((t[4] >> 4) << 8 | t[2]);
+    *h = (uint32_t)((t[7] >> 4) << 8 | t[5]);
+    return *w && *h ? 0 : -1;
+}
+typedef EFI_STATUS (EFIAPI *gop_query_t)(EFI_GRAPHICS_OUTPUT_PROTOCOL *, uint32_t, uint64_t *,
+                                          EFI_GRAPHICS_OUTPUT_MODE_INFORMATION **);
+typedef EFI_STATUS (EFIAPI *gop_set_t)(EFI_GRAPHICS_OUTPUT_PROTOCOL *, uint32_t);
+
+static void best_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop) {
+    uint32_t nw = 0, nh = 0, largest = gop->Mode->Mode, exact = 0xFFFFFFFFu;
+    int native = edid_native(&nw, &nh) == 0;
+    uint64_t largest_area = gop->Mode->Info ? (uint64_t)gop->Mode->Info->HorizontalResolution *
+                                                  gop->Mode->Info->VerticalResolution : 0;
+    for (uint32_t m = 0; m < gop->Mode->MaxMode; m++) {
+        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info;
+        uint64_t size;
+        if (EFI_ERROR(((gop_query_t)gop->QueryMode)(gop, m, &size, &info))) continue;
+        if (info->PixelFormat == PixelBltOnly || info->HorizontalResolution > 3840) continue;
+        if (native && info->HorizontalResolution == nw && info->VerticalResolution == nh) exact = m;
+        uint64_t area = (uint64_t)info->HorizontalResolution * info->VerticalResolution;
+        if (area > largest_area) {
+            largest_area = area;
+            largest = m;
+        }
+    }
+    uint32_t best = exact != 0xFFFFFFFFu ? exact : largest;
+    if (best != gop->Mode->Mode) ((gop_set_t)gop->SetMode)(gop, best);
+}
+
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     ST = st;
     BS = st->BootServices;
@@ -504,6 +544,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     if (inst_efi) tag_module(inst_efi, efi_len, "install-loader");
 
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop;
+    if (!EFI_ERROR(BS->LocateProtocol(&gop_guid, 0, (void **)&gop)) && gop->Mode) best_mode(gop);
     if (!EFI_ERROR(BS->LocateProtocol(&gop_guid, 0, (void **)&gop)) && gop->Mode && gop->Mode->Info &&
         gop->Mode->Info->PixelFormat != PixelBltOnly) {
         EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *mi = gop->Mode->Info;

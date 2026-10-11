@@ -55,6 +55,7 @@ static int mouse_x, mouse_y, buttons;
 static int drag = -1, drag_dx, drag_dy, capture = -1;
 static char clock_text[24];
 static int menu_open, menu_hot = -1;
+static int unpresented;                          /* blitted, not yet shown (page flipping) */
 
 static const char *menu_items[] = { "About Terminal OS", "New Terminal", "Files", "Quit desktop" };
 #define MENU_ITEMS 4
@@ -477,7 +478,9 @@ static void compose(void) {
         if (!kernel_cursor) draw_cursor();
         gfx_blit(x0, y0, x1 - x0, y1 - y0, scr.px + (long)y0 * scr.stride + x0, scr.stride);
     }
+    if (ndmg) unpresented = 1;
     ndmg = 0;
+    if (unpresented && gfx_present() == 0) unpresented = 0;   /* tear-free on Intel graphics */
 }
 
 /* ---- Input --------------------------------------------------------------- */

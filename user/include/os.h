@@ -69,6 +69,7 @@ int gfx_begin(void);                         /* take the screen below the status
 int gfx_begin_full(void);                    /* the whole screen, status bar too (the desktop) */
 int gfx_blit(int x, int y, int w, int h, const unsigned int *pixels, int stride);   /* 0x00RRGGBB */
 int gfx_end(void);
+int gfx_present(void);                       /* after blits: shown at the next refresh; SYSERR_AGAIN: retry */
 /* The kernel draws the pointer (0xAARRGGBB picture), moving it as the mouse
  * moves: smooth whatever the program is doing. -> 0 */
 int gfx_cursor(int w, int h, int hot_x, int hot_y, const unsigned int *argb);                           /* the console redraws itself */

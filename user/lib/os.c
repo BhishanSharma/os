@@ -57,6 +57,7 @@ int gfx_cursor(int w, int h, int hot_x, int hot_y, const unsigned int *argb) {
     struct os_cursor c = { w, h, hot_x, hot_y, argb };
     return (int)os_syscall(SYS_GFX, GFX_CURSOR, w ? (long)&c : 0, 0);
 }
+int gfx_present(void)                           { return (int)os_syscall(SYS_GFX, GFX_PRESENT, 0, 0); }
 int gfx_end(void)                               { return (int)os_syscall(SYS_GFX, GFX_END, 0, 0); }
 
 int gfx_blit(int x, int y, int w, int h, const unsigned int *pixels, int stride) {

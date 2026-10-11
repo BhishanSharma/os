@@ -844,18 +844,22 @@ static int try_device(i2c_ctrl_t *c, uint8_t addr) {
     return -1;
 }
 
+/* Fast mode (400 kHz): the firmware's clock counts if it left some, else
+ * counts for the fastest input clock these controllers have (133 MHz on
+ * Alder Lake; 100-120 MHz elsewhere, which only makes it slower):
+ * high 0.83 us, low 1.65 us (the minimums are 0.6 and 1.3). */
 static void i2c_set_speed(i2c_ctrl_t *c, int fast) {
     i2c_disable(c);
     wr(c, IC_CON, 0x01 | ((fast ? 2u : 1u) << 1) | (1u << 5) | (1u << 6));
     if (fast) {
-        wr(c, 0x1C, c->fw_fs_h);                            /* IC_FS_SCL_HCNT / LCNT */
-        wr(c, 0x20, c->fw_fs_l);
+        int fw = c->fw_fs_h >= 40 && c->fw_fs_l >= 80 && c->fw_fs_h < 0x400 && c->fw_fs_l < 0x400;
+        wr(c, 0x1C, fw ? c->fw_fs_h : 110);                 /* IC_FS_SCL_HCNT / LCNT */
+        wr(c, 0x20, fw ? c->fw_fs_l : 220);
     }
 }
 
 static void try_fast_mode(void) {
     i2c_ctrl_t *c = tp_ctrl;
-    if (!c->fw_fs_h || !c->fw_fs_l || c->fw_fs_h > 0xFFFF || c->fw_fs_l > 0xFFFF) return;
     i2c_set_speed(c, 1);
     hid_desc_t check;
     if (try_hid_descriptor(c, tp_addr, tp_desc_reg, &check) == 0 && check.vendor == tp_desc.vendor &&
