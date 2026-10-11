@@ -163,8 +163,22 @@ static int copy_user_string(char *out, uint64_t ptr, size_t max) {
 }
 
 /* ---- Working directory ---------------------------------------------------
- * The FAT32 driver has one current directory (the shell's). File system calls
- * switch to the program's own for the duration of the call. */
+ * The FAT32 driver has one current directory: the kernel shell's. A program
+ * has its own, and its file system calls make every path absolute against it
+ * (user_path) instead of switching the driver's: with several cores, another
+ * task could switch it back while this one waits for the disk. Only kernel
+ * commands (kcommand), which use the driver's directory, switch it. */
+
+static const char *user_cwd(void) {
+    return P()->cwd[0] ? P()->cwd : "/";
+}
+
+/* Copy the program's path string at `ptr` and make it absolute. 0 on success. */
+static int user_path(uint64_t ptr, char *out, int size) {
+    char raw[MAX_PATH];
+    if (copy_user_string(raw, ptr, sizeof(raw)) != 0) return -1;
+    return vfs_absolute(user_cwd(), raw, out, size) == 0 ? 0 : -1;
+}
 
 static void enter_cwd(char *saved, uint32_t size) {
     saved[0] = 0;
@@ -257,8 +271,8 @@ static int file_grow(file_t *f, uint32_t need) {
 }
 
 static int64_t sys_open(uint64_t path_ptr, uint64_t mode) {
-    char path[MAX_PATH], saved[256];
-    if (copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
+    char path[MAX_PATH];
+    if (user_path(path_ptr, path, sizeof(path)) != 0) return SYSERR_FAULT;
     if (mode > OPEN_APPEND) return SYSERR_BADCALL;
     process_t *p = P();
     int fd = -1;
@@ -272,7 +286,6 @@ static int64_t sys_open(uint64_t path_ptr, uint64_t mode) {
     memcpy(f->path, path, sizeof(path));
 
     int64_t result = fd;
-    enter_cwd(saved, sizeof(saved));
     if (mode != OPEN_READ && !user_may_write(path)) {
         result = SYSERR_PERM;
     } else {
@@ -295,7 +308,6 @@ static int64_t sys_open(uint64_t path_ptr, uint64_t mode) {
             }
         }
     }
-    leave_cwd(saved);
     if (result < 0) {
         kfree(f->data);
         if (f->stream) kfree(f->stream);
@@ -308,13 +320,10 @@ static int64_t sys_open(uint64_t path_ptr, uint64_t mode) {
 
 static int64_t close_file(file_t *f) {
     int64_t result = 0;
-    if (f->mode != OPEN_READ) {
-        char saved[256];
-        enter_cwd(saved, sizeof(saved));
+    if (f->mode != OPEN_READ) {                     // f->path is absolute (sys_open)
         fat32_create_file(f->path);                 // fails harmlessly if it exists
         int r = fat32_write_file(f->path, f->data ? f->data : (const uint8_t *)"", f->size);
         if (r < 0) result = r == FAT32_ERR_PERMISSION ? SYSERR_PERM : SYSERR_IO;
-        leave_cwd(saved);
     }
     kfree(f->data);
     if (f->stream) kfree(f->stream);
@@ -671,10 +680,7 @@ static int64_t sys_readdir(uint64_t index, uint64_t ptr) {
     if (index >= LISTDIR_MAX) return 0;
     fat32_file_info_t *list = kmalloc((index + 1) * sizeof(fat32_file_info_t));
     if (!list) return SYSERR_NOMEM;
-    char saved[256];
-    enter_cwd(saved, sizeof(saved));
-    int count = fat32_list_directory(list, (uint32_t)index + 1);
-    leave_cwd(saved);
+    int count = fat32_list_directory_ex(user_cwd(), list, (uint32_t)index + 1);
     int64_t result = 0;
     if (count < 0) {
         result = SYSERR_IO;
@@ -690,31 +696,24 @@ static int64_t sys_readdir(uint64_t index, uint64_t ptr) {
 }
 
 static int64_t sys_unlink(uint64_t path_ptr) {
-    char path[MAX_PATH], saved[256];
-    if (copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
-    enter_cwd(saved, sizeof(saved));
-    int64_t result = fat32_file_exists(path) ? fs_result(fat32_delete_file(path)) : SYSERR_NOENT;
-    leave_cwd(saved);
-    return result;
+    char path[MAX_PATH];
+    if (user_path(path_ptr, path, sizeof(path)) != 0) return SYSERR_FAULT;
+    return fat32_file_exists(path) ? fs_result(fat32_delete_file(path)) : SYSERR_NOENT;
 }
 
 static int64_t sys_mkdir(uint64_t path_ptr) {
-    char path[MAX_PATH], saved[256];
-    if (copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
-    enter_cwd(saved, sizeof(saved));
-    int64_t result = fs_result(fat32_mkdir(path));
-    leave_cwd(saved);
-    return result;
+    char path[MAX_PATH];
+    if (user_path(path_ptr, path, sizeof(path)) != 0) return SYSERR_FAULT;
+    return fs_result(fat32_mkdir(path));
 }
 
 static int64_t sys_stat(uint64_t path_ptr, uint64_t ptr) {
-    char path[MAX_PATH], saved[256];
-    if (copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
+    char path[MAX_PATH];
+    if (user_path(path_ptr, path, sizeof(path)) != 0) return SYSERR_FAULT;
     if (!user_range_ok(ptr, sizeof(struct os_stat), 1)) return SYSERR_FAULT;
     struct os_stat *out = (struct os_stat *)ptr;
     fat32_file_info_t one;
     int64_t result = 0;
-    enter_cwd(saved, sizeof(saved));
     if (fat32_list_directory_ex(path, &one, 1) >= 0) {        /* a folder */
         out->is_dir = 1;
         out->size = 0;
@@ -724,23 +723,20 @@ static int64_t sys_stat(uint64_t path_ptr, uint64_t ptr) {
     } else {
         result = SYSERR_NOENT;
     }
-    leave_cwd(saved);
     return result;
 }
 
 /* The whole folder at once (with long names): path 0 is the current one. */
 static int64_t sys_listdir(uint64_t path_ptr, uint64_t buf, uint64_t max) {
-    char path[MAX_PATH], saved[256];
-    path[0] = 0;
-    if (path_ptr && copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
+    char path[MAX_PATH];
+    if (!path_ptr) kstrncpy(path, user_cwd(), sizeof(path));
+    else if (user_path(path_ptr, path, sizeof(path)) != 0) return SYSERR_FAULT;
     if (max > LISTDIR_MAX) max = LISTDIR_MAX;
     if (!max) return 0;
     if (!user_range_ok(buf, max * sizeof(struct os_dirent), 1)) return SYSERR_FAULT;
     fat32_file_info_t *list = kmalloc(max * sizeof(fat32_file_info_t));
     if (!list) return SYSERR_NOMEM;
-    enter_cwd(saved, sizeof(saved));
-    int count = fat32_list_directory_ex(path[0] ? path : 0, list, (uint32_t)max);
-    leave_cwd(saved);
+    int count = fat32_list_directory_ex(path, list, (uint32_t)max);
     struct os_dirent *out = (struct os_dirent *)buf;
     for (int i = 0; i < count; i++) {
         k_snprintf(out[i].name, sizeof(out[i].name), "%s", list[i].name);
@@ -914,7 +910,8 @@ static uint64_t build_stack(uint64_t root, int argc, char **argv) {
 }
 
 /* Start a program as `user`, in the FAT32 current directory. */
-static int spawn_as(const uint8_t *data, uint32_t size, int argc, char **argv, const user_t *user) {
+static int spawn_as(const uint8_t *data, uint32_t size, int argc, char **argv, const user_t *user,
+                    const char *cwd) {
     if (argc > MAX_ARGS) argc = MAX_ARGS;
 
     process_t *p = kmalloc(sizeof(process_t));
@@ -937,7 +934,7 @@ static int spawn_as(const uint8_t *data, uint32_t size, int argc, char **argv, c
         return err;
     }
     p->brk_start = p->brk = p->brk_mapped = image_end;
-    fat32_get_current_directory(p->cwd, sizeof(p->cwd));
+    kstrncpy(p->cwd, cwd, sizeof(p->cwd));
 
     // Name for ps and messages: the file name without folders and extension.
     const char *base = argv[0];
@@ -965,7 +962,9 @@ static int spawn_as(const uint8_t *data, uint32_t size, int argc, char **argv, c
 }
 
 int process_spawn(const uint8_t *data, uint32_t size, int argc, char **argv) {
-    return spawn_as(data, size, argc, argv, user_current());
+    char cwd[MAX_PATH];
+    fat32_get_current_directory(cwd, sizeof(cwd));        // the kernel shell's
+    return spawn_as(data, size, argc, argv, user_current(), cwd);
 }
 
 int process_foreground(void) {
@@ -1062,16 +1061,24 @@ static uint8_t *read_program_file(const char *name, uint32_t *size) {
     return data;
 }
 
-uint8_t *process_find_program(const char *name, uint32_t *size) {
-    uint8_t *data = read_program_file(name, size);
+/* `name` in folder `dir` (or as given, if it is absolute), else in the system folder. */
+static uint8_t *find_program_from(const char *dir, const char *name, uint32_t *size) {
+    char path[MAX_PATH];
+    if (vfs_absolute(dir, name, path, sizeof(path)) != 0) return 0;
+    uint8_t *data = read_program_file(path, size);
     int has_folder = 0;
     for (const char *c = name; *c; c++)
         if (*c == '/') has_folder = 1;
     if (data || has_folder) return data;
     /* Not here: the system folder (the RAM disk's programs). */
-    char path[64];
     k_snprintf(path, sizeof(path), "%s/%s", strcmp(vfs_system_dir(), "/") ? vfs_system_dir() : "", name);
     return read_program_file(path, size);
+}
+
+uint8_t *process_find_program(const char *name, uint32_t *size) {
+    char cwd[MAX_PATH];
+    fat32_get_current_directory(cwd, sizeof(cwd));
+    return find_program_from(cwd, name, size);
 }
 
 /* ---- System calls for programs that run programs ----------------------- */
@@ -1087,7 +1094,7 @@ static int64_t proc_error(int err) {
 
 /* spawn(path, argv, as_user) */
 static int64_t sys_spawn(uint64_t path_ptr, uint64_t argv_ptr, uint64_t user_ptr) {
-    char path[MAX_PATH], saved[256];
+    char path[MAX_PATH];
     if (copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
 
     // The arguments: copied into one kernel buffer before anything can change.
@@ -1125,14 +1132,12 @@ static int64_t sys_spawn(uint64_t path_ptr, uint64_t argv_ptr, uint64_t user_ptr
         }
     }
 
-    enter_cwd(saved, sizeof(saved));
     uint32_t size = 0;
     // As another user (su): only system programs, never one from this folder.
-    if (user_ptr) fat32_change_directory("/");
-    uint8_t *image = process_find_program(path, &size);
-    if (user_ptr && fat32_change_directory(P()->cwd) != 0) fat32_change_directory("/");
-    int64_t result = image ? spawn_as(image, size, argc, argv, &as) : PROC_ERR_NOT_FOUND;
-    leave_cwd(saved);
+    uint8_t *image = find_program_from(user_ptr ? "/" : user_cwd(), path, &size);
+    char cwd[MAX_PATH];
+    kstrncpy(cwd, user_cwd(), sizeof(cwd));
+    int64_t result = image ? spawn_as(image, size, argc, argv, &as, cwd) : PROC_ERR_NOT_FOUND;
     kfree(image);
     kfree(strings);
     return result < 0 ? proc_error((int)result) : result;
@@ -1196,13 +1201,9 @@ static int64_t sys_taskinfo(uint64_t slot, uint64_t ptr) {
 }
 
 static int64_t sys_chdir(uint64_t path_ptr) {
-    char path[MAX_PATH], saved[256];
-    if (copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
-    enter_cwd(saved, sizeof(saved));
-    int ok = fat32_change_directory(path) == 0;
-    if (ok) fat32_get_current_directory(P()->cwd, sizeof(P()->cwd));
-    leave_cwd(saved);
-    return ok ? 0 : SYSERR_NOENT;
+    char path[MAX_PATH];
+    if (user_path(path_ptr, path, sizeof(path)) != 0) return SYSERR_FAULT;
+    return vfs_folder(path, P()->cwd, sizeof(P()->cwd)) == 0 ? 0 : SYSERR_NOENT;
 }
 
 static int64_t sys_getcwd(uint64_t buf, uint64_t size) {

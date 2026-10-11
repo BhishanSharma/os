@@ -64,15 +64,9 @@ static char model[41], serial[21];
 static int ready;
 static char desc[120];
 static uint16_t next_cid;
-static int irq_mode;                     /* completions interrupt: wait with hlt, not spinning */
+static int irq_mode;                     /* completions interrupt (MSI/MSI-X); submit() spins anyway */
 
-static void nvme_interrupt(void) { }     /* waking the waiting CPU is all it takes */
-
-static int interrupts_on(void) {
-    uint64_t f;
-    __asm__ volatile("pushfq; pop %0" : "=r"(f));
-    return (f & 0x200) != 0;
-}
+static void nvme_interrupt(void) { }
 
 static uint32_t rd32(uint32_t o) { return *(volatile uint32_t *)(regs + o); }
 static uint64_t rd64(uint32_t o) { return rd32(o) | (uint64_t)rd32(o + 4) << 32; }
@@ -109,8 +103,10 @@ static int submit(queue_t *q, sqe_t *cmd, uint32_t ms) {
             if (cid != cmd->cid) continue;                  /* (an old completion) */
             return status & 0x7FFF;
         }
-        if (irq_mode && interrupts_on()) cpu_wait();   /* the completion (or a tick) wakes us */
-        else __asm__ volatile("pause");
+        /* Spin, keeping the kernel lock: cpu_wait() would let other cores into
+         * the kernel mid-operation, and the FAT32 code above (its caches, a
+         * folder being read cluster by cluster) is not safe to interleave. */
+        __asm__ volatile("pause");
     }
     return -1;
 }

@@ -50,11 +50,11 @@ const char *vfs_error(int code) {
 
 /* ---- Paths ------------------------------------------------------------------------- */
 
-int vfs_normalize(const char *path, char *out, int size) {
+int vfs_absolute(const char *base, const char *path, char *out, int size) {
     int starts[MAX_PATH_DEPTH * 2], n = 0, o = 0;          /* where each "/name" begins in out */
     if (size < 2) return -1;
     for (int pass = 0; pass < 2; pass++) {
-        const char *p = pass == 0 ? (path[0] == '/' ? "" : cwd) : path;
+        const char *p = pass == 0 ? (path[0] == '/' ? "" : base) : path;
         while (*p) {
             while (*p == '/') p++;
             if (!*p) break;
@@ -76,6 +76,10 @@ int vfs_normalize(const char *path, char *out, int size) {
     if (o == 0) out[o++] = '/';
     out[o] = 0;
     return 0;
+}
+
+int vfs_normalize(const char *path, char *out, int size) {
+    return vfs_absolute(cwd, path, out, size);
 }
 
 /* The mount holding absolute path `abs`; *rest is the part below it. */
@@ -307,6 +311,13 @@ int fat32_change_directory(const char *path) {
     target_t t;
     if (resolve(path, 0, &t) != 0) return -1;
     kstrncpy(cwd, t.abs, sizeof(cwd));
+    return 0;
+}
+
+int vfs_folder(const char *path, char *out, int size) {
+    target_t t;
+    if (resolve(path, 0, &t) != 0) return -1;
+    kstrncpy(out, t.abs, (size_t)size);
     return 0;
 }
 

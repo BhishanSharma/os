@@ -20,3 +20,4 @@ disk.img
 # Editor settings (shared tasks.json is kept on purpose)
 .vscode/*
 !.vscode/tasks.json
+__pycache__/

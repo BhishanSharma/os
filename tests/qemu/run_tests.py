@@ -26,7 +26,7 @@ ASSETS = os.path.join(ROOT, "build", "test")
 USB_IMG = os.path.join(ROOT, "dist", "x86_64", "terminalos.img")
 ISO = os.path.join(ROOT, "dist", "x86_64", "kernel.iso")
 PASSWORD = "pass1"
-PROMPT = re.compile(r"root@terminal-os:[^\n]*# ")
+PROMPT = re.compile(r"\w+@terminal-os:[^\n]*[#$] ")
 
 
 def find_qemu():
@@ -166,6 +166,25 @@ def login(m, timeout=120):
     m.expect(PROMPT, 60)
 
 
+def login_user(m, name, password, timeout=120):
+    """First start: root's password, then an everyday account `name`; log in as it."""
+    m.expect(r"New password: ", timeout)
+    m.type(PASSWORD)
+    m.expect(r"Retype new password: ")
+    m.type(PASSWORD)
+    m.expect(r"User name: ")
+    m.type(name)
+    m.expect(r"New password: ")
+    m.type(password)
+    m.expect(r"Retype new password: ")
+    m.type(password)
+    m.expect(r"login: ", 60)
+    m.type(name)
+    m.expect(r"Password: ")
+    m.type(password)
+    m.expect(PROMPT, 60)
+
+
 def usb_stick():
     if not os.path.exists(USB_IMG):
         raise TestError("no %s: run `make build-x86_64` first" % USB_IMG)
@@ -291,6 +310,33 @@ def test_nvme_video():
         m.stop()
 
 
+def test_user():
+    """An everyday user on the NVMe partition: programs work in their home folder
+    (the current folder belongs to each program, not to the kernel)."""
+    m = Machine("user", usb_stick() + nvme(asset("nvme-files.img")))
+    try:
+        m.expect(r"Files\s+on the NVMe TERMINALOS partition", 120)
+        login_user(m, "boss", "pass2")
+        check("/HOME/BOSS" in m.run("pwd"), "boss does not start in /HOME/BOSS")
+        out = m.run("ls")
+        check("(empty)" in out, "ls in an empty home folder", out)
+        out = m.run("write notes.txt mine")
+        check("Wrote 4 bytes" in out, "write in the home folder", out)
+        for _ in range(3):
+            out = m.run("ls")
+            check("notes.txt" in out and "PASSWD" not in out, "ls lists the home folder", out)
+            out = m.run("cat notes.txt")
+            check("mine" in out, "cat in the home folder", out)
+        m.run("mkdir sub")
+        m.run("cd sub")
+        out = m.run("ls ..")
+        check("notes.txt" in out and "sub/" in out, "ls ..", out)
+        out = m.run("cat /PASSWD")
+        check("permission denied" in out, "an everyday user read the password file", out)
+    finally:
+        m.stop()
+
+
 def test_install():
     """`install` on an empty partition, then the restart boots from the SSD."""
     disk = os.path.join(OUT, "install-nvme.img")
@@ -351,7 +397,7 @@ def test_panic():
 
 
 TESTS = [("boot", test_boot), ("files", test_files), ("fault", test_fault), ("panic", test_panic),
-         ("video", test_nvme_video), ("install", test_install), ("network", test_network),
+         ("user", test_user), ("video", test_nvme_video), ("install", test_install), ("network", test_network),
          ("bios", test_legacy_bios)]
 NEEDS_INTERNET = {"network"}
 

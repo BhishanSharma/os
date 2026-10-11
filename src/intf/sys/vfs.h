@@ -37,6 +37,11 @@ int vfs_root_persistent(void);
 /* The absolute, upper-case form of `path` (relative to the current folder).
  * 0 on success, -1 if it is too long. */
 int vfs_normalize(const char *path, char *out, int size);
+/* The same against `base` instead of the current directory (which belongs to
+ * the kernel's shell: programs keep their own and pass it here). */
+int vfs_absolute(const char *base, const char *path, char *out, int size);
+/* If `path` is a folder: its absolute path as the disk spells it, 0. */
+int vfs_folder(const char *path, char *out, int size);
 
 /* Raw sectors of the main volume (for `readsector`, `fat32info`). */
 int vfs_read_sectors(uint64_t lba, uint32_t count, void *buf);
