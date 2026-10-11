@@ -51,7 +51,11 @@ int main(void) {
         set_theme_color(THEME_ACCENT);
         printf("sysinfo");
         set_theme_color(THEME_TEXT);
-        printf(" for this machine.\n\n");
+        printf(" for this machine, ");
+        set_theme_color(THEME_ACCENT);
+        printf("desktop");
+        set_theme_color(THEME_TEXT);
+        printf(" for the desktop.\n\n");
         char *args[] = { "shell", 0 };
         int pid = spawn("shell", args, u.name), status;
         if (pid < 0) {

@@ -31,13 +31,32 @@ void ui_clip(ui_canvas *c, int x, int y, int w, int h);   /* inside the canvas *
 void ui_noclip(ui_canvas *c);
 
 void ui_fill(ui_canvas *c, int x, int y, int w, int h, unsigned color);
+void ui_fill_a(ui_canvas *c, int x, int y, int w, int h, unsigned color, int alpha);   /* alpha 0-255 */
+void ui_blend_pixel(ui_canvas *c, int x, int y, unsigned color, int alpha);
 void ui_frame(ui_canvas *c, int x, int y, int w, int h, unsigned color);
+
+/* Anti-aliased round corners; `corners` picks which are round. */
+#define UI_TL 1
+#define UI_TR 2
+#define UI_BL 4
+#define UI_BR 8
+#define UI_ALL 15
 void ui_round(ui_canvas *c, int x, int y, int w, int h, int r, unsigned color);
+void ui_round_ex(ui_canvas *c, int x, int y, int w, int h, int r, unsigned color, int alpha, int corners);
 void ui_circle(ui_canvas *c, int cx, int cy, int r, unsigned color);
+void ui_shadow(ui_canvas *c, int x, int y, int w, int h, int r, int size, int alpha);   /* soft, around the rect */
+void ui_shadow_ex(ui_canvas *c, int x, int y, int w, int h, int r, int size, int alpha, int outside);
 void ui_copy(ui_canvas *c, int x, int y, const unsigned *src, int w, int h, int stride);
-int ui_char(ui_canvas *c, int x, int y, unsigned char ch, unsigned color, int scale);
+void ui_copy_round(ui_canvas *c, int x, int y, const unsigned *src, int w, int h, int stride, int r, int corners);
+
+/* Text: anti-aliased (UIFONT.BIN), in a line 16 * scale pixels high whose top is y. */
+enum { UI_REGULAR, UI_BOLD, UI_MONO };
 int ui_text(ui_canvas *c, int x, int y, const char *s, unsigned color, int scale);  /* -> width */
+int ui_text_bold(ui_canvas *c, int x, int y, const char *s, unsigned color, int scale);
+int ui_text_style(ui_canvas *c, int x, int y, const char *s, unsigned color, int scale, int style);
 int ui_text_width(const char *s, int scale);
+int ui_text_style_width(const char *s, int scale, int style);
+int ui_char(ui_canvas *c, int x, int y, unsigned char ch, unsigned color, int scale);  /* a mono 8x16 cell */
 #define UI_CHAR_W(scale) (8 * (scale))
 #define UI_CHAR_H(scale) (16 * (scale))
 

@@ -49,6 +49,27 @@ void *mmio_map(uint64_t phys, uint64_t size) {
     return (void *)(va + (phys - first));
 }
 
+/* Memory types: PAT entry 1 (pages with only PWT set) becomes write-combining
+ * instead of write-through, which nothing used. Writes to the screen then
+ * go out in bursts instead of one uncached store at a time. Every core. */
+void paging_pat_init(void) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x277));
+    lo = (lo & ~0x0000FF00u) | 0x00000100u;               /* PA1 = WC (1) */
+    __asm__ volatile("wbinvd" ::: "memory");
+    __asm__ volatile("wrmsr" : : "c"(0x277), "a"(lo), "d"(hi));
+    __asm__ volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
+}
+
+void *mmio_map_wc(uint64_t phys, uint64_t size) {
+    uint64_t first = phys & ~0xFFFULL, last = (phys + size + 0xFFF) & ~0xFFFULL;
+    uint64_t va = mmio_next;
+    for (uint64_t p = first; p < last; p += PAGE_SIZE)
+        map_page(va + (p - first), p, PAGE_PRESENT | PAGE_RW | 0x08);          /* PAT 1: WC */
+    mmio_next += (last - first) + PAGE_SIZE;
+    return (void *)(va + (phys - first));
+}
+
 static page_entry_t *alloc_table(void) {
     if (next_table >= PAGE_TABLE_END) kpanic("page table pool exhausted");
     page_entry_t *t = phys_to_virt(next_table);

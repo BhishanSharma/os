@@ -130,6 +130,7 @@ void ap_main(uint64_t cpu) {
     idt_load_ap();
     if (have_rdtscp) wrmsr(MSR_TSC_AUX, cpu);
     apic_setup_core(timer_rate, AP_TIMER_VECTOR);
+    paging_pat_init();                              /* the same memory types as core 0 */
     __asm__ volatile("fninit");
     bkl_enter();
     task_init_ap((int)cpu);

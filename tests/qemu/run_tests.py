@@ -457,6 +457,8 @@ def test_desktop():
         time.sleep(0.3)
         m.monitor("mouse_button 0")
         corner = m.expect(r"click at (\d+),(\d+)", 10)
+        m.keys("esc")                                # that click opened the Terminal OS menu
+        time.sleep(0.3)
         cw, ch = int(ws.group(4)), int(ws.group(5))
         dx = (int(button.group(1)) - int(corner.group(1))) * 8 // cw
         dy = (int(button.group(2)) - int(corner.group(2))) * 16 // ch

@@ -1,6 +1,7 @@
 #include "lib/fbcon.h"
 #include <stdint.h>
 #include "drivers/addr.h"
+#include "drivers/paging.h"
 
 #define GLYPH_W 8
 #define GLYPH_H 16
@@ -16,6 +17,7 @@ static const uint8_t vga_rgb[16][3] = {
 };
 
 static fb_info_t fb;
+static uint8_t *fb_base;                 /* the screen, mapped write-combining */
 static int active;
 static uint32_t scale, origin_x, origin_y, text_cols, text_rows;
 static uint32_t palette[16];
@@ -27,7 +29,7 @@ static uint32_t pack(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 static void put_pixel(uint32_t x, uint32_t y, uint32_t value) {
-    uint8_t *p = (uint8_t *)phys_to_virt(fb.addr) + (uint64_t)y * fb.pitch + (uint64_t)x * (fb.bpp / 8);
+    uint8_t *p = fb_base + (uint64_t)y * fb.pitch + (uint64_t)x * (fb.bpp / 8);
     if (fb.bpp == 32) *(volatile uint32_t *)p = value;
     else { p[0] = (uint8_t)value; p[1] = (uint8_t)(value >> 8); p[2] = (uint8_t)(value >> 16); }
 }
@@ -61,6 +63,8 @@ int fbcon_init(const fb_info_t *info) {
     if ((info->bpp != 32 && info->bpp != 24) || !info->red_size || !info->green_size || !info->blue_size)
         return -1;
     fb = *info;
+    paging_pat_init();
+    fb_base = mmio_map_wc(fb.addr, (uint64_t)fb.pitch * fb.height);
     scale = pick_scale(&fb);
     fbcon_grid_size(&fb, &text_cols, &text_rows);
     if (text_cols < 40 || text_rows < 10) return -1;
@@ -127,7 +131,7 @@ void fbcon_blit(int x, int y, int w, int h, const uint32_t *src, int stride) {
             int sy = y + j;
             if (sy < 0 || (uint32_t)sy >= fb.height) continue;
             const uint32_t *from = src + (int64_t)j * stride + (x0 - x);
-            uint32_t *to = (uint32_t *)((uintptr_t)phys_to_virt(fb.addr) + (uint64_t)sy * fb.pitch) + x0;
+            uint32_t *to = (uint32_t *)(fb_base + (uint64_t)sy * fb.pitch) + x0;
             uint64_t n = (uint64_t)(x1 - x0);
             __asm__ volatile("rep movsl" : "+D"(to), "+S"(from), "+c"(n) : : "memory");
         }

@@ -1494,6 +1494,8 @@ static int64_t sys_mouse(uint64_t ptr) {
 }
 
 /* gfx(op, arg): pixels for programs such as the image viewer. */
+static int graphics_full;                      /* GFX_BEGIN with 1: no status bar */
+
 static int64_t sys_gfx(uint64_t op, uint64_t arg) {
     uint32_t width, height, cell_w, cell_h, grid_x, grid_y;
     fbcon_geometry(&width, &height, &cell_w, &cell_h, &grid_x, &grid_y);
@@ -1516,7 +1518,9 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
             if (foreground_pid != me) return SYSERR_PERM;
             if (graphics_owner && graphics_owner != me) return SYSERR_AGAIN;
             graphics_owner = me;
-            print_set_graphics(1);
+            graphics_full = arg == 1;                        /* the desktop: the whole screen */
+            print_set_graphics(graphics_full ? 2 : 1);
+            if (graphics_full) top = 0;
             fbcon_fill(0, top, width, height - top, 0);
             return 0;
         case GFX_BLIT: {
@@ -1527,6 +1531,7 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
             uint64_t bytes = ((uint64_t)(b.h - 1) * (uint64_t)b.stride + (uint64_t)b.w) * 4;
             if (!user_range_ok((uint64_t)(uintptr_t)b.pixels, bytes, 0)) return SYSERR_FAULT;
             // Keep off the status bar: skip rows above `top`.
+            if (graphics_full) top = 0;
             if (b.y < (int)top) {
                 int skip = (int)top - b.y;
                 if (skip >= b.h) return 0;
@@ -1709,7 +1714,11 @@ static int64_t sys_thread(uint64_t entry, uint64_t arg, uint64_t stack) {
 
 static int64_t sys_futex(uint64_t op, uint64_t addr, uint64_t value) {
     if ((addr & 3) || !user_range_ok(addr, 4, 0)) return SYSERR_FAULT;
-    const void *chan = (const void *)(P()->root ^ addr);
+    /* Keyed on the physical address: the same word in shared memory is the
+       same futex in every program that maps it (the window server's events). */
+    uint64_t *pte = paging_user_pte(P()->root, addr, 0);
+    if (!pte || !(*pte & 1)) return SYSERR_FAULT;
+    const void *chan = (const void *)(uintptr_t)(0x8000000000000000ULL | ((*pte & 0x000FFFFFFFFFF000ULL) + (addr & 0xFFF)));
     if (op == FUTEX_WAKE) {
         task_wakeup(chan);
         return 0;

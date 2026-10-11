@@ -23,6 +23,14 @@ and other files with `cat` in a Terminal. System test: `desktop`. Cuts: no
 resizing, no per-app menus, clients poll for events (no cross-process futex),
 and programs that read keys directly do not work in Terminal.
 
+Desktop polish (after stage 7): anti-aliased Inter and JetBrains Mono text
+pre-rendered into `UIFONT.BIN` (`scripts/gen-uifont.py`, fonts under SIL OFL
+in `third_party/fonts`), anti-aliased round corners, soft shadows, a
+translucent menu bar and Dock (which magnifies under the pointer), an
+anti-aliased pointer, the whole screen (no kernel status bar), damage as a
+list of rectangles, the framebuffer mapped write-combining (PAT), and apps
+woken by a futex in the shared surface instead of polling.
+
 Each stage below is the *lean* version: the smallest design that gives the
 macOS-style structure, with the cuts written down. One stage per working
 session; it ends with `make test` + `make test-os` green, a USB stick, one

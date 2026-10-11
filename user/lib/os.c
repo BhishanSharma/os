@@ -52,6 +52,7 @@ int getmouse(struct os_mouse *m)                { return (int)os_syscall(SYS_MOU
 
 int gfx_info(struct os_gfx_info *info)          { return (int)os_syscall(SYS_GFX, GFX_INFO, (long)info, 0); }
 int gfx_begin(void)                             { return (int)os_syscall(SYS_GFX, GFX_BEGIN, 0, 0); }
+int gfx_begin_full(void)                        { return (int)os_syscall(SYS_GFX, GFX_BEGIN, 1, 0); }
 int gfx_end(void)                               { return (int)os_syscall(SYS_GFX, GFX_END, 0, 0); }
 
 int gfx_blit(int x, int y, int w, int h, const unsigned int *pixels, int stride) {

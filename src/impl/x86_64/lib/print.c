@@ -116,7 +116,7 @@ volatile uint16_t* print_text_cells(void) {
 /* Mouse pointer and selection (whole-grid cell indexes, status row included):
  * drawn with foreground and background swapped. */
 static int pointer_cell = -1;
-static int graphics_mode;        /* a program draws pixels: leave the text area alone */
+static int graphics_mode;        /* a program draws pixels: leave the text area alone (2: and the status bar) */
 static int select_from = -1, select_to = -1;
 
 static uint8_t shown_color(int i) {
@@ -134,7 +134,8 @@ void print_flush(void) {
         drawn_valid = 0;
     }
     int cursor = (!cursor_hidden && col < NUM_COLS) ? (int)((row + status_rows) * NUM_COLS + col) : -1;
-    int last = graphics_mode ? status_rows * VISIBLE_COLS : (VISIBLE_ROWS + status_rows) * VISIBLE_COLS;
+    int last = graphics_mode == 2 ? 0                     /* the whole screen: no status bar */
+             : graphics_mode ? status_rows * VISIBLE_COLS : (VISIBLE_ROWS + status_rows) * VISIBLE_COLS;
     for (int i = 0; i < last; i++) {
         uint8_t c = shown_color(i);
         int changed = !drawn_valid || shadow[i].character != drawn[i].character ||

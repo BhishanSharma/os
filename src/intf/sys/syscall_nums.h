@@ -229,7 +229,7 @@ struct os_task {
 /* gfx() operations. Coordinates are screen pixels; the status bar stays the
  * console's (rows above `top`). Only the foreground program may draw. */
 #define GFX_INFO     0   /* arg = struct os_gfx_info *        -> 0, SYSERR_NOENT in VGA text mode */
-#define GFX_BEGIN    1   /* take the screen below the status bar (cleared to black) -> 0 */
+#define GFX_BEGIN    1   /* take the screen below the status bar (cleared to black); arg 1: the whole screen -> 0 */
 #define GFX_BLIT     2   /* arg = struct os_blit *: 0x00RRGGBB pixels -> 0 */
 #define GFX_END      3   /* give it back: the console redraws (also when the program ends) */
 
