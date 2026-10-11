@@ -36,6 +36,7 @@
 #include "drivers/usb.h"
 #include "drivers/touchpad.h"
 #include "drivers/acpi.h"
+#include "drivers/power.h"
 #include "drivers/vmmdev.h"
 
 extern void irq0_stub();
@@ -120,6 +121,7 @@ static void statusbar_idle(void) {
     usb_service();           // USB device plugged in or out?
     iwl_service();           // Wi-Fi dropped? reconnect
     mouse_poll();            // pointer, wheel, selection
+    power_poll();            // power button, battery
     statusbar_update(0);
 }
 
@@ -285,6 +287,9 @@ void kernel_main() {
         print_boot_status(snd == 0 ? BOOT_OK : BOOT_WARN, "Sound", "%s", sound_how);
         int tp = touchpad_init();
         print_boot_status(tp == 0 ? BOOT_OK : BOOT_WARN, "Touchpad", "%s", touchpad_description());
+        char power_how[160];
+        int pw = power_init(power_how, sizeof(power_how));
+        print_boot_status(pw == 0 ? BOOT_OK : BOOT_WARN, "Power", "%s", power_how);
     }
 
     // DHCP needs the timer and NIC interrupts, so it runs after sti.

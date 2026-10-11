@@ -110,6 +110,8 @@ disk the accounts last until reboot.
 | `fat32info`                | FAT32 volume parameters                                  |
 | `crash <kind>`             | Trigger a CPU exception on purpose: `div0 ud gp pf null stack int3 irq panic` |
 | `reboot`                   | Reset the machine                                        |
+| `shutdown`                 | Switch the computer off (ACPI); the power button does the same |
+| `battery`                  | Battery charge, health, rate and time left; the charger  |
 
 ### Network
 | Command                    | Description                                              |

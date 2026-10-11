@@ -20,6 +20,9 @@ typedef struct {
  * boot information is not mapped afterwards). */
 void acpi_save_rsdp(void);
 
+/* The physical address of that copy (for uACPI, see drivers/power.h), or 0. */
+uint64_t acpi_rsdp_phys(void);
+
 /* I2C devices described in the DSDT and SSDTs. Call during boot. Returns
  * how many were found (at most `max`), or -1 without ACPI tables. */
 int acpi_find_i2c_devices(acpi_i2c_device_t *out, int max);

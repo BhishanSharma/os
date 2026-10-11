@@ -9,7 +9,7 @@
 #define MAX_LINES 8000
 #define EDIT_MAX  256        // longest line Ctrl-E can edit
 
-static char* lines[MAX_LINES];
+static char** lines;                   // MAX_LINES of them, from the heap on first use
 static int line_count = 0;
 static int current_line = 0;
 static int top_line = 0;               // first line shown on screen
@@ -226,6 +226,14 @@ static void editor_message(uint8_t color, const char* a, const char* b) {
 }
 
 void editor_open(const char* filename) {
+    if (!lines) {
+        lines = kmalloc(sizeof(char*) * MAX_LINES);
+        if (!lines) {
+            print_str("edit: out of memory\n");
+            return;
+        }
+        memset(lines, 0, sizeof(char*) * MAX_LINES);
+    }
     // Copy filename
     int i = 0;
     while (filename[i] && i < 255) {

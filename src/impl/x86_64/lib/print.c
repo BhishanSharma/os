@@ -4,6 +4,7 @@
 #include "lib/string.h"
 #include "lib/serial.h"
 #include "lib/fbcon.h"
+#include "drivers/heap.h"
 
 #define VGA_CTRL_REGISTER 0x3D4
 #define VGA_DATA_REGISTER 0x3D5
@@ -65,7 +66,7 @@ uint8_t color = PRINT_COLOR_WHITE | (PRINT_COLOR_BLUE << 4);
  * draws the cells that changed since the last flush. `drawn` is what is on
  * screen; `drawn_cursor` is the cell index the cursor was drawn in. */
 static struct Char shadow[MAX_ROWS * MAX_COLS];
-static struct Char drawn[MAX_ROWS * MAX_COLS];
+static struct Char *drawn;      /* from the heap, on the first flush (fbcon starts after it) */
 static int drawn_valid = 0;
 static int drawn_cursor = -1;
 static int cursor_hidden = 0;
@@ -126,6 +127,11 @@ static uint8_t shown_color(int i) {
 
 void print_flush(void) {
     if (screen != shadow || !fbcon_active()) return;
+    if (!drawn) {
+        drawn = kmalloc(sizeof(struct Char) * MAX_ROWS * MAX_COLS);
+        if (!drawn) return;
+        drawn_valid = 0;
+    }
     int cursor = (!cursor_hidden && col < NUM_COLS) ? (int)((row + status_rows) * NUM_COLS + col) : -1;
     int last = graphics_mode ? status_rows * VISIBLE_COLS : (VISIBLE_ROWS + status_rows) * VISIBLE_COLS;
     for (int i = 0; i < last; i++) {
@@ -742,15 +748,18 @@ void print_box_themed(const char* title, const char* content) {
 
 /* While the scrollback is shown, the live screen waits here (with the line
  * being typed, which is not in the scrollback yet) and comes back unchanged. */
-static struct Char live_screen[MAX_ROWS * MAX_COLS];
+static struct Char *live_screen;                 /* from the heap, on first use */
 
-static void save_live_screen(void) {
+static int save_live_screen(void) {
+    if (!live_screen) live_screen = kmalloc(sizeof(struct Char) * MAX_ROWS * MAX_COLS);
+    if (!live_screen) return -1;
     if (scrollback_view_offset == 0)
         memcpy(live_screen, buffer, (size_t)VISIBLE_ROWS * VISIBLE_COLS * sizeof(struct Char));
+    return 0;
 }
 
 static void restore_live_screen(void) {
-    memcpy(buffer, live_screen, (size_t)VISIBLE_ROWS * VISIBLE_COLS * sizeof(struct Char));
+    if (live_screen) memcpy(buffer, live_screen, (size_t)VISIBLE_ROWS * VISIBLE_COLS * sizeof(struct Char));
     move_cursor();
 }
 
@@ -758,9 +767,8 @@ static void restore_live_screen(void) {
 void scroll_up_lines(int lines) {
     int max_scroll = scrollback_total_lines - VISIBLE_ROWS;
     if (max_scroll < 0) max_scroll = 0;
-    if (max_scroll == 0) return;
+    if (max_scroll == 0 || save_live_screen() != 0) return;
 
-    save_live_screen();
     scrollback_view_offset += lines;
     if (scrollback_view_offset > max_scroll) {
         scrollback_view_offset = max_scroll;
@@ -797,8 +805,7 @@ void scroll_to_bottom(void) {
 void scroll_to_top(void) {
     int max_scroll = scrollback_total_lines - VISIBLE_ROWS;
     if (max_scroll < 0) max_scroll = 0;
-    if (max_scroll == 0) return;
-    save_live_screen();
+    if (max_scroll == 0 || save_live_screen() != 0) return;
     scrollback_view_offset = max_scroll;
     refresh_display();
 }

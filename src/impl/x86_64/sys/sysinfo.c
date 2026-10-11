@@ -12,6 +12,7 @@
 #include "drivers/nic.h"
 #include "net/net.h"
 #include "sys/users.h"
+#include "drivers/power.h"
 
 boot_info_t boot_info;
 
@@ -141,7 +142,7 @@ void statusbar_update(int force) {
     if (!force && now == last_second) return;
     last_second = now;
 
-    char ip[24], up[24], left[160], right[48];
+    char ip[24], up[24], left[160], right[72], battery[32];
     format_ip(ip, sizeof(ip));
     format_uptime(up, sizeof(up));
     uint64_t used = heap_get_used();
@@ -150,13 +151,18 @@ void statusbar_update(int force) {
                OS_NAME, OS_VERSION, user_current()->name, ip, (uint32_t)(used >> 20), (uint32_t)((used & 0xFFFFF) * 10 >> 20),
                total, vfs_root_name(), up);
 
+    power_battery_text(battery, sizeof(battery));
+    if (battery[0]) {
+        size_t n = strlen(battery);
+        if (n + 3 < sizeof(battery)) memcpy(battery + n, SEP, sizeof(SEP));
+    }
     rtc_time_t t;
     if (local_time(&t) == 0)
-        k_snprintf(right, sizeof(right), "%s %02u %s  %02u:%02u:%02u %s ",
+        k_snprintf(right, sizeof(right), "%s%s %02u %s  %02u:%02u:%02u %s ", battery,
                    day_names[day_of_week(t.year, t.month, t.day)], t.day, month_names[t.month - 1],
                    t.hour, t.minute, t.second, RTC_LOCAL_TZ_NAME);
     else
-        k_snprintf(right, sizeof(right), "clock unavailable ");
+        k_snprintf(right, sizeof(right), "%sclock unavailable ", battery);
     print_status_line(left, right);
 }
 

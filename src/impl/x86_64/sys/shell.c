@@ -35,6 +35,7 @@
 #include "sys/smp.h"
 #include "drivers/display.h"
 #include "lib/fbcon.h"
+#include "drivers/power.h"
 
 #define MAX_TEST_ALLOCS 16
 static void *test_allocs[MAX_TEST_ALLOCS];
@@ -214,6 +215,8 @@ static void cmd_help(void)
     print_str("sleep <seconds>    - wait\n");
     print_str("status             - uptime and allocation count\n");
     print_str("reboot             - reboot system\n");
+    print_str("shutdown           - switch the computer off (the power button does too)\n");
+    print_str("battery            - battery charge, health and time left; the charger\n");
     print_str("\n=== Memory and Disk (debug) ===\n");
     print_str("meminfo            - heap statistics\n");
     print_str("alloc              - allocate a physical frame\n");
@@ -619,6 +622,16 @@ static int kernel_command(const char *line, int run_programs) {
         kprintf("The hardware clock holds %s.\n", rtc_is_local()
                 ? "local time (" RTC_LOCAL_TZ_NAME "), as Windows keeps it. `clock utc` if the time is wrong"
                 : "UTC, as Linux and VMs keep it. `clock local` if the time is wrong");
+    }
+    else if (strcmp(line, "shutdown") == 0 || strcmp(line, "poweroff") == 0)
+    {
+        print_str("Shutting down...\n");
+        power_off();
+        print_str("shutdown: ACPI could not switch the computer off; hold the power button.\n");
+    }
+    else if (strcmp(line, "battery") == 0)
+    {
+        power_print();
     }
     else if (strcmp(line, "reboot") == 0)
     {

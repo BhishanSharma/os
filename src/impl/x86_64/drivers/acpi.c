@@ -23,6 +23,11 @@ void acpi_save_rsdp(void) {
     have_rsdp = 1;
 }
 
+/* The kernel image is identity mapped: the copy's address is physical too. */
+uint64_t acpi_rsdp_phys(void) {
+    return have_rsdp ? (uint64_t)rsdp_copy : 0;
+}
+
 static void unmap_window(void) {
     for (uint64_t i = 0; i < mapped_pages; i++) unmap_page(WINDOW + i * 4096);
     mapped_pages = 0;

@@ -21,7 +21,7 @@ SRC_KERNEL := src/impl/kernel
 SRC_X86    := src/impl/x86_64
 
 # Include directories used by both C and C++ code.
-INCLUDES   := src/intf src/intf/lib
+INCLUDES   := src/intf src/intf/lib third_party/uacpi/include
 
 BEARSSL_DIR ?= /root/bearssl
 BEARSSL_BUILD = $(BUILD)/bearssl
@@ -129,7 +129,12 @@ x86_c_obj  := $(patsubst $(SRC_X86)/%.c,$(BUILD)/x86_64/%.o,$(x86_c))
 x86_asm_obj := $(patsubst $(SRC_X86)/%.asm,$(BUILD)/x86_64/%.o,$(x86_asm))
 x86_cpp_obj := $(patsubst $(SRC_X86)/%.cpp,$(BUILD)/x86_64/%.o,$(x86_cpp))
 
-objects := $(kernel_obj) $(x86_c_obj) $(x86_cpp_obj) $(x86_asm_obj)
+# uACPI (third_party/uacpi, MIT): the ACPI interpreter behind drivers/power.c.
+UACPI_DIR := third_party/uacpi
+uacpi_c   := $(wildcard $(UACPI_DIR)/source/*.c)
+uacpi_obj := $(patsubst $(UACPI_DIR)/source/%.c,$(BUILD)/uacpi/%.o,$(uacpi_c))
+
+objects := $(kernel_obj) $(x86_c_obj) $(x86_cpp_obj) $(x86_asm_obj) $(uacpi_obj)
 
 # The kernel image starts at 1 MiB and must end before the heap at 2 MiB.
 KERNEL_BASE  := 1048576
@@ -165,6 +170,14 @@ $(BUILD)/kernel/%.o: $(SRC_KERNEL)/%.c
 $(BUILD)/x86_64/%.o: $(SRC_X86)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP $< -o $@
+
+
+# Third-party code: optimised for size, its own warnings left to upstream.
+$(BUILD)/uacpi/%.o: $(UACPI_DIR)/source/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -c -I $(UACPI_DIR)/include -DUACPI_USE_BUILTIN_STRING -ffreestanding -fno-stack-protector \
+	    -fno-pie -mno-red-zone -mgeneral-regs-only -Os -ffunction-sections -fdata-sections -w \
+	    -MMD -MP $< -o $@
 
 
 # ---- C++ sources ----------------------------------------------------------

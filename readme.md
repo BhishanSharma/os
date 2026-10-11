@@ -41,6 +41,7 @@ The ISO ends up at `dist/x86_64/kernel.iso`.
 | Real hardware  | Boots from a USB stick on UEFI laptops: falls back to the local APIC timer when the PIT gives no interrupts, reads the hardware clock as local time (as Windows keeps it), assigns PCI addresses the firmware left out, reads ACPI tables |
 | Memory         | Paging, heap sized from the bootloader memory map (`kmalloc`/`kfree`)            |
 | CPU cores      | SMP: the other cores are started from the ACPI MADT (INIT-SIPI-SIPI, a real-mode trampoline at 0x8000) and run user programs in parallel; the kernel runs under one big lock, released while it waits. `cpus` shows them; the GRUB entry "one CPU core" (`nosmp`) keeps one |
+| Power          | ACPI through [uACPI](https://github.com/uACPI/uACPI) (MIT, vendored in `third_party/uacpi`), which runs the firmware's AML: `shutdown` and the power button switch off (S5); the battery (charge, health, time left) and charger are read through the embedded controller, shown in the status bar and by `battery`. ACPI events are polled from the idle loop |
 | Interrupts     | 8259 PIC for legacy devices, plus PCI MSI / MSI-X through the local APIC for USB (xHCI), NVMe and Intel Wi-Fi (`interrupts` counts them); the timer polls stay as a backstop |
 | User space     | Programs run in ring 3, each with its own address space; preemptive multitasking with background jobs (`&`, `jobs`, `ps`, `fg`, `kill`); system calls (`int 0x80`) including `spawn`/`wait`, a small C library; the shell itself is a user program started at login; faults, Ctrl+C and `kill` end only the program. See [docs/USERSPACE.md](docs/USERSPACE.md) |
 | Storage        | NVMe SSDs (polled or MSI-X, GPT/MBR partitions), ATA PIO, and the RAM disk loaded by GRUB. A VFS with mounts and real paths (`/A/B/C.TXT`, `..`, across mounts); FAT32 read/write with 8.3 names. On a laptop, a FAT32 partition labelled TERMINALOS (made in Windows) becomes `/` and keeps files, accounts and Wi-Fi settings across reboots; every other partition is read-only |
@@ -109,5 +110,7 @@ Made with coffee and stubbornness.
 
 
 ### HTTPS downloads
+
+ACPI uses uACPI, vendored in `third_party/uacpi` (MIT licence, version in `third_party/uacpi/VERSION`) and compiled into the kernel.
 
 The shell `download` command supports HTTPS using BearSSL TLS 1.2 with SNI and X.509 validation. The Docker build environment fetches upstream BearSSL and cross-builds its static library.
