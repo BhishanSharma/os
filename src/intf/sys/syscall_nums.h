@@ -254,6 +254,7 @@ struct os_mouse {
     int col, row;          /* the cell under the pointer (gotoxy coordinates; row -1 = status bar) */
     int buttons;           /* MOUSE_BUTTON_* held now */
     int wheel;             /* wheel steps since the last call: negative = up */
+    int x, y;              /* the pointer in screen pixels (gfx_blit coordinates) */
 };
 
 struct os_regnode {

@@ -432,8 +432,48 @@ def test_kernel():
         m.stop()
 
 
+def move_mouse(m, dx, dy):
+    """In small steps: QEMU drops what does not fit in the PS/2 queue."""
+    while dx or dy:
+        sx, sy = max(-50, min(50, dx)), max(-50, min(50, dy))
+        m.monitor("mouse_move %d %d" % (sx, sy))
+        dx, dy = dx - sx, dy - sy
+        time.sleep(0.02)
+
+
+def test_desktop():
+    """Stage 7: the window server starts, an app opens a window, a click reaches it."""
+    m = Machine("desktop", usb_stick())
+    try:
+        login(m)
+        m.type("windowserver about")
+        ws = m.expect(r"windowserver: (\d+)x(\d+), scale (\d), cells (\d+)x(\d+)", 30)
+        button = m.expect(r"about: OK button at (\d+),(\d+)", 30)
+        time.sleep(1)
+        m.screenshot("desktop")
+        move_mouse(m, -4000, -4000)                  # the pointer to the top left corner
+        time.sleep(0.5)
+        m.monitor("mouse_button 1")
+        time.sleep(0.3)
+        m.monitor("mouse_button 0")
+        corner = m.expect(r"click at (\d+),(\d+)", 10)
+        cw, ch = int(ws.group(4)), int(ws.group(5))
+        dx = (int(button.group(1)) - int(corner.group(1))) * 8 // cw
+        dy = (int(button.group(2)) - int(corner.group(2))) * 16 // ch
+        move_mouse(m, dx, dy)
+        time.sleep(0.5)
+        m.monitor("mouse_button 1")
+        time.sleep(0.3)
+        m.monitor("mouse_button 0")
+        m.expect(r"about: OK clicked", 10)
+        m.keys("ctrl-q")                             # Ctrl+Q leaves the desktop
+        m.expect(PROMPT, 10)
+    finally:
+        m.stop()
+
+
 TESTS = [("boot", test_boot), ("files", test_files), ("fault", test_fault), ("panic", test_panic),
-         ("kernel", test_kernel), ("user", test_user), ("video", test_nvme_video), ("install", test_install), ("network", test_network),
+         ("kernel", test_kernel), ("desktop", test_desktop), ("user", test_user), ("video", test_nvme_video), ("install", test_install), ("network", test_network),
          ("bios", test_legacy_bios)]
 NEEDS_INTERNET = {"network"}
 

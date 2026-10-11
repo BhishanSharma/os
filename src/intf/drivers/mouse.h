@@ -51,6 +51,8 @@ void mouse_request_paste(void);
  * console while that pid is in the foreground; 0 gives it back. */
 void mouse_read(int *col, int *row, int *buttons, int *wheel);
 void mouse_set_owner(int pid);
+/* The pointer in units of 1/8 cell across and 1/16 cell down. */
+void mouse_pixel(int *x, int *y);
 int mouse_owner(void);
 
 #endif

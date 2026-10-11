@@ -96,7 +96,25 @@ static void erase(int n) {
 
 /* One line from the keyboard with Backspace and Up/Down for the history.
  * Returns its length, or -1 for Ctrl+C. */
+/* `shell -t`: run by Terminal, lines come down a pipe and commands do not
+   take the keyboard (the window server keeps it). */
+static int piped;
+#define FG (piped ? 0 : WAIT_FOREGROUND)
+
+static int read_piped_line(char *buf, int size) {
+    int len = 0;
+    char c;
+    while (len < size - 1) {
+        if (read(0, &c, 1) <= 0) exit(0);             /* Terminal closed */
+        if (c == '\n') break;
+        buf[len++] = c;
+    }
+    buf[len] = 0;
+    return len;
+}
+
 static int read_line(char *buf, int size) {
+    if (piped) return read_piped_line(buf, size);
     int len = 0, browse = history_count;
     char draft[LINE_MAX] = "";
     while (1) {
@@ -304,7 +322,7 @@ static int cmd_fg(const char *arg) {
     snprintf(name, sizeof(name), "%s", j ? j->command : "program");
     printf("%s (pid %d) is now in the foreground. Ctrl+C stops it.\n", name, pid);
     int status;
-    if (wait(pid, &status, WAIT_FOREGROUND) < 0) {
+    if (wait(pid, &status, FG) < 0) {
         printf("fg: %d is not a program started from this shell\n", pid);
         return 1;
     }
@@ -333,7 +351,7 @@ static int cmd_su(const char *user) {
         return 1;
     }
     int status;
-    wait(pid, &status, WAIT_FOREGROUND);
+    wait(pid, &status, FG);
     printf("Back to %s.\n", me.name);
     return 0;
 }
@@ -354,7 +372,7 @@ static int run_program(char **argv, int background, const char *command) {
         return 0;
     }
     int status = 0;
-    wait(pid, &status, WAIT_FOREGROUND);
+    wait(pid, &status, FG);
     report_exit(argv[0], pid, status);
     return status;
 }
@@ -457,7 +475,7 @@ static int run_pipeline(const char *text, int background) {
             continue;
         }
         int st = 0;
-        wait(pids[i], &st, i == n - 1 ? WAIT_FOREGROUND : 0);
+        wait(pids[i], &st, i == n - 1 ? FG : 0);
         if (i == n - 1) status = st;
     }
     return error ? 1 : status;
@@ -540,6 +558,7 @@ int main(int argc, char **argv) {
     getuser(&me);
     uname(&sys);
     ctrlc(CTRLC_KEY);                 // Ctrl+C clears the line instead of ending the shell
+    if (argc > 1 && strcmp(argv[1], "-t") == 0) piped = 1;
     if (argc > 1 && strcmp(argv[1], "-su") == 0)
         printf("Now %s. Type exit to go back.\n", me.name);
 

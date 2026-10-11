@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <os.h>
+#include <ui.h>
 
 #define PLM_NO_STDIO
 #define PL_MPEG_IMPLEMENTATION
@@ -54,6 +55,8 @@ static unsigned int *frame_rgb, *scaled;
 static int *xmap;
 static plm_frame_t *latest;               /* the newest decoded frame, not shown yet */
 static long frames_shown;
+static ui_window win;                     /* on the desktop: the picture goes in here */
+static int windowed;
 
 static void on_video(plm_t *plm, plm_frame_t *frame, void *user) {
     latest = frame;                       /* shown after plm_decode: only the newest one */
@@ -66,7 +69,8 @@ static void show_frame(void) {
         unsigned int *dst = scaled + (long)y * dw;
         for (int x = 0; x < dw; x++) dst[x] = src[xmap[x]] & 0xFFFFFF;
     }
-    gfx_blit(dx, dy, dw, dh, scaled, dw);
+    if (windowed) ui_present(&win);       /* `scaled` is the window's own pixels */
+    else gfx_blit(dx, dy, dw, dh, scaled, dw);
     latest = 0;
     frames_shown++;
 }
@@ -81,6 +85,15 @@ static void clear_screen_area(void) {
 /* A thin bar under the picture (when there is room): how far it has played. */
 static void show_progress(double t, double duration) {
     int y = dy + dh + 4, w = gi.width - 40;
+    if (windowed) {                       /* along the window's bottom edge */
+        y = dh + 2;
+        w = dw;
+        int done = (int)(w * (t / duration));
+        ui_fill(&win.c, 0, y, w, 3, 0x303040);
+        ui_fill(&win.c, 0, y, done, 3, 0xE040C0);
+        ui_present(&win);
+        return;
+    }
     if (y + 4 > gi.height || duration <= 0 || w <= 0) return;
     static unsigned int bar[4096];
     if (w > 4096) w = 4096;
@@ -119,6 +132,17 @@ static void on_audio(plm_t *plm, plm_samples_t *samples, void *user) {
         prev_r = r;
     }
     if (n) sound_write(out, n);           /* waits while the stream's buffer is full */
+}
+
+/* The next key, 0 if none; closing the window is 'q'. */
+static int next_key(void) {
+    if (!windowed) return getkey();
+    struct ws_event e;
+    while (ui_poll(&win, &e)) {
+        if (e.type == WS_EV_CLOSE) return 'q';
+        if (e.type == WS_EV_KEY) return e.key;
+    }
+    return 0;
 }
 
 /* ---- Playing ----------------------------------------------------------------------- */
@@ -179,6 +203,11 @@ int main(int argc, char **argv) {
 
     /* Fit the picture to the screen below the status bar, keeping its shape. */
     int sw = gi.width, sh = gi.height - gi.top;
+    windowed = ui_desktop();
+    if (windowed) {
+        sw = sw * 2 / 3;
+        sh = sh * 2 / 3;
+    }
     if ((long)vw * sh <= (long)vh * sw) {
         dh = sh;
         dw = (int)((long)vw * sh / vh);
@@ -191,7 +220,16 @@ int main(int argc, char **argv) {
     dx = (sw - dw) / 2;
     dy = gi.top + (sh - dh) / 2;
     frame_rgb = malloc((size_t)vw * vh * 4);
-    scaled = malloc((size_t)dw * dh * 4);
+    if (windowed) {
+        const char *name = strrchr(argv[1], '/') ? strrchr(argv[1], '/') + 1 : argv[1];
+        if (ui_open(&win, name, dw, dh + 6) == 0) {
+            ui_fill(&win.c, 0, 0, dw, dh + 6, 0);
+            scaled = win.c.px;
+        } else {
+            windowed = 0;                 /* full screen after all */
+        }
+    }
+    if (!windowed) scaled = malloc((size_t)dw * dh * 4);
     xmap = malloc((size_t)dw * sizeof(int));
     if (!frame_rgb || !scaled || !xmap) {
         printf("video: not enough memory\n");
@@ -199,13 +237,15 @@ int main(int argc, char **argv) {
     }
     for (int x = 0; x < dw; x++) xmap[x] = x * vw / dw;
 
-    gfx_begin();
-    clear_screen_area();
+    if (!windowed) {
+        gfx_begin();
+        clear_screen_area();
+    }
     int paused = 0, quit = 0;
     unsigned long last = uptime_ms(), last_bar = 0;
     while (!quit && !plm_has_ended(plm)) {
         int key;
-        while ((key = getkey()) != 0) {
+        while ((key = next_key()) != 0) {
             if (key == 'q' || key == 'Q' || key == 27) quit = 1;
             else if (key == ' ') paused = !paused;
             else if (key == KEYCODE_LEFT || key == KEYCODE_RIGHT) {
@@ -228,7 +268,7 @@ int main(int argc, char **argv) {
         }
         if (!latest) sleep_ms(paused ? 30 : 4);
     }
-    gfx_end();
+    if (!windowed) gfx_end();
     if (sound_on) sound_close();
     char at[16];
     fmt_time(at, plm_get_time(plm));

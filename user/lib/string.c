@@ -43,6 +43,14 @@ char *strchr(const char *s, int c) {
     return c ? 0 : (char *)s;
 }
 
+char *strrchr(const char *s, int c) {
+    const char *last = 0;
+    do
+        if (*s == (char)c) last = s;
+    while (*s++);
+    return (char *)last;
+}
+
 char *strstr(const char *haystack, const char *needle) {
     size_t n = strlen(needle);
     for (; *haystack; haystack++)

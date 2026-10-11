@@ -3,8 +3,10 @@
 // up to 8x). Any key, or a click, closes it.
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <image.h>
 #include <os.h>
+#include <ui.h>
 
 /* Shrink `img` into `out` (tw x th) by averaging the pixels each target
  * pixel covers (a box filter: no jagged edges, no lost detail). */
@@ -59,6 +61,11 @@ int main(int argc, char **argv) {
 
     // The picture area: below the status bar.
     int area_w = screen.width, area_h = screen.height - screen.top;
+    int windowed = ui_desktop();                       /* on the desktop: in a window */
+    if (windowed) {
+        area_w = area_w * 3 / 4;
+        area_h = area_h * 3 / 4;
+    }
     int tw = img.width, th = img.height, zoom_num = 100;
     unsigned int *shown = img.pixels;
     unsigned int *scaled = 0;
@@ -97,6 +104,20 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (windowed) {
+        ui_window w;
+        const char *name = strrchr(argv[1], '/') ? strrchr(argv[1], '/') + 1 : argv[1];
+        if (ui_open(&w, name, tw, th) == 0) {
+            ui_copy(&w.c, 0, 0, shown, tw, th, tw);
+            ui_present(&w);
+            struct ws_event e;
+            do ui_wait(&w, &e, 0);
+            while (e.type != WS_EV_CLOSE && !(e.type == WS_EV_KEY && (e.key == 27 || e.key == 'q')));
+            free(scaled);
+            image_free(&img);
+            return 0;
+        }
+    }
     if (gfx_begin() != 0) {
         printf("view: cannot draw (is it running in the background?)\n");
         free(scaled);

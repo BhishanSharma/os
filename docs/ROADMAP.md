@@ -12,6 +12,17 @@ System test: `kernel`. Cuts left: no TLB shootdown across a program's threads
 on other cores, signals delivered only on return from a system call, no TLS,
 and the big kernel lock still covers most of the kernel.
 
+Stage 7 is done, lean: `windowserver` (or `desktop`) composites shared-memory
+windows, redrawing only damaged rectangles, with a menu bar (the Terminal OS
+menu, the app's name, a clock), a Dock (Terminal, Files, About), and windows
+that can be dragged, closed and minimised; Ctrl+Q leaves. `user/lib/ui.c` has
+the drawing and widgets (button, text field, list). Terminal runs `shell -t`
+over pipes (Ctrl+C interrupts its programs); Files browses folders and opens
+pictures in `view`, videos in `video` (both draw in a window on the desktop)
+and other files with `cat` in a Terminal. System test: `desktop`. Cuts: no
+resizing, no per-app menus, clients poll for events (no cross-process futex),
+and programs that read keys directly do not work in Terminal.
+
 Each stage below is the *lean* version: the smallest design that gives the
 macOS-style structure, with the cuts written down. One stage per working
 session; it ends with `make test` + `make test-os` green, a USB stick, one

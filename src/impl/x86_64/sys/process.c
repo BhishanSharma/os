@@ -1214,7 +1214,9 @@ static int wait_for(task_t *t, int foreground) {
         keyboard_ctrl_c = 0;
     }
     int interrupted = 0;
-    while (t->state != TASK_ZOMBIE) {
+    /* A thread can be freed by someone else (process_reap_orphans): stop then. */
+#define GONE(t) ((t)->state == TASK_FREE || (t)->pid != pid)
+    while (t->state != TASK_ZOMBIE && !GONE(t)) {
         if (keyboard_ctrl_c && foreground_pid == pid && !takes_ctrl_c(t)) {
             keyboard_ctrl_c = 0;
             t->kill_code = EXIT_INTERRUPTED;
@@ -1229,9 +1231,13 @@ static int wait_for(task_t *t, int foreground) {
     }
     if (foreground && foreground_pid == pid) foreground_pid = previous;
     if (interrupted) keyboard_flush();   // the Ctrl+C has been dealt with
-    int code = t->exit_code;
-    task_reap(t);
-    if (print_get_col() != 0) print_str("\n");
+    int code = 0;
+    if (!GONE(t)) {
+        code = t->exit_code;
+        task_reap(t);
+    }
+#undef GONE
+    if (foreground && print_get_col() != 0) print_str("\n");
     return code;
 }
 
@@ -1478,6 +1484,12 @@ static int64_t sys_mouse(uint64_t ptr) {
     }
     mouse_set_owner(task_current()->pid);
     mouse_read(&m->col, &m->row, &m->buttons, &m->wheel);
+    uint32_t width, height, cell_w, cell_h, grid_x, grid_y;
+    fbcon_geometry(&width, &height, &cell_w, &cell_h, &grid_x, &grid_y);
+    int x, y;
+    mouse_pixel(&x, &y);
+    m->x = (int)grid_x + x * (int)(cell_w ? cell_w : 8) / 8;
+    m->y = (int)grid_y + y * (int)(cell_h ? cell_h : 16) / 16;
     return 1;
 }
 
@@ -1768,6 +1780,7 @@ static int64_t sys_signal(uint64_t sig, uint64_t handler, uint64_t tramp) {
 static int64_t sys_sigsend(int64_t pid, uint64_t sig) {
     task_t *t = task_by_pid((int)pid);
     if (!t || t->state == TASK_ZOMBIE || !t->is_user) return SYSERR_SRCH;
+    if (sig == 0) return 0;                             /* only: is it still running? */
     if (sig < 1 || sig >= 32) return SYSERR_BADCALL;
     if (!user_is_root() && t->user.uid != user_current()->uid) return SYSERR_PERM;
     process_t *q = t->process;

@@ -362,3 +362,8 @@ void mouse_set_owner(int pid) {
 }
 
 int mouse_owner(void) { return owner_pid; }
+
+void mouse_pixel(int *x, int *y) {
+    *x = px;
+    *y = py;
+}
