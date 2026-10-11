@@ -21,3 +21,4 @@ disk.img
 .vscode/*
 !.vscode/tasks.json
 __pycache__/
+!targets/x86_64/ramdisk/UIFONT.BIN
