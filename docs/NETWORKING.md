@@ -70,7 +70,7 @@ In QEMU user networking, `ping 10.0.2.2` and `ping 10.0.2.3` always work. Pingin
 * Downloads buffer the response in memory (up to `DOWNLOAD_MAX`) before writing to disk.
 * Redirects (301/302) are not followed automatically.
 * A download may buffer up to half the free heap, capped at 16 MiB (the test disk is 32 MiB).
-* FAT32 names are 8.3, so downloaded names get truncated.
+* The file is named after the URL's last part (`%20` and the like decoded).
 * Received frames are handled in interrupt context, so protocol handlers must stay short and
   must not call `kprintf` unless `netdebug` is on.
 

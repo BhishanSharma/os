@@ -34,7 +34,7 @@
 #define USER_HEAP_MAX    (256ULL * 1024 * 1024)
 #define MAX_ARGS         16
 #define MAX_FDS          8
-#define MAX_PATH         64
+#define MAX_PATH         256              /* FAT32_MAX_PATH: long names */
 #define PAGE_UP(x)       (((x) + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1))
 #define PAGE_DOWN(x)     ((x) & ~(uint64_t)(PAGE_SIZE - 1))
 
@@ -55,7 +55,7 @@ typedef struct {
     file_t files[MAX_FDS];
     char line_buf[256];               // keyboard input for read(0), one line at a time
     uint32_t line_len, line_pos;
-    char cwd[128];                    // its own current directory
+    char cwd[256];                    // its own current directory
     int ctrlc_mode;                   // CTRLC_END / CTRLC_KEY
 } process_t;
 
@@ -1032,7 +1032,7 @@ static int64_t sys_taskinfo(uint64_t slot, uint64_t ptr) {
 }
 
 static int64_t sys_chdir(uint64_t path_ptr) {
-    char path[128], saved[256];
+    char path[MAX_PATH], saved[256];
     if (copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
     enter_cwd(saved, sizeof(saved));
     int ok = fat32_change_directory(path) == 0;

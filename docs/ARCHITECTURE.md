@@ -128,7 +128,7 @@ use `build.ps1 -Log` for those.
 | Heap       | `drivers/heap.c`           | First-fit free list, 8-byte alignment, `kmalloc`/`kfree`        |
 | Disk       | `drivers/disk.c`           | Sector I/O for FAT32: the ATA disk or the RAM disk (`mount`)    |
 | ATA        | `drivers/ata.c`            | PIO, LBA28, primary bus master drive, polling with ~1 s timeouts |
-| FAT32      | `drivers/fat32.c`          | Short (8.3) names only; long-name entries are skipped           |
+| FAT32      | `drivers/fat32.c`          | Long names (VFAT) with 8.3 aliases; names compared without case  |
 | PCI        | `drivers/pci.c`            | Config-space access via ports `0xCF8`/`0xCFC`, device lookup    |
 | RTL8139    | `drivers/rtl8139.c`        | Init, RX ring, interrupts; logs received packet lengths; no TX  |
 

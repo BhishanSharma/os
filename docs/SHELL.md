@@ -147,8 +147,10 @@ keeps its scrollback). Under VirtualBox the screen follows the VM window by itse
 > Files live on the ATA disk when there is one (QEMU's `disk.img`), otherwise on the
 > **RAM disk** GRUB loads from the boot medium. RAM disk changes are lost at reboot.
 >
-> Filenames are FAT32 short names (8.3). The disk stores them upper-case, so
-> `test.txt` is listed as `TEST.TXT`.
+> File names can be long (up to 255 characters) and keep their case:
+> `My Notes.txt`. Upper and lower case count as the same name. A command that
+> takes one file uses the rest of the line (`cat my notes.txt`); where more
+> follows, put the name in quotes (`write "my notes.txt" hello`).
 
 ## Keeping files on a laptop
 

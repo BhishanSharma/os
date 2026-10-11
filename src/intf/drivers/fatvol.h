@@ -2,7 +2,8 @@
 //
 // Works on (volume, folder cluster, name): no paths, no current folder. The
 // VFS (sys/vfs.c) turns paths into those and handles mounts and permissions.
-// Names are 8.3 (no long names), compared without case.
+// Long names (VFAT, up to 255 characters) with 8.3 aliases; names are
+// compared without case, and either the long name or the alias finds a file.
 #ifndef FATVOL_H
 #define FATVOL_H
 
@@ -27,6 +28,9 @@ typedef struct {
 typedef struct {
     fat32_dir_entry_t e;
     uint32_t slot_cluster, slot_index;    /* the folder cluster holding it, entry number */
+    uint32_t lfn_cluster, lfn_index;      /* its first long-name entry, if lfn_count */
+    uint32_t lfn_count;
+    char name[256];                       /* the long name, or the 8.3 one */
 } fatent_t;
 
 #define FATV_NOT_FOUND   (-2)
@@ -38,6 +42,9 @@ typedef struct {
 #define FATV_READ_ONLY   (-30)
 
 int fatvol_open(fatvol_t *v, const blockdev_t *dev);     /* 0 if `dev` holds FAT32 */
+
+/* Can a file be called this? (Long names: printable ASCII, no \ / : * ? " < > |) */
+int fatvol_valid_name(const char *name);
 
 /* Is `name` a valid 8.3 name? Fills the 11-byte on-disk form. */
 int fatvol_name(const char *name, uint8_t out[11]);

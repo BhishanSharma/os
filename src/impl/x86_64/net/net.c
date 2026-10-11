@@ -1130,13 +1130,30 @@ static int parse_url(const char *url, const char *scheme, uint16_t def_port, cha
     return 0;
 }
 
+static int hex_digit(char c) {
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
+/* The file name from a URL path: its last part, %XX decoded ("my%20file.txt"
+ * is "my file.txt"), with characters a file name cannot hold made '_'. */
 static void derive_name(const char *path, char *out, uint32_t size) {
     const char *b = path;
-    for (const char *q = path; *q; q++) if (*q == '/') b = q + 1;
-    if (!*b) b = "index.htm";
+    for (const char *q = path; *q && *q != '?'; q++) if (*q == '/') b = q + 1;
+    if (!*b || *b == '?') b = "index.html";
     uint32_t n = 0;
-    while (b[n] && b[n] != '?' && n < size - 1) n++;
-    memcpy(out, b, n);
+    for (; *b && *b != '?' && *b != '#' && n < size - 1; b++) {
+        char c = *b;
+        if (c == '%' && hex_digit(b[1]) >= 0 && hex_digit(b[2]) >= 0) {
+            c = (char)(hex_digit(b[1]) * 16 + hex_digit(b[2]));
+            b += 2;
+        }
+        if ((unsigned char)c < ' ' || (unsigned char)c >= 127 || c == '\\' || c == '/' || c == ':' || c == '*' ||
+            c == '"' || c == '<' || c == '>' || c == '|')
+            c = '_';
+        out[n++] = c;
+    }
+    while (n && (out[n - 1] == ' ' || out[n - 1] == '.')) n--;
+    if (!n) out[n++] = '_';
     out[n] = 0;
 }
 

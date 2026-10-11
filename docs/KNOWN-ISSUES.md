@@ -10,8 +10,8 @@ move to the "Fixed" section below so you can see what changed and where.
 2. **Networking stops at ICMP.** ARP, IPv4 and ICMP echo work (`ping`), but there is no
    UDP/TCP, DNS, DHCP or HTTP yet, so `ping` takes only IP addresses. See
    [NETWORKING.md](NETWORKING.md) for the plan.
-3. **FAT32:** short (8.3) names only, long-file-name entries are skipped; `ls`/`tree`
-   show at most 32 entries; `cat` refuses files over 1 MB.
+3. **FAT32:** long names are ASCII only (other characters show as `?`); `ls` shows at
+   most 128 entries, `tree` 32; `cat` refuses files over 1 MB.
 
 ## Fixed
 

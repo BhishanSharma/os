@@ -172,7 +172,7 @@ static void cmd_help(void)
     print_str("\n=== Files ===\n");
     print_str("ls                 - list current directory\n");
     print_str("cat <file>         - display file (max 1 MB)\n");
-    print_str("write <file> <txt> - write text to file\n");
+    print_str("write <file> <txt> - write text to file (\"quote\" a name with spaces)\n");
     print_str("touch <file>       - create empty file\n");
     print_str("rm <file>          - delete file\n");
     print_str("mkdir <dir>        - create directory\n");
@@ -272,6 +272,32 @@ static void format_size(char *out, size_t size, uint32_t bytes)
         k_snprintf(out, size, "%u.%u MiB", bytes >> 20, (bytes % (1024 * 1024)) * 10 / (1024 * 1024));
 }
 
+/* A file name argument. Names may have spaces: without quotes the name is
+ * the rest of the line ("cat my notes.txt"); in quotes ("write "my notes.txt"
+ * hello") it ends at the closing quote and *rest gets what follows. */
+static char name_arg_buf[FAT32_MAX_PATH];
+
+static const char *name_arg(const char *s, const char **rest)
+{
+    while (*s == ' ') s++;
+    size_t n = 0;
+    if (*s == '"') {
+        for (s++; *s && *s != '"'; s++)
+            if (n + 1 < sizeof(name_arg_buf)) name_arg_buf[n++] = *s;
+        if (*s == '"') s++;
+    } else {
+        for (; *s && (!rest || *s != ' '); s++)
+            if (n + 1 < sizeof(name_arg_buf)) name_arg_buf[n++] = *s;
+        while (!rest && n && name_arg_buf[n - 1] == ' ') n--;
+    }
+    name_arg_buf[n] = 0;
+    if (rest) {
+        while (*s == ' ') s++;
+        *rest = s;
+    }
+    return name_arg_buf;
+}
+
 static void cmd_ls(const char *path)
 {
     // fat32_file_info_t is 268 bytes: these must not live on the boot stack.
@@ -281,7 +307,7 @@ static void cmd_ls(const char *path)
         print_str("Out of memory\n");
         return;
     }
-    while (*path == ' ') path++;
+    path = name_arg(path, 0);
     int count = fat32_list_directory_ex(path, files, 128);
 
     if (count < 0)
@@ -294,24 +320,31 @@ static void cmd_ls(const char *path)
     }
     else
     {
-        int dirs = 0, regular = 0;
+        int dirs = 0, regular = 0, width = 16;
         uint32_t total = 0;
-        char size[16], name[20];
+        char size[16], name[300];
+        for (int i = 0; i < count; i++)                    /* the name column fits the longest */
+        {
+            int len = (int)strlen(files[i].name) + 1;
+            if (len > width) width = len > 48 ? 48 : len;
+        }
         for (int i = 0; i < count; i++)
         {
             if (files[i].is_directory)
             {
                 k_snprintf(name, sizeof(name), "%s/", files[i].name);
                 print_accent("  ");
-                k_snprintf(size, sizeof(size), "%-16s", name);
-                print_accent(size);
+                print_accent(name);
+                for (int pad = (int)strlen(name); pad < width; pad++) print_str(" ");
                 print_str("     <DIR>\n");
                 dirs++;
             }
             else
             {
                 format_size(size, sizeof(size), files[i].size);
-                kprintf("  %-16s%10s\n", files[i].name, size);
+                kprintf("  %s", files[i].name);
+                for (int pad = (int)strlen(files[i].name); pad < width; pad++) print_str(" ");
+                kprintf("%10s\n", size);
                 regular++;
                 total += files[i].size;
             }
@@ -761,12 +794,12 @@ static int kernel_command(const char *line, int run_programs) {
     }
     else if (strncmp(line, "cat ", 4) == 0)
     {
-        const char *filename = line + 4;
+        const char *filename = name_arg(line + 4, 0);
         cmd_cat(filename);
     }
     else if (strncmp(line, "hexdump ", 8) == 0)
     {
-        const char *filename = line + 8;
+        const char *filename = name_arg(line + 8, 0);
 
         if (!fat32_file_exists(filename))
         {
@@ -830,7 +863,7 @@ static int kernel_command(const char *line, int run_programs) {
     }
     else if (strncmp(line, "fileinfo ", 9) == 0)
     {
-        const char *filename = line + 9;
+        const char *filename = name_arg(line + 9, 0);
 
         if (!fat32_file_exists(filename))
         {
@@ -983,14 +1016,10 @@ static int kernel_command(const char *line, int run_programs) {
     }
     else if (strncmp(line, "write ", 6) == 0)
     {
-        char *space = line + 6;
-        while (*space && *space != ' ')
-            space++;
-        if (*space == ' ')
+        const char *content;
+        const char *filename = name_arg(line + 6, &content);
+        if (filename[0] && content[0])
         {
-            *space = '\0';
-            const char *filename = line + 6;
-            const char *content = space + 1;
 
             fat32_create_file(filename);   // fails harmlessly if it already exists
             int result = fat32_write_file(filename, (uint8_t *)content, strlen(content));
@@ -1010,7 +1039,7 @@ static int kernel_command(const char *line, int run_programs) {
     }
     else if (strncmp(line, "touch ", 6) == 0)
     {
-        const char *filename = line + 6;
+        const char *filename = name_arg(line + 6, 0);
 
         int result = fat32_create_file(filename);
         if (result == 0)
@@ -1024,7 +1053,7 @@ static int kernel_command(const char *line, int run_programs) {
     }
     else if (strncmp(line, "rm ", 3) == 0)
     {
-        const char *filename = line + 3;
+        const char *filename = name_arg(line + 3, 0);
         int result = fat32_delete_file(filename);
         if (result == 0)
         {
@@ -1037,7 +1066,7 @@ static int kernel_command(const char *line, int run_programs) {
     }
     else if (strncmp(line, "mkdir ", 6) == 0)
     {
-        const char *dirname = line + 6;
+        const char *dirname = name_arg(line + 6, 0);
         int result = fat32_mkdir(dirname);
         if (result == 0)
         {
@@ -1050,8 +1079,7 @@ static int kernel_command(const char *line, int run_programs) {
     }
     else if (strcmp(line, "cd") == 0 || strncmp(line, "cd ", 3) == 0)
     {
-        const char *path = line[2] ? line + 3 : "~";
-        while (*path == ' ') path++;
+        const char *path = line[2] ? name_arg(line + 3, 0) : "~";
         if (*path == '\0' || strcmp(path, "~") == 0) path = user_current()->home;   // home folder
         if (fat32_change_directory(path) != 0)
         {
@@ -1198,7 +1226,7 @@ static int kernel_command(const char *line, int run_programs) {
     }
     else if (strncmp(line, "edit ", 5) == 0)
     {
-        const char *filename = line + 5;
+        const char *filename = name_arg(line + 5, 0);
         editor_open(filename);
     }
     else if (strncmp(line, "sh ", 3) == 0) {
@@ -1690,17 +1718,7 @@ static void cmd_download(const char *args)
     args += n;
     while (*args == ' ') args++;
 
-    char filename[32];
-    const char *out = 0;
-    if (*args) {
-        size_t m = 0;
-        while (args[m] && args[m] != ' ' && m < sizeof(filename) - 1) {
-            filename[m] = args[m];
-            m++;
-        }
-        filename[m] = '\0';
-        out = filename;
-    }
+    const char *out = *args ? name_arg(args, 0) : 0;     /* may have spaces */
 
     if (strncmp(url, "https://", 8) == 0) net_download_https(url, out);
     else net_download_http(url, out);

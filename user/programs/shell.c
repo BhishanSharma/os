@@ -142,7 +142,7 @@ static int read_line(char *buf, int size) {
 }
 
 static void prompt(void) {
-    char cwd[128];
+    char cwd[256];
     if (getcwd(cwd, sizeof(cwd)) < 0) strcpy(cwd, "?");
     int root = me.uid == 0;
     if (cursor_column() != 0) putchar('\n');     // never start the prompt mid-line
@@ -375,8 +375,8 @@ static int run_command(const char *raw, int background) {
     const char *cmd = argv[0], *arg = argc > 1 ? argv[1] : 0;
 
     if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "logout") == 0) exit(arg ? atoi(arg) : 0);
-    if (strcmp(cmd, "cd") == 0)      return cmd_cd(arg);
-    if (strcmp(cmd, "pwd") == 0)     { char cwd[128]; getcwd(cwd, sizeof(cwd)); printf("%s\n", cwd); return 0; }
+    if (strcmp(cmd, "cd") == 0)      return cmd_cd(argc > 2 ? text + 3 : arg);   /* cd My Folder */
+    if (strcmp(cmd, "pwd") == 0)     { char cwd[256]; getcwd(cwd, sizeof(cwd)); printf("%s\n", cwd); return 0; }
     if (strcmp(cmd, "help") == 0)    { cmd_help(); return 0; }
     if (strcmp(cmd, "ps") == 0)      { cmd_ps(); return 0; }
     if (strcmp(cmd, "jobs") == 0)    { cmd_jobs(); return 0; }
