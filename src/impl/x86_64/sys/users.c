@@ -46,6 +46,7 @@ static int session_depth;
 /* While > 0 the write guard lets everything through (saving PASSWD, making
  * home folders): like a setuid program acting on the user's behalf. */
 static int privileged;
+static int in_program(void);
 
 /* ---- Helpers ------------------------------------------------------------ */
 
@@ -368,7 +369,7 @@ static int path_inside(const char *path, const char *dir) {
 }
 
 int user_may_write(const char *path) {
-    if (privileged || session_depth == 0) return 1;     // the kernel itself, or before login
+    if (privileged || (session_depth == 0 && !in_program())) return 1;   // the kernel itself, before login
     const user_t *u = user_current();
     if (u->uid == 0) return 1;
     char abs[256];
@@ -383,7 +384,7 @@ static int write_guard(const char *path) {
 /* Like /etc/shadow: only root reads the password hashes (and the saved
  * Wi-Fi key). */
 static int read_guard(const char *path) {
-    if (privileged || session_depth == 0 || user_is_root()) return 1;
+    if (privileged || (session_depth == 0 && !in_program()) || user_is_root()) return 1;
     char abs[256];
     normalize_path(path, abs, sizeof(abs));
     return strcmp(abs, "/" DB_FILE) != 0 && strcmp(abs, "/WIFI.CFG") != 0;
@@ -400,6 +401,20 @@ const user_t *user_current(void) {
     task_t *t = task_current();
     if (t && t->is_user) return &t->user;      // a program runs as whoever started it
     return session_depth ? &sessions[session_depth - 1] : &nobody;
+}
+
+/* A user program is running (its own user counts, also with no kernel session:
+ * launchd's login starts shells without one). */
+static int in_program(void) {
+    task_t *t = task_current();
+    return t && t->is_user;
+}
+
+int users_check_password(const char *name, const char *password, user_t *out) {
+    account_t *a = find_account(name);
+    if (!a || !check_password(a, password)) return -1;
+    *out = a->user;
+    return 0;
 }
 
 int user_is_root(void) {

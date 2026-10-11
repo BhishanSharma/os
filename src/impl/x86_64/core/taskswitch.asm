@@ -56,6 +56,35 @@ task_start_user:
     xor r15d, r15d
     iretq                   ; rip, cs, rflags, rsp, ss prepared by task_create_user
 
+; A task made by task_create_frame: its whole register frame (struct
+; exc_frame) is on the stack after task_switch's ret.
+global task_start_frame
+task_start_frame:
+    mov rbx, rsp
+    and rsp, -16
+    call bkl_user_entry
+    mov rsp, rbx
+    mov ax, USER_DATA
+    mov ds, ax
+    mov es, ax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    add rsp, 16             ; vector, error code
+    iretq
+
 extern task_exit_kernel
 global task_start_kernel
 task_start_kernel:

@@ -11,10 +11,10 @@
 #include <stdint.h>
 #include "sys/users.h"
 
-#define MAX_TASKS   32
+#define MAX_TASKS   64
 #define TASK_SLICE  5         /* timer ticks (50 ms) a program runs before the next one */
 
-typedef enum { TASK_FREE, TASK_READY, TASK_SLEEPING, TASK_ZOMBIE } task_state_t;
+typedef enum { TASK_FREE, TASK_READY, TASK_SLEEPING, TASK_ZOMBIE, TASK_BLOCKED } task_state_t;
 
 typedef struct task {
     int pid;
@@ -27,7 +27,10 @@ typedef struct task {
     int is_user;              /* runs a user program */
     int parent;               /* pid that waits for it */
     int exit_code;
-    uint32_t wake_tick;       /* TASK_SLEEPING until then */
+    uint32_t wake_tick;       /* TASK_SLEEPING until then; TASK_BLOCKED's deadline */
+    const void *wait_chan;    /* TASK_BLOCKED on this (task_block) */
+    int has_deadline;
+    int is_thread;            /* a second (third...) thread of a program */
     uint32_t ticks;           /* timer ticks spent running (for ps) */
     uint32_t start_tick;
     int kill_code;            /* nonzero: end the program at the next chance */
@@ -53,6 +56,26 @@ task_t *task_at(int index);   /* 0..MAX_TASKS-1, for ps; FREE slots included */
 /* A user program: `root` page tables, starts at `entry` with stack `user_sp`.
  * The task is READY when this returns. 0 if there is no free slot or memory. */
 task_t *task_create_user(const char *name, uint64_t root, uint64_t entry, uint64_t user_sp);
+
+/* A user task that starts from a full register frame (struct exc_frame from
+ * core/exceptions.h): fork's child, a new thread. */
+struct exc_frame;
+task_t *task_create_frame(const char *name, uint64_t root, const struct exc_frame *frame);
+
+/* Wait queues. task_block: sleep until task_wakeup(chan) (all waiters on
+ * chan), task_interrupt, or `timeout_ms` (0 = no limit). Returns 0 when woken,
+ * -1 on timeout. Callers check their condition and block under the kernel
+ * lock, and loop: a wake-up is a hint, not a promise. */
+int task_block(const void *chan, uint32_t timeout_ms);
+void task_wakeup(const void *chan);
+void task_interrupt(task_t *t);            /* wake it from any sleep (kill) */
+
+/* A lock that sleeps: the holder may wait (disk, network) without holding
+ * up other tasks that do not need it. Recursive for its holder. Before
+ * task_init it does nothing. */
+typedef struct { task_t *owner; int depth; } kmutex_t;
+void kmutex_lock(kmutex_t *m);
+void kmutex_unlock(kmutex_t *m);
 
 void task_yield(void);                     /* let others run, stay ready */
 void task_sleep(uint32_t ms);              /* not scheduled for `ms` */

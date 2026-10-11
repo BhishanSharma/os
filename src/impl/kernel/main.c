@@ -41,6 +41,8 @@
 #include "sys/install.h"
 #include "drivers/physmem.h"
 #include "drivers/vmmdev.h"
+#include "drivers/registry.h"
+#include "drivers/pci.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
@@ -63,7 +65,7 @@ extern char kernel_phys_end[];
 // (drivers/addr.h).
 #define HEAP_LOW       0x600000ULL
 #define HEAP_HIGH      0x40000000ULL
-#define HEAP_MAX       (1024ULL * 1024 * 1024)
+#define HEAP_MAX       (256ULL * 1024 * 1024)   // the rest of RAM is for programs (physmem)
 #define HEAP_FALLBACK  (1024 * 1024)      // no memory map: assume 1 MiB at 4 MiB
 #define HEAP_MIN       (8ULL * 1024 * 1024) // heap left after carving out the RAM disk
 
@@ -102,10 +104,23 @@ static void mount_persistent(void) {
         }
         if (disk_open(DISK_RAM, &ram) == 0) vfs_mount("/SYS", &ram);
         fat32_change_directory("/");
+        registry_add(registry_find("storage"), "TERMINALOS", "volume", "partition %d, FAT32, %u MiB, mounted at /",
+                     i + 1, (uint32_t)(parts[i].sectors / 2048));
         print_boot_status(BOOT_OK, "Files", "on the NVMe TERMINALOS partition (%u MiB, kept across reboots); "
                           "system files at /SYS", (uint32_t)(parts[i].sectors / 2048));
         return;
     }
+}
+
+/* The registry node of the first PCI function of this class (0: the root). */
+static int find_class_node(uint8_t cls, uint8_t sub) {
+    for (int id = 0; registry_node(id); id++) {
+        const reg_node_t *n = registry_node(id);
+        if (strcmp(n->cls, "pci")) continue;
+        uint32_t c = pci_config_read_dword((uint8_t)n->bus, (uint8_t)n->slot, (uint8_t)n->func, 0x08);
+        if ((c >> 24) == cls && ((c >> 16) & 0xFF) == sub) return id;
+    }
+    return 0;
 }
 
 static void report_clock(void) {
@@ -282,6 +297,8 @@ void kernel_main() {
 
     // Message-signalled interrupts (devices interrupt through the local APIC).
     if (have_ticks) msi_init();
+    registry_scan_pci();                       // the device tree (`ioreg`)
+    registry_add(0, "Memory", "memory", "%u MiB usable", (uint32_t)(get_total_memory() >> 20));
 
     // USB waits for the controller's answers, so it needs the ticks too.
     if (have_ticks) {
@@ -293,15 +310,22 @@ void kernel_main() {
         if (nv == 0 || strncmp(nvme_how, "no NVMe", 7) != 0)
             print_boot_status(nv == 0 ? BOOT_OK : BOOT_WARN, "NVMe", "%s%s", nvme_how,
                               nv == 0 ? " (`nvme` lists partitions)" : "");
-        if (nv == 0) mount_persistent();
+        if (nv == 0) {
+            registry_add(find_class_node(0x01, 0x08), "NVMe drive", "storage", "%s", nvme_how);
+            mount_persistent();
+        }
         char sound_how[96];
         int snd = sound_init(sound_how, sizeof(sound_how));
         print_boot_status(snd == 0 ? BOOT_OK : BOOT_WARN, "Sound", "%s", sound_how);
+        if (snd == 0) registry_add(find_class_node(0x04, 0x03), "Sound output", "audio", "%s", sound_how);
         int tp = touchpad_init();
         print_boot_status(tp == 0 ? BOOT_OK : BOOT_WARN, "Touchpad", "%s", touchpad_description());
         char power_how[160];
         int pw = power_init(power_how, sizeof(power_how));
         print_boot_status(pw == 0 ? BOOT_OK : BOOT_WARN, "Power", "%s", power_how);
+        if (pw == 0) registry_add(0, "ACPI", "power", "%s", power_how);
+        if (tp == 0) registry_add(find_class_node(0x0C, 0x80), "Touchpad", "input", "%s", touchpad_description());
+        registry_add(find_class_node(0x0C, 0x03), "USB", "bus", "%s", usb_description());
     }
 
     // DHCP needs the timer and NIC interrupts, so it runs after sti.
@@ -332,6 +356,7 @@ void kernel_main() {
     if (have_ticks) {   // the other cores join the scheduler
         int cores = smp_init(!no_smp);
         kprintf("CPU: %d core%s running\n", cores, cores == 1 ? "" : "s");
+        registry_add(0, "CPU", "cpu", "%s, %d core%s", sysinfo_cpu_name(), cores, cores == 1 ? "" : "s");
     }
     statusbar_update(1);
     keyboard_set_idle_hook(statusbar_idle);

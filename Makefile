@@ -1,4 +1,8 @@
 # ---------------------------------------------------------------------------
+# AddressSanitizer can fail at random under 32-bit mmap randomisation (Docker
+# Desktop's kernel): run the host tests without ASLR when the system allows it
+NOASLR := $(shell setarch -R true 2>/dev/null && echo setarch -R)
+
 # Terminal OS build system
 #
 # Run `make help` to see every target.
@@ -363,20 +367,20 @@ test-net: ## Unit-test the IP/ICMP/ARP code on the host with a simulated gateway
 	    tests/net_host_test.c \
 	    $(SRC_X86)/net/net.c $(SRC_X86)/net/tcp.c \
 	    -o $(BUILD)/test/net_host_test
-	$(BUILD)/test/net_host_test
+	$(NOASLR) $(BUILD)/test/net_host_test
 
 test-tcp: ## Unit-test TCP on the host against a simulated peer (loss, reordering)
 	mkdir -p $(BUILD)/test
 	gcc -g -O1 -Wall -Wno-unused-function -fsanitize=address,undefined -I src/intf \
 	    tests/tcp_host_test.c $(SRC_X86)/net/tcp.c -o $(BUILD)/test/tcp_host_test
-	$(BUILD)/test/tcp_host_test
+	$(NOASLR) $(BUILD)/test/tcp_host_test
 
 test-wpa: ## Unit-test the WPA2 handshake on the host (IEEE/RFC vectors, simulated AP)
 	mkdir -p $(BUILD)/test
 	$(MAKE) -C $(BEARSSL_DIR) -s lib >/dev/null      # a host build of BearSSL
 	gcc -g -O1 -Wall -I src/intf -I $(BEARSSL_DIR)/inc tests/wpa_host_test.c $(SRC_X86)/net/wpa.c \
 	    $(BEARSSL_DIR)/build/libbearssl.a -o $(BUILD)/test/wpa_host_test
-	$(BUILD)/test/wpa_host_test
+	$(NOASLR) $(BUILD)/test/wpa_host_test
 
 test-unit: test-net test-tcp test-wpa ## All the host-side unit tests
 

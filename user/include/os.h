@@ -90,6 +90,46 @@ int net_close(int sock);
 const char *net_strerror(int err);
 const char *os_strerror(int err);            /* text for a negative SYSERR_* result */
 
+/* Memory: pages appear when first touched. */
+void *mmap(size_t len, int prot, int fd);    /* fd -1: zeroed memory; else that file (read-only copy) -> 0 on error */
+int munmap(void *addr);                      /* a whole mapping */
+void *shm_map(const char *name, size_t size);   /* shared memory: every program mapping `name` sees the same */
+
+/* Programs */
+int fork(void);                              /* -> child pid in the parent, 0 in the child */
+int exec(const char *path, char *const argv[]);  /* returns only on error */
+
+/* Threads: share the program's memory; wait(tid, ...) joins one. */
+int thread_create(void (*fn)(void *), void *arg);   /* -> thread id */
+void thread_exit(int code) __attribute__((noreturn));
+int futex(int op, volatile int *addr, int value);   /* FUTEX_WAIT / FUTEX_WAKE */
+typedef struct { volatile int v; } mutex_t;  /* = { 0 } */
+void mutex_lock(mutex_t *m);
+void mutex_unlock(mutex_t *m);
+
+/* Ports (Mach-style messages): see sys/port.h in the kernel. */
+int port_create(void);                       /* -> a port you receive on */
+int port_send(int port, const void *msg, size_t len, int reply_port);   /* reply_port -1: none */
+int port_receive(int port, void *buf, size_t max, unsigned long timeout_ms, int *reply);  /* -> length */
+int port_register(const char *service, int port);
+int port_lookup(const char *service);        /* -> a port you can send to */
+int port_close(int port);
+int port_call(int port, const void *msg, size_t len, void *reply_buf, size_t max, unsigned long timeout_ms);
+
+/* Descriptors: 0 in, 1 out, 2 errors; programs started with spawn get yours. */
+int pipe(int fds[2]);                        /* fds[0] reads, fds[1] writes */
+int dup(int fd);
+int dup2(int fd, int to);
+
+/* Signals (SIGINT, SIGTERM, SIGUSR1, SIGCHLD, ...): a handler runs when the
+ * program next makes a system call. */
+int signal(int sig, void (*handler)(int));   /* handler 0: the default */
+int sigsend(int pid, int sig);
+
+int registry(int index, struct os_regnode *node);   /* the device tree: 1, 0 past the end */
+int auth(const char *name, const char *password, struct os_user *u);   /* root only */
+void console_echo(int on);                   /* off: read(0) does not show the typing */
+
 /* Console */
 void clear_screen(void);
 void gotoxy(int col, int row);

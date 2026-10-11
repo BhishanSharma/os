@@ -18,6 +18,7 @@
 typedef struct {
     uint64_t base, pages, free;
     uint64_t *bitmap;                                 /* 1 = in use */
+    uint16_t *refs;                                   /* mappings of each page (copy-on-write, shared memory) */
     uint64_t hint;                                    /* where to look next (a word index) */
 } chunk_t;
 
@@ -32,7 +33,12 @@ static void add_chunk(uint64_t start, uint64_t end) {
     chunk_t *c = &chunks[chunk_count];
     c->pages = (end - start) / PAGE_SIZE;
     c->bitmap = kmalloc((c->pages + 63) / 64 * 8);
-    if (!c->bitmap) return;
+    c->refs = kmalloc(c->pages * sizeof(uint16_t));
+    if (!c->bitmap || !c->refs) {
+        kfree(c->bitmap);
+        kfree(c->refs);
+        return;
+    }
     memset(c->bitmap, 0, (c->pages + 63) / 64 * 8);
     c->base = start;
     c->free = c->pages;
@@ -80,6 +86,7 @@ uint64_t page_alloc(void) {
             uint64_t page = w * 64 + (uint64_t)bit;
             if (page >= c->pages) continue;
             c->bitmap[w] |= 1ULL << bit;
+            c->refs[page] = 1;
             c->free--;
             c->hint = w;
             used_pages++;
@@ -95,9 +102,24 @@ void page_free(uint64_t phys) {
     uint64_t page = (phys - c->base) / PAGE_SIZE;
     uint64_t bit = 1ULL << (page % 64);
     if (!(c->bitmap[page / 64] & bit)) return;          /* not in use: a double free */
+    if (c->refs[page] > 1) {                            /* still mapped elsewhere */
+        c->refs[page]--;
+        return;
+    }
+    c->refs[page] = 0;
     c->bitmap[page / 64] &= ~bit;
     c->free++;
     used_pages--;
+}
+
+void page_ref(uint64_t phys) {
+    chunk_t *c = chunk_of(phys);
+    if (c) c->refs[(phys - c->base) / PAGE_SIZE]++;
+}
+
+int page_refcount(uint64_t phys) {
+    chunk_t *c = chunk_of(phys);
+    return c ? c->refs[(phys - c->base) / PAGE_SIZE] : 1;
 }
 
 uint64_t physmem_total(void) { return total_pages * PAGE_SIZE; }

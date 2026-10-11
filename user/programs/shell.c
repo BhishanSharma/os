@@ -359,6 +359,110 @@ static int run_program(char **argv, int background, const char *command) {
     return status;
 }
 
+/* ---- Pipes and redirection ------------------------------------------------- */
+
+/* Does `s` have | < or > outside quotes? */
+static int has_pipeline(const char *s) {
+    char quote = 0;
+    for (; *s; s++) {
+        if (quote) { if (*s == quote) quote = 0; continue; }
+        if (*s == '"' || *s == '\'') quote = *s;
+        else if (*s == '|' || *s == '<' || *s == '>') return 1;
+    }
+    return 0;
+}
+
+#define MAX_STAGES 4
+
+/* a | b | c, each with < file, > file, >> file, 2>&1. Only programs (not the
+ * kernel's commands, which write to the console themselves). */
+static int run_pipeline(const char *text, int background) {
+    char line[LINE_MAX], *stage[MAX_STAGES];
+    snprintf(line, sizeof(line), "%s", text);
+    int n = 0;
+    char quote = 0, *start = line;
+    for (char *s = line;; s++) {
+        if (quote && *s) { if (*s == quote) quote = 0; continue; }
+        if (*s == '"' || *s == '\'') { quote = *s; continue; }
+        if (*s == '|' || !*s) {
+            int end = !*s;
+            *s = 0;
+            if (n == MAX_STAGES) { printf("at most %d programs in a pipeline\n", MAX_STAGES); return 2; }
+            stage[n++] = start;
+            start = s + 1;
+            if (end) break;
+        }
+    }
+    int saved[3] = { dup(0), dup(1), dup(2) }, pids[MAX_STAGES], prev = -1, status = 0;
+    const char *error = 0;
+    char error_word[64] = "";
+    for (int i = 0; i < n; i++) {
+        pids[i] = -1;
+        char *argv[MAX_ARGV], *args[MAX_ARGV];
+        char words[LINE_MAX];
+        snprintf(words, sizeof(words), "%s", stage[i]);
+        int argc = split(words, argv), k = 0, both = 0;
+        const char *in = 0, *out = 0;
+        int append = 0;
+        for (int a = 0; a < argc; a++) {                 /* take the redirections out */
+            char *w = argv[a];
+            if (!strcmp(w, "2>&1")) { both = 1; continue; }
+            if (!strncmp(w, ">>", 2)) { out = w[2] ? w + 2 : (a + 1 < argc ? argv[++a] : 0); append = 1; continue; }
+            if (w[0] == '>') { out = w[1] ? w + 1 : (a + 1 < argc ? argv[++a] : 0); append = 0; continue; }
+            if (w[0] == '<') { in = w[1] ? w + 1 : (a + 1 < argc ? argv[++a] : 0); continue; }
+            args[k++] = w;
+        }
+        args[k] = 0;
+        int next = -1;
+        if (prev >= 0) dup2(prev, 0);
+        if (in) {
+            int fd = open(in, OPEN_READ);
+            if (fd < 0) { error = "no such file"; snprintf(error_word, sizeof(error_word), "%s", in); }
+            else { dup2(fd, 0); close(fd); }
+        }
+        if (i < n - 1) {
+            int p[2];
+            if (pipe(p) == 0) {
+                dup2(p[1], 1);
+                close(p[1]);
+                next = p[0];
+            }
+        }
+        if (out) {
+            int fd = open(out, append ? OPEN_APPEND : OPEN_WRITE);
+            if (fd < 0) { error = os_strerror(fd); snprintf(error_word, sizeof(error_word), "%s", out); }
+            else { dup2(fd, 1); close(fd); }
+        }
+        if (both) dup2(1, 2);
+        if (!error && k > 0) {
+            pids[i] = spawn(args[0], args, 0);
+            if (pids[i] < 0) {
+                error = pids[i] == SYSERR_NOENT ? "unknown program" : os_strerror(pids[i]);
+                snprintf(error_word, sizeof(error_word), "%s", args[0]);
+            }
+        }
+        for (int fd = 0; fd < 3; fd++) dup2(saved[fd], fd);   /* the shell's own again */
+        if (prev >= 0) close(prev);
+        prev = next;
+        if (error) break;
+    }
+    if (prev >= 0) close(prev);
+    for (int fd = 0; fd < 3; fd++) close(saved[fd]);
+    if (error) printf("%s: %s\n", error_word, error);
+    for (int i = 0; i < n; i++) {
+        if (pids[i] <= 0) continue;
+        if (background && i == n - 1) {
+            job_add(pids[i], text);
+            printf("[%d] running in the background\n", pids[i]);
+            continue;
+        }
+        int st = 0;
+        wait(pids[i], &st, i == n - 1 ? WAIT_FOREGROUND : 0);
+        if (i == n - 1) status = st;
+    }
+    return error ? 1 : status;
+}
+
 /* One command (no ; or &&). Returns its exit status. */
 static int run_command(const char *raw, int background) {
     char expanded[LINE_MAX * 2], *text = expanded;
@@ -367,6 +471,8 @@ static int run_command(const char *raw, int background) {
     size_t n = strlen(text);
     while (n && text[n - 1] == ' ') text[--n] = 0;
     if (!*text) return last_status;
+
+    if (has_pipeline(text)) return run_pipeline(text, background);
 
     char words[LINE_MAX], *argv[MAX_ARGV];
     snprintf(words, sizeof(words), "%s", text);
@@ -415,6 +521,7 @@ static void run_line(const char *line) {
             if (c) { s++; continue; }
         }
         if (c == '"' || c == '\'') { quote = c; s++; continue; }
+        if (c == '&' && s > text && s[-1] == '>') { s++; continue; }   /* 2>&1 */
         if (c && c != ';' && c != '&') { s++; continue; }
 
         int background = 0, and_then = 0;

@@ -58,4 +58,9 @@ void process_fault(uint64_t vector, const char *name, uint64_t rip, uint64_t add
  * program (or, in the kernel shell, the command) to stop? */
 int process_interrupted(void);
 
+/* A page fault in user mode (exceptions.c): 0 if it was handled (a page of a
+ * region brought in, copy-on-write). */
+int process_page_fault(uint64_t addr, uint64_t err);
+int process_signal_pending(void);    /* a handled signal waits: blocking calls return early */
+
 #endif

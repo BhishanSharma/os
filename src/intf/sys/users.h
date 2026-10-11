@@ -37,6 +37,8 @@ int user_may_write(const char *path);
 #define USERS_NO_SUCH_USER  -1
 #define USERS_AUTH_FAILED   -2
 int users_authenticate(const char *name, user_t *out);
+/* 0 and the account if `password` is name's (login, through SYS_AUTH). */
+int users_check_password(const char *name, const char *password, user_t *out);
 
 /* Shell commands: whoami, id, users, useradd, userdel, passwd, su.
  * Returns 1 if `line` was one of them. */

@@ -161,7 +161,7 @@ static int resolve(const char *path, int parent, target_t *t) {
 
 /* ---- Mounts ----------------------------------------------------------------------- */
 
-int vfs_mount(const char *path, const blockdev_t *dev) {
+static int vfs_mount_unlocked(const char *path, const blockdev_t *dev) {
     char abs[64];
     if (path[0] != '/' || vfs_normalize(path, abs, sizeof(abs)) != 0) return FATV_BAD_NAME;
     for (char *c = abs; *c; c++) *c = up(*c);              /* mount points in capitals: /NVME */
@@ -183,7 +183,7 @@ int vfs_mount(const char *path, const blockdev_t *dev) {
     return 0;
 }
 
-int vfs_unmount(const char *path) {
+static int vfs_unmount_unlocked(const char *path) {
     char abs[64];
     if (vfs_normalize(path, abs, sizeof(abs)) != 0 || !strcmp(abs, "/")) return FATV_BAD_NAME;
     for (int i = 0; i < VFS_MAX_MOUNTS; i++)
@@ -223,7 +223,7 @@ const char *vfs_root_name(void) {
     return m ? m->vol.dev.name : "none";
 }
 
-int vfs_read_sectors(uint64_t lba, uint32_t count, void *buf) {
+static int vfs_read_sectors_unlocked(uint64_t lba, uint32_t count, void *buf) {
     mount_t *m = mount_at("/");
     return m ? m->vol.dev.read(m->vol.dev.ctx, lba, count, buf) : -1;
 }
@@ -235,7 +235,7 @@ int vfs_root_persistent(void) {
 
 /* ---- The file calls (drivers/fat32.h) ------------------------------------------------ */
 
-int fat32_read_file(const char *path, uint8_t *buffer, uint32_t max_size) {
+static int fat32_read_file_unlocked(const char *path, uint8_t *buffer, uint32_t max_size) {
     target_t t;
     int r = resolve(path, 1, &t);
     if (r) return -1;
@@ -247,7 +247,7 @@ int fat32_read_file(const char *path, uint8_t *buffer, uint32_t max_size) {
     return r < 0 ? -2 : r;
 }
 
-int fat32_file_exists(const char *path) {
+static int fat32_file_exists_unlocked(const char *path) {
     target_t t;
     if (resolve(path, 1, &t) != 0) return 0;
     if (!t.base[0] || mount_at(t.abs)) return 1;
@@ -255,7 +255,7 @@ int fat32_file_exists(const char *path) {
     return fatvol_lookup(&t.m->vol, t.dir, t.base, &f) == 0;
 }
 
-uint32_t fat32_get_file_size(const char *path) {
+static uint32_t fat32_get_file_size_unlocked(const char *path) {
     target_t t;
     if (resolve(path, 1, &t) != 0) return 0xFFFFFFFFu;
     if (!t.base[0] || mount_at(t.abs)) return 0;
@@ -264,7 +264,7 @@ uint32_t fat32_get_file_size(const char *path) {
     return f.e.file_size;
 }
 
-int fat32_write_file(const char *path, const uint8_t *buffer, uint32_t size) {
+static int fat32_write_file_unlocked(const char *path, const uint8_t *buffer, uint32_t size) {
     target_t t;
     int r = resolve(path, 1, &t);
     if (r) return r;
@@ -277,7 +277,7 @@ int fat32_write_file(const char *path, const uint8_t *buffer, uint32_t size) {
     return fatvol_write(&t.m->vol, &f, buffer, size);
 }
 
-int fat32_create_file(const char *path) {
+static int fat32_create_file_unlocked(const char *path) {
     target_t t;
     int r = resolve(path, 1, &t);
     if (r) return r;
@@ -287,7 +287,7 @@ int fat32_create_file(const char *path) {
     return r == FATV_EXISTS ? -1 : r;
 }
 
-int fat32_mkdir(const char *path) {
+static int fat32_mkdir_unlocked(const char *path) {
     target_t t;
     int r = resolve(path, 1, &t);
     if (r) return r;
@@ -296,7 +296,7 @@ int fat32_mkdir(const char *path) {
     return fatvol_create(&t.m->vol, t.dir, t.base, 1, 0);
 }
 
-int fat32_delete_file(const char *path) {
+static int fat32_delete_file_unlocked(const char *path) {
     target_t t;
     int r = resolve(path, 1, &t);
     if (r) return -1;
@@ -307,14 +307,14 @@ int fat32_delete_file(const char *path) {
     return fatvol_delete(&t.m->vol, &f);
 }
 
-int fat32_change_directory(const char *path) {
+static int fat32_change_directory_unlocked(const char *path) {
     target_t t;
     if (resolve(path, 0, &t) != 0) return -1;
     kstrncpy(cwd, t.abs, sizeof(cwd));
     return 0;
 }
 
-int vfs_folder(const char *path, char *out, int size) {
+static int vfs_folder_unlocked(const char *path, char *out, int size) {
     target_t t;
     if (resolve(path, 0, &t) != 0) return -1;
     kstrncpy(out, t.abs, (size_t)size);
@@ -326,7 +326,7 @@ int fat32_get_current_directory(char *buffer, uint32_t size) {
     return (int)strlen(buffer);
 }
 
-int fat32_list_directory_ex(const char *path, fat32_file_info_t *files, uint32_t max_files) {
+static int fat32_list_directory_ex_unlocked(const char *path, fat32_file_info_t *files, uint32_t max_files) {
     target_t t;
     if (resolve(path && path[0] ? path : ".", 0, &t) != 0) return -1;
     int n = fatvol_list(&t.m->vol, t.dir, files, (int)max_files);
@@ -362,7 +362,7 @@ const char *vfs_partition_mount(uint64_t start) {
     return 0;
 }
 
-int vfs_open_file(const char *path, vfs_file_t *out) {
+static int vfs_open_file_unlocked(const char *path, vfs_file_t *out) {
     target_t t;
     int r = resolve(path, 1, &t);
     if (r) return r;
@@ -376,7 +376,7 @@ int vfs_open_file(const char *path, vfs_file_t *out) {
     return 0;
 }
 
-int vfs_read_at(vfs_file_t *f, uint32_t offset, void *buf, uint32_t len) {
+static int vfs_read_at_unlocked(vfs_file_t *f, uint32_t offset, void *buf, uint32_t len) {
     mount_t *m = f->mount;
     if (!m->used) return FATV_IO;                           /* unmounted meanwhile */
     return fatvol_read_at(&m->vol, &f->ent, offset, buf, len, &f->pos);
@@ -384,4 +384,116 @@ int vfs_read_at(vfs_file_t *f, uint32_t offset, void *buf, uint32_t len) {
 
 uint32_t vfs_file_size(const vfs_file_t *f) {
     return f->ent.e.file_size;
+}
+
+/* ---- The lock -----------------------------------------------------------------------
+ * Every call that reaches the disk holds vfs_lock: while one task waits for the
+ * NVMe drive, others run, and the FAT32 code (its caches, a folder read cluster
+ * by cluster) must not be entered twice at once. */
+
+kmutex_t vfs_lock;
+
+int vfs_mount(const char *path, const blockdev_t *dev) {
+    kmutex_lock(&vfs_lock);
+    int r = vfs_mount_unlocked(path, dev);
+    kmutex_unlock(&vfs_lock);
+    return r;
+}
+
+int vfs_unmount(const char *path) {
+    kmutex_lock(&vfs_lock);
+    int r = vfs_unmount_unlocked(path);
+    kmutex_unlock(&vfs_lock);
+    return r;
+}
+
+int vfs_read_sectors(uint64_t lba, uint32_t count, void *buf) {
+    kmutex_lock(&vfs_lock);
+    int r = vfs_read_sectors_unlocked(lba, count, buf);
+    kmutex_unlock(&vfs_lock);
+    return r;
+}
+
+int fat32_read_file(const char *path, uint8_t *buffer, uint32_t max_size) {
+    kmutex_lock(&vfs_lock);
+    int r = fat32_read_file_unlocked(path, buffer, max_size);
+    kmutex_unlock(&vfs_lock);
+    return r;
+}
+
+int fat32_file_exists(const char *path) {
+    kmutex_lock(&vfs_lock);
+    int r = fat32_file_exists_unlocked(path);
+    kmutex_unlock(&vfs_lock);
+    return r;
+}
+
+uint32_t fat32_get_file_size(const char *path) {
+    kmutex_lock(&vfs_lock);
+    uint32_t r = fat32_get_file_size_unlocked(path);
+    kmutex_unlock(&vfs_lock);
+    return r;
+}
+
+int fat32_write_file(const char *path, const uint8_t *buffer, uint32_t size) {
+    kmutex_lock(&vfs_lock);
+    int r = fat32_write_file_unlocked(path, buffer, size);
+    kmutex_unlock(&vfs_lock);
+    return r;
+}
+
+int fat32_create_file(const char *path) {
+    kmutex_lock(&vfs_lock);
+    int r = fat32_create_file_unlocked(path);
+    kmutex_unlock(&vfs_lock);
+    return r;
+}
+
+int fat32_mkdir(const char *path) {
+    kmutex_lock(&vfs_lock);
+    int r = fat32_mkdir_unlocked(path);
+    kmutex_unlock(&vfs_lock);
+    return r;
+}
+
+int fat32_delete_file(const char *path) {
+    kmutex_lock(&vfs_lock);
+    int r = fat32_delete_file_unlocked(path);
+    kmutex_unlock(&vfs_lock);
+    return r;
+}
+
+int fat32_change_directory(const char *path) {
+    kmutex_lock(&vfs_lock);
+    int r = fat32_change_directory_unlocked(path);
+    kmutex_unlock(&vfs_lock);
+    return r;
+}
+
+int vfs_folder(const char *path, char *out, int size) {
+    kmutex_lock(&vfs_lock);
+    int r = vfs_folder_unlocked(path, out, size);
+    kmutex_unlock(&vfs_lock);
+    return r;
+}
+
+int fat32_list_directory_ex(const char *path, fat32_file_info_t *files, uint32_t max_files) {
+    kmutex_lock(&vfs_lock);
+    int r = fat32_list_directory_ex_unlocked(path, files, max_files);
+    kmutex_unlock(&vfs_lock);
+    return r;
+}
+
+int vfs_open_file(const char *path, vfs_file_t *out) {
+    kmutex_lock(&vfs_lock);
+    int r = vfs_open_file_unlocked(path, out);
+    kmutex_unlock(&vfs_lock);
+    return r;
+}
+
+int vfs_read_at(vfs_file_t *f, uint32_t offset, void *buf, uint32_t len) {
+    kmutex_lock(&vfs_lock);
+    int r = vfs_read_at_unlocked(f, offset, buf, len);
+    kmutex_unlock(&vfs_lock);
+    return r;
 }

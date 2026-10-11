@@ -33,11 +33,15 @@
 #include "drivers/rtc.h"
 #include "lib/print.h"
 #include "lib/string.h"
+#include "sys/vm.h"
+#include "sys/pipe.h"
+#include "sys/port.h"
+#include "drivers/registry.h"
 
-#define USER_STACK_SIZE  (256 * 1024)
+#define USER_STACK_SIZE  (8ULL << 20)      /* the stack region; pages appear as it grows */
 #define USER_HEAP_MAX    (64ULL << 30)     /* in practice: as much as RAM gives */
 #define MAX_ARGS         16
-#define MAX_FDS          8
+#define MAX_FDS          32
 #define MAX_PATH         256              /* FAT32_MAX_PATH: long names */
 #define PAGE_UP(x)       (((x) + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1))
 #define PAGE_DOWN(x)     ((x) & ~(uint64_t)(PAGE_SIZE - 1))
@@ -46,21 +50,37 @@ _Static_assert(KEYCODE_UP == KEY_UP_ARROW && KEYCODE_DOWN == KEY_DOWN_ARROW &&
                KEYCODE_LEFT == KEY_LEFT_ARROW && KEYCODE_RIGHT == KEY_RIGHT_ARROW,
                "user key codes must match the keyboard driver");
 
+/* An open file: a file on disk, the console, or one end of a pipe. Shared
+ * (counted) by every descriptor that refers to it: dup, fork, and the
+ * standard 0-2 a program inherits from the one that started it. */
+enum { F_FILE, F_CONSOLE, F_PIPE_R, F_PIPE_W };
+
 typedef struct {
     int used, mode;                   // OPEN_READ / OPEN_WRITE / OPEN_APPEND
+    int refs, kind;
+    pipe_t *pipe;
     char path[MAX_PATH];
     uint8_t *data;
     uint32_t size, capacity, pos;
     vfs_file_t *stream;               // a big file opened for reading: read from disk as it goes
 } file_t;
 
+static file_t console_file = { .used = 1, .refs = 1 << 30, .kind = F_CONSOLE };
+
 /* Files bigger than this are not read into memory at open() (a video). */
 #define STREAM_MIN       (1024 * 1024)
 
 typedef struct {
-    uint64_t brk_start, brk, brk_mapped;
-    uint64_t stack_lo;
-    file_t files[MAX_FDS];
+    uint64_t brk_start, brk;
+    uint64_t stack_lo;                // the stack region's start
+    uint64_t root;                    // the address space (shared by its threads)
+    vm_space_t vm;
+    int threads;                      // tasks running it
+    port_space_t ports;
+    uint64_t sig_handler[32], sig_tramp;
+    uint32_t sig_pending;
+    int no_echo;                      // CON_ECHO off: read(0) hides what is typed
+    file_t *fds[MAX_FDS];
     char line_buf[256];               // keyboard input for read(0), one line at a time
     uint32_t line_len, line_pos;
     char cwd[256];                    // its own current directory
@@ -139,17 +159,33 @@ static void copy_to_space(uint64_t root, uint64_t vaddr, const void *src, uint64
     }
 }
 
-/* 1 if the running program may read (or, with `write`, write) [ptr, ptr + len). */
+/* 1 if the running program may read (or, with `write`, write) [ptr, ptr + len).
+ * Pages of its regions that are not there yet are brought in (sys/vm.h), so
+ * the kernel can then use the memory directly. */
 static int user_range_ok(uint64_t ptr, uint64_t len, int write) {
     if (len == 0) return 1;
     if (ptr < USER_BASE || ptr + len > USER_TOP || ptr + len < ptr) return 0;
+    process_t *p = P();
     uint64_t root = task_current()->root;
     for (uint64_t v = PAGE_DOWN(ptr); v < ptr + len; v += PAGE_SIZE) {
         uint64_t e = paging_get_user_entry(root, v);
-        if (!(e & PAGE_PRESENT) || !(e & PAGE_USER)) return 0;
-        if (write && !(e & PAGE_RW)) return 0;
+        if ((e & PAGE_PRESENT) && (e & PAGE_USER) && (!write || (e & PAGE_RW))) continue;
+        if (!p || vm_fault(root, &p->vm, v, write) != 0) return 0;
     }
     return 1;
+}
+
+/* A page fault in user mode: 0 if it was handled (the program goes on). */
+int process_page_fault(uint64_t addr, uint64_t err) {
+    task_t *t = task_current();
+    process_t *p = t && t->is_user ? t->process : 0;
+    if (!p || addr < USER_BASE || addr >= USER_TOP) return -1;
+    return vm_fault(t->root, &p->vm, addr, (err & 2) != 0);
+}
+
+int process_signal_pending(void) {
+    task_t *t = task_current();
+    return t && t->is_user && t->process && ((process_t *)t->process)->sig_pending != 0;
 }
 
 /* Copy a NUL-terminated string from the program; 0 on success. */
@@ -270,18 +306,58 @@ static int file_grow(file_t *f, uint32_t need) {
     return 0;
 }
 
+static file_t *file_new(int kind) {
+    file_t *f = kmalloc(sizeof(file_t));
+    if (!f) return 0;
+    memset(f, 0, sizeof(*f));
+    f->used = 1;
+    f->refs = 1;
+    f->kind = kind;
+    return f;
+}
+
+static int fd_free_slot(process_t *p, int from) {
+    for (int i = from; i < MAX_FDS; i++)
+        if (!p->fds[i]) return i;
+    return -1;
+}
+
+static file_t *fd_get(uint64_t fd) {
+    process_t *p = P();
+    return p && fd < MAX_FDS ? p->fds[fd] : 0;
+}
+
+static int64_t close_file(file_t *f);
+
+/* One reference less; the last one closes it. */
+static int64_t file_put(file_t *f) {
+    if (!f || f == &console_file) return 0;
+    if (f->kind == F_PIPE_R || f->kind == F_PIPE_W) {        /* every reference is an end */
+        if (--f->refs > 0) {
+            pipe_end_closed(f->pipe, f->kind == F_PIPE_W);
+            return 0;
+        }
+        return close_file(f);
+    }
+    if (--f->refs > 0) return 0;
+    return close_file(f);
+}
+
+static file_t *file_get(file_t *f) {
+    if (f && f != &console_file) f->refs++;
+    return f;
+}
+
 static int64_t sys_open(uint64_t path_ptr, uint64_t mode) {
     char path[MAX_PATH];
     if (user_path(path_ptr, path, sizeof(path)) != 0) return SYSERR_FAULT;
     if (mode > OPEN_APPEND) return SYSERR_BADCALL;
     process_t *p = P();
-    int fd = -1;
-    for (int i = 3; i < MAX_FDS; i++)
-        if (!p->files[i].used) { fd = i; break; }
+    int fd = fd_free_slot(p, 3);
     if (fd < 0) return SYSERR_MFILE;
 
-    file_t *f = &p->files[fd];
-    memset(f, 0, sizeof(*f));
+    file_t *f = file_new(F_FILE);
+    if (!f) return SYSERR_NOMEM;
     f->mode = (int)mode;
     memcpy(f->path, path, sizeof(path));
 
@@ -311,50 +387,122 @@ static int64_t sys_open(uint64_t path_ptr, uint64_t mode) {
     if (result < 0) {
         kfree(f->data);
         if (f->stream) kfree(f->stream);
-        memset(f, 0, sizeof(*f));
+        kfree(f);
     } else {
-        f->used = 1;
+        p->fds[fd] = f;
     }
     return result;
 }
 
 static int64_t close_file(file_t *f) {
     int64_t result = 0;
-    if (f->mode != OPEN_READ) {                     // f->path is absolute (sys_open)
+    if (f->kind == F_PIPE_R || f->kind == F_PIPE_W) {
+        pipe_end_closed(f->pipe, f->kind == F_PIPE_W);
+    } else if (f->mode != OPEN_READ) {              // f->path is absolute (sys_open)
         fat32_create_file(f->path);                 // fails harmlessly if it exists
         int r = fat32_write_file(f->path, f->data ? f->data : (const uint8_t *)"", f->size);
         if (r < 0) result = r == FAT32_ERR_PERMISSION ? SYSERR_PERM : SYSERR_IO;
     }
     kfree(f->data);
     if (f->stream) kfree(f->stream);
-    memset(f, 0, sizeof(*f));
+    kfree(f);
     return result;
 }
 
 static int64_t sys_close(uint64_t fd) {
-    if (fd < 3 || fd >= MAX_FDS || !P()->files[fd].used) return SYSERR_BADFD;
-    return close_file(&P()->files[fd]);
+    file_t *f = fd_get(fd);
+    if (!f) return SYSERR_BADFD;
+    P()->fds[fd] = 0;
+    return file_put(f);
+}
+
+static int64_t sys_pipe(uint64_t ptr) {
+    if (!user_range_ok(ptr, 2 * sizeof(int), 1)) return SYSERR_FAULT;
+    process_t *p = P();
+    int rfd = fd_free_slot(p, 0);
+    if (rfd < 0) return SYSERR_MFILE;
+    p->fds[rfd] = &console_file;                   /* (reserved while finding the second) */
+    int wfd = fd_free_slot(p, 0);
+    p->fds[rfd] = 0;
+    if (wfd < 0) return SYSERR_MFILE;
+    pipe_t *pp = pipe_new();
+    file_t *r = file_new(F_PIPE_R), *w = file_new(F_PIPE_W);
+    if (!pp || !r || !w) {
+        kfree(pp);
+        kfree(r);
+        kfree(w);
+        return SYSERR_NOMEM;
+    }
+    r->pipe = w->pipe = pp;
+    r->mode = OPEN_READ;
+    w->mode = OPEN_WRITE;
+    p->fds[rfd] = r;
+    p->fds[wfd] = w;
+    ((int *)ptr)[0] = rfd;
+    ((int *)ptr)[1] = wfd;
+    return 0;
+}
+
+static int64_t sys_dup2(uint64_t fd, uint64_t to) {
+    file_t *f = fd_get(fd);
+    if (!f || to >= MAX_FDS) return SYSERR_BADFD;
+    process_t *p = P();
+    if (p->fds[to] == f) return (int64_t)to;
+    file_put(p->fds[to]);
+    p->fds[to] = file_get(f);
+    if (f->kind == F_PIPE_R || f->kind == F_PIPE_W) pipe_end_added(f->pipe, f->kind == F_PIPE_W);
+    return (int64_t)to;
+}
+
+static int64_t sys_dup(uint64_t fd) {
+    if (!fd_get(fd)) return SYSERR_BADFD;
+    int to = fd_free_slot(P(), 0);
+    return to < 0 ? SYSERR_MFILE : sys_dup2(fd, (uint64_t)to);
 }
 
 /* ---- Ending a program -------------------------------------------------- */
 
-/* End the running program: save its files, free its memory, become a zombie
- * for the shell to collect. */
-static void __attribute__((noreturn)) process_exit(int code) {
+/* End this thread; with `whole`, the whole program (every thread of it).
+ * The last thread to go saves its files, frees its memory, and becomes the
+ * zombie its parent collects. */
+static void __attribute__((noreturn)) finish(int code, int whole) {
     task_t *t = task_current();
     process_t *p = t->process;
+    if (p && whole)                                     /* the other threads stop too */
+        for (int i = 0; i < MAX_TASKS; i++) {
+            task_t *o = task_at(i);
+            if (o != t && o->process == p && o->state != TASK_FREE && o->state != TASK_ZOMBIE && !o->kill_code) {
+                o->kill_code = code ? code : EXIT_KILLED;
+                task_interrupt(o);
+            }
+        }
+    if (p && --p->threads > 0) {                        /* not the last: the program goes on */
+        t->process = 0;
+        t->root = paging_kernel_root();
+        paging_switch(t->root);
+        task_exit(code);
+    }
+    process_reap_orphans();                             /* threads that ended before it */
     tcp_close_owned_by(t->pid);                         /* its connections end with it */
     if (sound_owner == t->pid) {                        /* and its sound */
         sound_stream_close();
         sound_owner = 0;
     }
+    uint64_t root = t->root;
     if (p) {
-        for (int i = 3; i < MAX_FDS; i++)
-            if (p->files[i].used) close_file(&p->files[i]);
+        for (int i = 0; i < MAX_FDS; i++) file_put(p->fds[i]);
+        port_space_free(&p->ports);
+        vm_free(&p->vm);
+        root = p->root;
+        task_t *parent = task_by_pid(t->parent);        /* SIGCHLD, if it asked for it */
+        process_t *pp = parent && parent->is_user ? parent->process : 0;
+        if (pp && pp->sig_handler[SIGCHLD]) {
+            pp->sig_pending |= 1u << SIGCHLD;
+            task_interrupt(parent);
+        }
         kfree(p);
         t->process = 0;
     }
-    uint64_t root = t->root;
     t->root = paging_kernel_root();
     paging_switch(t->root);
     paging_free_address_space(root);
@@ -377,6 +525,10 @@ static void __attribute__((noreturn)) process_exit(int code) {
     task_exit(code);
 }
 
+static void __attribute__((noreturn)) process_exit(int code) {
+    finish(code, 1);
+}
+
 int process_interrupted(void) {
     task_t *t = task_current();
     if (t && t->is_user) {
@@ -389,9 +541,16 @@ int process_interrupted(void) {
     return keyboard_ctrl_c;                    /* a kernel command (download) */
 }
 
-/* Called where a program can be stopped safely: Ctrl+C, `kill`. */
+/* Called where a program can be stopped safely: Ctrl+C, `kill`. A program
+ * with a SIGINT handler gets Ctrl+C as that signal instead. */
 static void check_killed(void) {
     task_t *t = task_current();
+    process_t *p = t->is_user ? t->process : 0;
+    if (p && t->kill_code == EXIT_INTERRUPTED && p->sig_handler[SIGINT]) {
+        t->kill_code = 0;
+        p->sig_pending |= 1u << SIGINT;
+        return;
+    }
     if (t->is_user && t->kill_code) {
         if (t->kill_code == EXIT_INTERRUPTED && t->pid == foreground_pid) {
             print_set_theme_colors();
@@ -407,11 +566,14 @@ void process_fault(uint64_t vector, const char *name, uint64_t rip, uint64_t add
     print_set_theme_colors();
     if (print_get_col() != 0) print_str("\n");
     char msg[200];
+    process_t *p = t->process;
+    int overflow = p && address < p->stack_lo && address + (1u << 20) >= p->stack_lo;
     if (vector == 14)
         k_snprintf(msg, sizeof(msg), "%s (pid %d): %s at address 0x%lx (rip 0x%lx) - program terminated",
                    t->name, t->pid,
-                   address < USER_BASE || address >= USER_TOP ? "Segmentation fault (kernel or unmapped memory)"
-                                                               : "Segmentation fault",
+                   overflow ? "Stack overflow (more than 8 MiB of stack)"
+                   : address < USER_BASE || address >= USER_TOP ? "Segmentation fault (kernel or unmapped memory)"
+                                                                : "Segmentation fault",
                    address, rip);
     else
         k_snprintf(msg, sizeof(msg), "%s (pid %d): %s (rip 0x%lx) - program terminated", t->name, t->pid, name, rip);
@@ -452,6 +614,7 @@ static void read_keyboard_line(process_t *p) {
     while (1) {
         wait_for_foreground();
         check_killed();
+        if (p->sig_pending) return;                 /* read() returns 0: the handler runs */
         int c = get_char();
         if (!c || scroll_key(c)) {
             if (!c) task_sleep(10);
@@ -476,13 +639,13 @@ static void read_keyboard_line(process_t *p) {
         if (c == '\b') {
             if (p->line_len > 0) {
                 p->line_len--;
-                print_str("\b \b");
+                if (!p->no_echo) print_str("\b \b");
             }
             continue;
         }
         if (c >= 32 && c < 127 && p->line_len < sizeof(p->line_buf) - 1) {
             p->line_buf[p->line_len++] = (char)c;
-            print_char((char)c);
+            if (!p->no_echo) print_char((char)c);
         }
     }
 }
@@ -492,15 +655,25 @@ static void read_keyboard_line(process_t *p) {
 static int64_t sys_write(uint64_t fd, uint64_t buf, uint64_t len) {
     if (!user_range_ok(buf, len, 0)) return SYSERR_FAULT;
     const char *src = (const char *)buf;
-    if (fd == 1 || fd == 2) {
+    file_t *f = fd_get(fd);
+    if (!f) return SYSERR_BADFD;
+    if (f->kind == F_CONSOLE) {
         print_batch_begin();
         for (uint64_t i = 0; i < len; i++) print_char(src[i]);
         print_batch_end();
         return (int64_t)len;
     }
-    process_t *p = P();
-    if (fd >= MAX_FDS || !p->files[fd].used || p->files[fd].mode == OPEN_READ) return SYSERR_BADFD;
-    file_t *f = &p->files[fd];
+    if (f->kind == F_PIPE_W) {
+        int64_t n = pipe_write(f->pipe, src, len);
+        if (n == -2) {                                  /* nobody reads: SIGPIPE ends it */
+            process_t *p = P();
+            if (!p->sig_handler[SIGPIPE]) process_exit(128 + SIGPIPE);
+            p->sig_pending |= 1u << SIGPIPE;
+            return SYSERR_PIPE;
+        }
+        return n < 0 ? SYSERR_TIMEOUT : n;
+    }
+    if (f->kind != F_FILE || f->mode == OPEN_READ) return SYSERR_BADFD;
     if (len > 64 * 1024 * 1024 || file_grow(f, f->size + (uint32_t)len) != 0) return SYSERR_NOMEM;
     memcpy(f->data + f->size, src, len);
     f->size += (uint32_t)len;
@@ -511,15 +684,21 @@ static int64_t sys_read(uint64_t fd, uint64_t buf, uint64_t len) {
     if (!user_range_ok(buf, len, 1)) return SYSERR_FAULT;
     char *dst = (char *)buf;
     process_t *p = P();
-    if (fd == 0) {
+    file_t *f = fd_get(fd);
+    if (!f) return SYSERR_BADFD;
+    if (f->kind == F_CONSOLE) {
         if (len == 0) return 0;
         if (p->line_pos >= p->line_len) read_keyboard_line(p);
         uint64_t n = 0;
         while (n < len && p->line_pos < p->line_len) dst[n++] = p->line_buf[p->line_pos++];
         return (int64_t)n;
     }
-    if (fd >= MAX_FDS || !p->files[fd].used || p->files[fd].mode != OPEN_READ) return SYSERR_BADFD;
-    file_t *f = &p->files[fd];
+    if (f->kind == F_PIPE_R) {
+        int64_t n = pipe_read(f->pipe, dst, len);
+        if (n < 0) check_killed();
+        return n < 0 ? SYSERR_TIMEOUT : n;
+    }
+    if (f->kind != F_FILE || f->mode != OPEN_READ) return SYSERR_BADFD;
     uint64_t n = f->size - f->pos;
     if (n > len) n = len;
     if (f->stream) {                                        /* from the disk, as it goes */
@@ -534,9 +713,8 @@ static int64_t sys_read(uint64_t fd, uint64_t buf, uint64_t len) {
 }
 
 static int64_t sys_seek(uint64_t fd, int64_t offset, uint64_t whence) {
-    process_t *p = P();
-    if (fd < 3 || fd >= MAX_FDS || !p->files[fd].used) return SYSERR_BADFD;
-    file_t *f = &p->files[fd];
+    file_t *f = fd_get(fd);
+    if (!f || f->kind != F_FILE) return SYSERR_BADFD;
     int64_t base = whence == SEEK_SET ? 0 : whence == SEEK_CUR ? (int64_t)f->pos : whence == SEEK_END ? (int64_t)f->size : -1;
     if (base < 0) return SYSERR_BADCALL;
     int64_t at = base + offset;
@@ -584,16 +762,20 @@ static int64_t sys_sound(uint64_t op, uint64_t a, uint64_t b) {
     return SYSERR_BADCALL;
 }
 
+static vm_region_t *heap_region(process_t *p) {
+    for (vm_region_t *r = p->vm.regions; r; r = r->next)
+        if (r->start == p->brk_start && r->kind == VM_ANON) return r;
+    return 0;
+}
+
 static int64_t sys_sbrk(int64_t increment) {
     process_t *p = P();
     uint64_t old = p->brk, new_brk = p->brk + (uint64_t)increment;
-    if (new_brk < p->brk_start || new_brk > p->brk_start + USER_HEAP_MAX ||
-        new_brk > p->stack_lo - 16 * PAGE_SIZE)
+    vm_region_t *heap = heap_region(p);
+    if (!heap || new_brk < p->brk_start || new_brk > p->brk_start + USER_HEAP_MAX ||
+        PAGE_UP(new_brk) > p->vm.mmap_next - PAGE_SIZE)
         return SYSERR_NOMEM;
-    if (PAGE_UP(new_brk) > p->brk_mapped) {
-        if (map_user_range(task_current()->root, p->brk_mapped, PAGE_UP(new_brk)) != 0) return SYSERR_NOMEM;
-        p->brk_mapped = PAGE_UP(new_brk);
-    }
+    if (PAGE_UP(new_brk) > heap->end) heap->end = PAGE_UP(new_brk);   /* pages come when touched */
     p->brk = new_brk;
     return (int64_t)old;
 }
@@ -654,6 +836,7 @@ static int64_t sys_console(uint64_t op, uint64_t a, uint64_t b) {
         case CON_CURSOR: print_set_cursor_visible((int)a); return 0;
         case CON_THEME:  print_use_theme_color((int)a); return 0;
         case CON_COLUMN: return (int64_t)print_get_col();
+        case CON_ECHO:   P()->no_echo = a == 0; return 0;
         default:         return SYSERR_BADCALL;
     }
 }
@@ -779,6 +962,19 @@ static int64_t sys_kcommand(uint64_t line_ptr);
 static int64_t sys_uname(uint64_t ptr);
 static int64_t sys_mouse(uint64_t ptr);
 static int64_t sys_gfx(uint64_t op, uint64_t arg);
+static int64_t sys_fork(struct exc_frame *f);
+static int64_t sys_exec(struct exc_frame *f, uint64_t path_ptr, uint64_t argv_ptr);
+static int64_t sys_thread(uint64_t entry, uint64_t arg, uint64_t stack);
+static int64_t sys_futex(uint64_t op, uint64_t addr, uint64_t value);
+static int64_t sys_mmap(uint64_t len, uint64_t prot, int64_t fd);
+static int64_t sys_shmmap(uint64_t name_ptr, uint64_t size);
+static int64_t sys_port(struct exc_frame *f);
+static int64_t sys_signal(uint64_t sig, uint64_t handler, uint64_t tramp);
+static int64_t sys_sigsend(int64_t pid, uint64_t sig);
+static void sys_sigreturn(struct exc_frame *f, uint64_t ptr);
+static void deliver_signals(struct exc_frame *f);
+static int64_t sys_registry(uint64_t index, uint64_t ptr);
+static int64_t sys_auth(uint64_t name_ptr, uint64_t pass_ptr, uint64_t out_ptr);
 
 /* int 0x80 (usermode.asm). Runs with interrupts on, so a blocking call
  * (keyboard, sleep) still gets timer and keyboard interrupts. */
@@ -836,9 +1032,29 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
         case SYS_STAT:    r = sys_stat(f->rdi, f->rsi); break;
         case SYS_LISTDIR: r = sys_listdir(f->rdi, f->rsi, f->rdx); break;
         case SYS_MEMINFO: r = sys_meminfo(f->rdi); break;
+        case SYS_MMAP:    r = sys_mmap(f->rdi, f->rsi, (int64_t)f->rdx); break;
+        case SYS_MUNMAP:  r = vm_unmap(P()->root, &P()->vm, f->rdi) == 0 ? 0 : SYSERR_BADCALL; break;
+        case SYS_SHMMAP:  r = sys_shmmap(f->rdi, f->rsi); break;
+        case SYS_FORK:    r = sys_fork(f); break;
+        case SYS_EXEC:    r = sys_exec(f, f->rdi, f->rsi); if (r == 0) return; break;
+        case SYS_THREAD:  r = sys_thread(f->rdi, f->rsi, f->rdx); break;
+        case SYS_THREAD_EXIT: finish((int)(int32_t)f->rdi, 0);
+        case SYS_FUTEX:   r = sys_futex(f->rdi, f->rsi, f->rdx); break;
+        case SYS_PORT_CREATE: case SYS_PORT_SEND: case SYS_PORT_RECEIVE:
+        case SYS_PORT_REGISTER: case SYS_PORT_LOOKUP: case SYS_PORT_CLOSE:
+                          r = sys_port(f); break;
+        case SYS_PIPE:    r = sys_pipe(f->rdi); break;
+        case SYS_DUP:     r = sys_dup(f->rdi); break;
+        case SYS_DUP2:    r = sys_dup2(f->rdi, f->rsi); break;
+        case SYS_SIGNAL:  r = sys_signal(f->rdi, f->rsi, f->rdx); break;
+        case SYS_SIGSEND: r = sys_sigsend((int64_t)f->rdi, f->rsi); break;
+        case SYS_SIGRETURN: sys_sigreturn(f, f->rdi); deliver_signals(f); return;
+        case SYS_REGISTRY: r = sys_registry(f->rdi, f->rsi); break;
+        case SYS_AUTH:    r = sys_auth(f->rdi, f->rsi, f->rdx); break;
         default:          r = SYSERR_BADCALL; break;
     }
     f->rax = (uint64_t)r;
+    deliver_signals(f);
 }
 
 /* ---- Starting programs -------------------------------------------------- */
@@ -911,8 +1127,9 @@ static uint64_t build_stack(uint64_t root, int argc, char **argv) {
 
 /* Start a program as `user`, in the FAT32 current directory. */
 static int spawn_as(const uint8_t *data, uint32_t size, int argc, char **argv, const user_t *user,
-                    const char *cwd) {
+                    const char *cwd, process_t *parent) {
     if (argc > MAX_ARGS) argc = MAX_ARGS;
+    process_reap_orphans();                            /* make room: free ended threads */
 
     process_t *p = kmalloc(sizeof(process_t));
     uint64_t root = paging_create_address_space();
@@ -923,17 +1140,30 @@ static int spawn_as(const uint8_t *data, uint32_t size, int argc, char **argv, c
     }
     memset(p, 0, sizeof(*p));
 
+    vm_init_space(&p->vm);
     uint64_t image_end = 0, entry = load_elf(root, data, size, &image_end), sp = 0;
     int err = entry ? 0 : PROC_ERR_NOT_ELF;
     p->stack_lo = USER_TOP - USER_STACK_SIZE;
-    if (!err && map_user_range(root, p->stack_lo, USER_TOP) != 0) err = PROC_ERR_NO_MEMORY;
+    if (!err && (!vm_add(&p->vm, p->stack_lo, USER_TOP, VM_READ | VM_WRITE, VM_ANON, 0) ||
+                 !vm_add(&p->vm, image_end, image_end, VM_READ | VM_WRITE, VM_ANON, 0) ||
+                 map_user_range(root, USER_TOP - PAGE_SIZE, USER_TOP) != 0))
+        err = PROC_ERR_NO_MEMORY;
     if (!err && !(sp = build_stack(root, argc, argv))) err = PROC_ERR_NO_MEMORY;
     if (err) {
+        vm_free(&p->vm);
         paging_free_address_space(root);
         kfree(p);
         return err;
     }
-    p->brk_start = p->brk = p->brk_mapped = image_end;
+    p->brk_start = p->brk = image_end;
+    p->root = root;
+    p->threads = 1;
+    for (int i = 0; i < 3; i++) {                       /* 0-2 from whoever started it */
+        file_t *f = parent && parent->fds[i] ? parent->fds[i] : &console_file;
+        p->fds[i] = f;
+        file_get(f);
+        if (f->kind == F_PIPE_R || f->kind == F_PIPE_W) pipe_end_added(f->pipe, f->kind == F_PIPE_W);
+    }
     kstrncpy(p->cwd, cwd, sizeof(p->cwd));
 
     // Name for ps and messages: the file name without folders and extension.
@@ -951,6 +1181,8 @@ static int spawn_as(const uint8_t *data, uint32_t size, int argc, char **argv, c
     task_t *t = task_create_user(name, root, entry, sp);
     if (!t) {
         __asm__ volatile("sti");
+        for (int i = 0; i < 3; i++) file_put(p->fds[i]);
+        vm_free(&p->vm);
         paging_free_address_space(root);
         kfree(p);
         return PROC_ERR_BUSY;
@@ -964,7 +1196,7 @@ static int spawn_as(const uint8_t *data, uint32_t size, int argc, char **argv, c
 int process_spawn(const uint8_t *data, uint32_t size, int argc, char **argv) {
     char cwd[MAX_PATH];
     fat32_get_current_directory(cwd, sizeof(cwd));        // the kernel shell's
-    return spawn_as(data, size, argc, argv, user_current(), cwd);
+    return spawn_as(data, size, argc, argv, user_current(), cwd, 0);
 }
 
 int process_foreground(void) {
@@ -1020,7 +1252,8 @@ int process_kill(int pid, int code) {
 void process_reap_orphans(void) {
     for (int i = 0; i < MAX_TASKS; i++) {
         task_t *t = task_at(i);
-        if (t->state == TASK_ZOMBIE && t->is_user && t->parent == 1 && t != task_current()) task_reap(t);
+        if (t->state == TASK_ZOMBIE && t->is_user && (t->parent == 1 || t->is_thread) && t != task_current())
+            task_reap(t);                              /* nobody waits for a thread: free it here */
     }
 }
 
@@ -1137,7 +1370,7 @@ static int64_t sys_spawn(uint64_t path_ptr, uint64_t argv_ptr, uint64_t user_ptr
     uint8_t *image = find_program_from(user_ptr ? "/" : user_cwd(), path, &size);
     char cwd[MAX_PATH];
     kstrncpy(cwd, user_cwd(), sizeof(cwd));
-    int64_t result = image ? spawn_as(image, size, argc, argv, &as, cwd) : PROC_ERR_NOT_FOUND;
+    int64_t result = image ? spawn_as(image, size, argc, argv, &as, cwd, P()) : PROC_ERR_NOT_FOUND;
     kfree(image);
     kfree(strings);
     return result < 0 ? proc_error((int)result) : result;
@@ -1154,6 +1387,7 @@ static int64_t sys_wait(int64_t pid, uint64_t status_ptr, uint64_t flags) {
             task_t *t = task_at(i);
             if (t->state == TASK_FREE || !t->is_user || t->parent != me->pid) continue;
             if (pid != -1 && t->pid != pid) continue;
+            if (pid == -1 && t->is_thread) continue;
             child = t;
             if (t->state == TASK_ZOMBIE) { ended = t; break; }
         }
@@ -1177,6 +1411,7 @@ static int64_t sys_kill(int64_t pid) {
     if (!t->is_user) return SYSERR_PERM;                // part of the kernel
     if (!user_is_root() && t->user.uid != user_current()->uid) return SYSERR_PERM;
     t->kill_code = EXIT_KILLED;
+    task_interrupt(t);
     return 0;
 }
 
@@ -1298,4 +1533,314 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
         default:
             return SYSERR_BADCALL;
     }
+}
+
+/* ---- Memory (stage 1) --------------------------------------------------------------- */
+
+static int64_t sys_mmap(uint64_t len, uint64_t prot, int64_t fd) {
+    process_t *p = P();
+    int vp = VM_READ | ((prot & PROT_WRITE) ? VM_WRITE : 0);
+    if (fd < 0) {
+        uint64_t a = vm_map(&p->vm, len, vp, VM_ANON, 0);
+        return a ? (int64_t)a : SYSERR_NOMEM;
+    }
+    file_t *f = fd_get((uint64_t)fd);
+    if (!f || f->kind != F_FILE || f->mode != OPEN_READ) return SYSERR_BADFD;
+    vm_object_t *o = vm_file_object(f->path);
+    if (!o) return SYSERR_IO;
+    uint64_t a = vm_map(&p->vm, len ? len : f->size, vp, VM_FILE, o);
+    return a ? (int64_t)a : SYSERR_NOMEM;
+}
+
+static int64_t sys_shmmap(uint64_t name_ptr, uint64_t size) {
+    char name[32];
+    if (copy_user_string(name, name_ptr, sizeof(name)) != 0) return SYSERR_FAULT;
+    vm_object_t *o = vm_shm_object(name, size);
+    if (!o) return SYSERR_NOMEM;
+    uint64_t a = vm_map(&P()->vm, size, VM_READ | VM_WRITE, VM_SHM, o);
+    return a ? (int64_t)a : SYSERR_NOMEM;
+}
+
+/* ---- fork and exec (stage 4) -------------------------------------------------------- */
+
+static int64_t sys_fork(struct exc_frame *f) {
+    process_t *p = P();
+    task_t *me = task_current();
+    process_t *c = kmalloc(sizeof(process_t));
+    uint64_t root = paging_create_address_space();
+    if (!c || !root) {
+        kfree(c);
+        if (root) paging_free_address_space(root);
+        return SYSERR_NOMEM;
+    }
+    memcpy(c, p, sizeof(*c));
+    memset(&c->ports, 0, sizeof(c->ports));
+    c->sig_pending = 0;
+    c->threads = 1;
+    c->root = root;
+    if (vm_fork(p->root, &p->vm, root, &c->vm) != 0) {
+        vm_free(&c->vm);
+        paging_free_address_space(root);
+        kfree(c);
+        return SYSERR_NOMEM;
+    }
+    for (int i = 0; i < MAX_FDS; i++) {
+        file_t *fl = c->fds[i];
+        if (!fl) continue;
+        file_get(fl);
+        if (fl->kind == F_PIPE_R || fl->kind == F_PIPE_W) pipe_end_added(fl->pipe, fl->kind == F_PIPE_W);
+    }
+    struct exc_frame child = *f;
+    child.rax = 0;                                      /* fork() returns 0 in the child */
+    task_t *t = task_create_frame(me->name, root, &child);
+    if (!t) {
+        for (int i = 0; i < MAX_FDS; i++) file_put(c->fds[i]);
+        vm_free(&c->vm);
+        paging_free_address_space(root);
+        kfree(c);
+        return SYSERR_AGAIN;
+    }
+    t->process = c;
+    t->user = me->user;
+    return t->pid;
+}
+
+/* Replace this program with another; its descriptors and folder stay. On
+ * success the frame starts the new program (0 is returned, and not used). */
+static int64_t sys_exec(struct exc_frame *f, uint64_t path_ptr, uint64_t argv_ptr) {
+    process_t *p = P();
+    task_t *me = task_current();
+    if (p->threads > 1) return SYSERR_AGAIN;
+    char path[MAX_PATH];
+    if (copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
+    char *strings = kmalloc(1024), *argv[MAX_ARGS];
+    if (!strings) return SYSERR_NOMEM;
+    int argc = 0;
+    size_t used = 0;
+    for (; argv_ptr && argc < MAX_ARGS; argc++) {
+        uint64_t slot = argv_ptr + (uint64_t)argc * 8;
+        if (!user_range_ok(slot, 8, 0)) { kfree(strings); return SYSERR_FAULT; }
+        uint64_t s = *(const uint64_t *)slot;
+        if (!s) break;
+        if (used >= 1024 || copy_user_string(strings + used, s, 1024 - used) != 0) {
+            kfree(strings);
+            return SYSERR_FAULT;
+        }
+        argv[argc] = strings + used;
+        used += strlen(argv[argc]) + 1;
+    }
+    if (argc == 0) argv[argc++] = path;
+    uint32_t size = 0;
+    uint8_t *image = find_program_from(user_cwd(), path, &size);
+    if (!image) {
+        kfree(strings);
+        return SYSERR_NOENT;
+    }
+    uint64_t root = paging_create_address_space();
+    vm_space_t vm;
+    vm_init_space(&vm);
+    uint64_t image_end = 0, entry = root ? load_elf(root, image, size, &image_end) : 0, sp = 0;
+    uint64_t stack_lo = USER_TOP - USER_STACK_SIZE;
+    int ok = entry && vm_add(&vm, stack_lo, USER_TOP, VM_READ | VM_WRITE, VM_ANON, 0) &&
+             vm_add(&vm, image_end, image_end, VM_READ | VM_WRITE, VM_ANON, 0) &&
+             map_user_range(root, USER_TOP - PAGE_SIZE, USER_TOP) == 0 &&
+             (sp = build_stack(root, argc, argv)) != 0;
+    kfree(image);
+    kfree(strings);
+    if (!ok) {
+        vm_free(&vm);
+        if (root) paging_free_address_space(root);
+        return entry ? SYSERR_NOMEM : SYSERR_NOEXEC;
+    }
+    uint64_t old = p->root;
+    vm_free(&p->vm);
+    p->vm = vm;
+    p->root = me->root = root;
+    p->brk_start = p->brk = image_end;
+    p->stack_lo = stack_lo;
+    memset(p->sig_handler, 0, sizeof(p->sig_handler));
+    p->sig_pending = 0;
+    paging_switch(root);
+    paging_free_address_space(old);
+    memset(f, 0, sizeof(*f));
+    f->rip = entry;
+    f->cs = 0x2B;
+    f->rflags = 0x202;
+    f->rsp = sp;
+    f->ss = 0x33;
+    return 0;
+}
+
+/* ---- Threads (stage 2) -------------------------------------------------------------- */
+
+static int64_t sys_thread(uint64_t entry, uint64_t arg, uint64_t stack) {
+    process_t *p = P();
+    task_t *me = task_current();
+    if (entry < USER_BASE || entry >= USER_TOP || stack < USER_BASE || stack > USER_TOP) return SYSERR_FAULT;
+    process_reap_orphans();
+    struct exc_frame tf;
+    memset(&tf, 0, sizeof(tf));
+    tf.rip = entry;
+    tf.cs = 0x2B;
+    tf.rflags = 0x202;
+    tf.rsp = (stack & ~(uint64_t)15) - 8;               /* as if called: entry sees rsp = 8 mod 16 */
+    tf.ss = 0x33;
+    tf.rdi = arg;
+    task_t *t = task_create_frame(me->name, p->root, &tf);
+    if (!t) return SYSERR_AGAIN;
+    t->process = p;
+    t->user = me->user;
+    t->is_thread = 1;
+    p->threads++;
+    return t->pid;
+}
+
+static int64_t sys_futex(uint64_t op, uint64_t addr, uint64_t value) {
+    if ((addr & 3) || !user_range_ok(addr, 4, 0)) return SYSERR_FAULT;
+    const void *chan = (const void *)(P()->root ^ addr);
+    if (op == FUTEX_WAKE) {
+        task_wakeup(chan);
+        return 0;
+    }
+    if (op != FUTEX_WAIT) return SYSERR_BADCALL;
+    if (*(volatile uint32_t *)addr != (uint32_t)value) return SYSERR_AGAIN;
+    task_block(chan, 100);                              /* (wakes to notice Ctrl+C) */
+    check_killed();
+    return 0;
+}
+
+/* ---- Ports (stage 3) ---------------------------------------------------------------- */
+
+static int64_t sys_port(struct exc_frame *f) {
+    port_space_t *s = &P()->ports;
+    char service[32];
+    switch (f->rax) {
+        case SYS_PORT_CREATE:
+            return port_create(s);
+        case SYS_PORT_SEND: {
+            if (f->rdx > PORT_MSG_MAX || !user_range_ok(f->rsi, f->rdx, 0)) return SYSERR_FAULT;
+            void *msg = kmalloc(f->rdx ? f->rdx : 1);
+            if (!msg) return SYSERR_NOMEM;
+            memcpy(msg, (const void *)f->rsi, f->rdx);
+            int r = port_send(s, (int)f->rdi, msg, (uint32_t)f->rdx, (int)(int64_t)f->r10);
+            kfree(msg);
+            check_killed();
+            return r;
+        }
+        case SYS_PORT_RECEIVE: {
+            uint64_t max = f->rdx > PORT_MSG_MAX ? PORT_MSG_MAX : f->rdx;
+            if (!user_range_ok(f->rsi, max, 1) || (f->r8 && !user_range_ok(f->r8, sizeof(int), 1)))
+                return SYSERR_FAULT;
+            void *buf = kmalloc(max ? max : 1);
+            if (!buf) return SYSERR_NOMEM;
+            int reply = -1;
+            int r = port_receive(s, (int)f->rdi, buf, (uint32_t)max, (uint32_t)f->r10, &reply);
+            if (r > 0) memcpy((void *)f->rsi, buf, (uint64_t)r);
+            kfree(buf);
+            if (f->r8) *(int *)f->r8 = reply;
+            check_killed();
+            return r;
+        }
+        case SYS_PORT_REGISTER:
+            if (copy_user_string(service, f->rdi, sizeof(service)) != 0) return SYSERR_FAULT;
+            return port_register(s, service, (int)f->rsi);
+        case SYS_PORT_LOOKUP:
+            if (copy_user_string(service, f->rdi, sizeof(service)) != 0) return SYSERR_FAULT;
+            return port_lookup(s, service);
+        default:
+            return port_close(s, (int)f->rdi);
+    }
+}
+
+/* ---- Signals (stage 4) -------------------------------------------------------------- *
+ * A handled signal runs when the program next returns from a system call: the
+ * kernel saves its registers on its stack and starts the C library's
+ * trampoline, which calls the handler and then sigreturn. */
+
+static int64_t sys_signal(uint64_t sig, uint64_t handler, uint64_t tramp) {
+    if (sig < 1 || sig >= 32 || sig == SIGKILL) return SYSERR_BADCALL;
+    process_t *p = P();
+    p->sig_handler[sig] = handler;
+    if (tramp) p->sig_tramp = tramp;
+    return 0;
+}
+
+static int64_t sys_sigsend(int64_t pid, uint64_t sig) {
+    task_t *t = task_by_pid((int)pid);
+    if (!t || t->state == TASK_ZOMBIE || !t->is_user) return SYSERR_SRCH;
+    if (sig < 1 || sig >= 32) return SYSERR_BADCALL;
+    if (!user_is_root() && t->user.uid != user_current()->uid) return SYSERR_PERM;
+    process_t *q = t->process;
+    if (sig != SIGKILL && q && q->sig_handler[sig]) {
+        q->sig_pending |= 1u << sig;
+    } else if (sig != SIGCHLD) {                         /* the default: it ends */
+        t->kill_code = sig == SIGKILL ? EXIT_KILLED : sig == SIGINT ? EXIT_INTERRUPTED : 128 + (int)sig;
+    }
+    task_interrupt(t);
+    return 0;
+}
+
+static void deliver_signals(struct exc_frame *f) {
+    task_t *t = task_current();
+    process_t *p = t->is_user ? t->process : 0;
+    if (!p || !p->sig_pending || !p->sig_tramp) return;
+    int sig = __builtin_ctz(p->sig_pending);
+    p->sig_pending &= ~(1u << sig);
+    uint64_t handler = p->sig_handler[sig];
+    if (!handler) return;
+    uint64_t sp = (f->rsp - 128 - sizeof(struct exc_frame)) & ~(uint64_t)15;
+    if (!user_range_ok(sp - 8, sizeof(struct exc_frame) + 8, 1)) process_exit(EXIT_SEGFAULT);
+    memcpy((void *)sp, f, sizeof(*f));
+    *(uint64_t *)(sp - 8) = 0;                          /* the handler never returns there */
+    f->rsp = sp - 8;
+    f->rip = p->sig_tramp;
+    f->rdi = (uint64_t)sig;
+    f->rsi = handler;
+    f->rdx = sp;
+}
+
+static void sys_sigreturn(struct exc_frame *f, uint64_t ptr) {
+    if (!user_range_ok(ptr, sizeof(struct exc_frame), 0)) process_exit(EXIT_SEGFAULT);
+    struct exc_frame saved;
+    memcpy(&saved, (const void *)ptr, sizeof(saved));
+    saved.cs = 0x2B;                                    /* never anything but user mode */
+    saved.ss = 0x33;
+    saved.rflags = (saved.rflags & 0xCD5) | 0x202;
+    *f = saved;
+}
+
+/* ---- The device registry and login (stages 5, 6) ------------------------------------ */
+
+static int64_t sys_registry(uint64_t index, uint64_t ptr) {
+    if (!user_range_ok(ptr, sizeof(struct os_regnode), 1)) return SYSERR_FAULT;
+    const reg_node_t *n = registry_node((int)index);
+    if (!n) return 0;
+    struct os_regnode *out = (struct os_regnode *)ptr;
+    out->id = (int)index;
+    out->parent = n->parent;
+    kstrncpy(out->name, n->name, sizeof(out->name));
+    kstrncpy(out->cls, n->cls, sizeof(out->cls));
+    kstrncpy(out->info, n->info, sizeof(out->info));
+    return 1;
+}
+
+static int64_t sys_auth(uint64_t name_ptr, uint64_t pass_ptr, uint64_t out_ptr) {
+    char name[32], password[64];
+    if (!user_is_root()) return SYSERR_PERM;
+    if (copy_user_string(name, name_ptr, sizeof(name)) != 0 ||
+        copy_user_string(password, pass_ptr, sizeof(password)) != 0 ||
+        !user_range_ok(out_ptr, sizeof(struct os_user), 1))
+        return SYSERR_FAULT;
+    user_t u;
+    int ok = users_check_password(name, password, &u) == 0;
+    memset(password, 0, sizeof(password));
+    if (!ok) {
+        task_sleep(1000);                               /* slow down guessing */
+        return SYSERR_AUTH;
+    }
+    struct os_user *out = (struct os_user *)out_ptr;
+    out->uid = u.uid;
+    k_snprintf(out->name, sizeof(out->name), "%s", u.name);
+    k_snprintf(out->home, sizeof(out->home), "%s", u.home);
+    return 0;
 }

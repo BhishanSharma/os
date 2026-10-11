@@ -396,8 +396,44 @@ def test_panic():
         m.stop()
 
 
+def test_kernel():
+    """Stages 1-6: virtual memory, threads, ports, fork/exec/pipes/signals, the
+    device registry, and launchd bringing a service back."""
+    m = Machine("kernel", usb_stick())
+    try:
+        login(m)
+        out = m.run("vmtest", 60)
+        check("FAILED" not in out and "copy-on-write" in out.lower(), "vmtest", out)
+        out = m.run("vmtest overflow", 60)
+        check("Stack overflow" in out, "a runaway stack is not reported", out)
+        out = m.run("threads", 60)
+        check(re.search(r"threads: .*: ok", out), "threads", out)
+        out = m.run("porttest", 60)
+        check("FAILED" not in out and "1 MiB message: ok" in out, "porttest", out)
+        out = m.run("forktest", 60)
+        check("FAILED" not in out and " ok" in out, "forktest", out)
+        out = m.run("echo hello world | wc")
+        check(re.search(r"1\s+2\s+12", out), "a pipe", out)
+        m.run("echo hi > o.txt")
+        m.run("echo more >> o.txt")
+        out = m.run("wc < o.txt")
+        check(re.search(r"2\s+2\s+8", out), "redirection", out)
+        out = m.run("ioreg")
+        check("Storage" in out or "nvme" in out.lower() or "usb" in out.lower(), "ioreg", out)
+        out = m.run("ps")
+        pid = re.search(r"^\s*(\d+)\s+\d+\s+\w+\s+\w+\s+\S+\s+echod", out, re.M)
+        check(pid and "launchd" in out, "launchd and echod are not running", out)
+        m.run("kill " + pid.group(1))
+        m.run("sleep 1")
+        out = m.run("ps")
+        again = re.search(r"^\s*(\d+)\s+\d+\s+\w+\s+\w+\s+\S+\s+echod", out, re.M)
+        check(again and again.group(1) != pid.group(1), "launchd did not restart echod", out)
+    finally:
+        m.stop()
+
+
 TESTS = [("boot", test_boot), ("files", test_files), ("fault", test_fault), ("panic", test_panic),
-         ("user", test_user), ("video", test_nvme_video), ("install", test_install), ("network", test_network),
+         ("kernel", test_kernel), ("user", test_user), ("video", test_nvme_video), ("install", test_install), ("network", test_network),
          ("bios", test_legacy_bios)]
 NEEDS_INTERNET = {"network"}
 

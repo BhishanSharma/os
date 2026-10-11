@@ -80,6 +80,9 @@ const char *os_strerror(int err) {
         case SYSERR_NOTEMPTY: return "the folder is not empty";
         case SYSERR_NOSPC:   return "the disk is full";
         case SYSERR_ROFS:    return "read-only volume";
+        case SYSERR_TIMEOUT: return "timed out";
+        case SYSERR_DEAD:    return "the other side is gone";
+        case SYSERR_PIPE:    return "nobody reads the pipe";
         default:             return "error";
     }
 }

@@ -167,7 +167,12 @@ void exception_handler(struct exc_frame* f) {
         return;
     }
 
-    // A user program faulted: end the program, not the kernel.
+    // A user program faulted: a page of its memory to bring in, else end the
+    // program, not the kernel.
+    if ((f->cs & 3) == 3 && f->vector == 14 && process_page_fault(read_cr(2), f->error) == 0) {
+        bkl_leave();
+        return;
+    }
     if ((f->cs & 3) == 3) {
         uint32_t uv = f->vector < 32 ? (uint32_t)f->vector : 31;
         process_fault(f->vector, exc_name[uv], f->rip, f->vector == 14 ? read_cr(2) : 0);

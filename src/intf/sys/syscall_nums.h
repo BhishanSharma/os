@@ -53,6 +53,52 @@
 #define SYS_LISTDIR   38 /* listdir(path, struct os_dirent *, max): a folder, 0 = current -> count */
 #define SYS_MEMINFO   39 /* meminfo(struct os_meminfo *)                  -> 0          */
 
+/* Memory (stage 1): regions filled in on first use */
+#define SYS_MMAP      40 /* mmap(len, prot, fd): fd -1 = zeroed memory, else the file (private) -> address */
+#define SYS_MUNMAP    41 /* munmap(addr): a whole mapping                 -> 0          */
+#define SYS_SHMMAP    42 /* shm_map(name, size): shared memory, by name   -> address    */
+
+/* Programs (stage 4) */
+#define SYS_FORK      43 /* fork(): a copy (copy-on-write) of this program -> child pid, 0 in the child */
+#define SYS_EXEC      44 /* exec(path, argv): replace this program        -> only on error */
+
+/* Threads (stage 2) */
+#define SYS_THREAD    45 /* thread(entry, arg, stack_top)                  -> thread id (wait() joins it) */
+#define SYS_THREAD_EXIT 46 /* thread_exit(code): only this thread          -> no return  */
+#define SYS_FUTEX     47 /* futex(op, addr, value): FUTEX_WAIT while *addr == value, FUTEX_WAKE -> 0 */
+
+/* Ports (stage 3), see sys/port.h */
+#define SYS_PORT_CREATE   48 /* port_create()                              -> name (receive right) */
+#define SYS_PORT_SEND     49 /* port_send(name, msg, len, reply_name or -1) -> 0         */
+#define SYS_PORT_RECEIVE  50 /* port_receive(name, buf, max, timeout ms, int *reply) -> length */
+#define SYS_PORT_REGISTER 51 /* port_register(service, name)               -> 0          */
+#define SYS_PORT_LOOKUP   52 /* port_lookup(service)                       -> name (send right) */
+#define SYS_PORT_CLOSE    53 /* port_close(name)                           -> 0          */
+
+/* File descriptors and signals (stage 4) */
+#define SYS_PIPE      54 /* pipe(int fds[2]): [0] reads, [1] writes       -> 0          */
+#define SYS_DUP       55 /* dup(fd)                                        -> new fd     */
+#define SYS_DUP2      56 /* dup2(fd, new_fd)                               -> new_fd     */
+#define SYS_SIGNAL    57 /* signal(sig, handler, trampoline): 0 handler = default -> 0 */
+#define SYS_SIGSEND   58 /* sigsend(pid, sig)                              -> 0          */
+#define SYS_SIGRETURN 59 /* the end of a signal handler (the C library calls it) */
+
+#define SYS_REGISTRY  60 /* registry(index, struct os_regnode *): the device tree -> 1, 0 past the end */
+#define SYS_AUTH      61 /* auth(name, password, struct os_user *): root only (login) -> 0 */
+
+#define PROT_READ   1
+#define PROT_WRITE  2
+#define FUTEX_WAIT  0
+#define FUTEX_WAKE  1
+
+#define SIGINT    2
+#define SIGKILL   9
+#define SIGUSR1  10
+#define SIGSEGV  11
+#define SIGPIPE  13
+#define SIGTERM  15
+#define SIGCHLD  17
+
 /* seek() whence */
 #define SEEK_SET  0
 #define SEEK_CUR  1
@@ -89,6 +135,7 @@
 #define CON_CURSOR   5   /* a = 1 show, 0 hide the cursor */
 #define CON_THEME    6   /* a = THEME_*: a colour of the current theme */
 #define CON_COLUMN   7   /* -> the cursor's column */
+#define CON_ECHO     8   /* a = 0: read(0) does not show what is typed (passwords) */
 
 #define THEME_TEXT     0
 #define THEME_ACCENT   1
@@ -129,6 +176,8 @@
 #define SYSERR_NOTEMPTY -24  /* the folder is not empty */
 #define SYSERR_NOSPC   -25   /* the disk is full */
 #define SYSERR_ROFS    -26   /* read-only volume */
+#define SYSERR_DEAD    -27   /* the port's receiver is gone */
+#define SYSERR_PIPE    -28   /* nobody reads the pipe any more */
 
 struct os_time {
     int year, month, day, hour, minute, second;
@@ -205,6 +254,13 @@ struct os_mouse {
     int col, row;          /* the cell under the pointer (gotoxy coordinates; row -1 = status bar) */
     int buttons;           /* MOUSE_BUTTON_* held now */
     int wheel;             /* wheel steps since the last call: negative = up */
+};
+
+struct os_regnode {
+    int id, parent;        /* parent -1: the root */
+    char name[32];         /* "NVMe drive" */
+    char cls[16];          /* "storage", "pci", "volume", ... */
+    char info[96];         /* details, e.g. the model */
 };
 
 struct os_uname {

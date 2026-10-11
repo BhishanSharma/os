@@ -212,7 +212,7 @@ static page_entry_t *user_next(page_entry_t *e, int create) {
 }
 
 /* The page-table entry for `virt` in `root`'s lower half; 0 if not there. */
-static page_entry_t *user_pte(uint64_t root, uint64_t virt, int create) {
+uint64_t *paging_user_pte(uint64_t root, uint64_t virt, int create) {
     if (!root || virt >= USER_SPACE_END) return 0;
     page_entry_t *t = TABLE(root);
     for (int shift = 39; shift > 12; shift -= 9) {
@@ -223,16 +223,40 @@ static page_entry_t *user_pte(uint64_t root, uint64_t virt, int create) {
 }
 
 int paging_map_user(uint64_t root, uint64_t virt, uint64_t phys) {
-    page_entry_t *pte = user_pte(root, virt, 1);
+    return paging_map_user_prot(root, virt, phys, 1);
+}
+
+int paging_map_user_prot(uint64_t root, uint64_t virt, uint64_t phys, int writable) {
+    page_entry_t *pte = paging_user_pte(root, virt, 1);
     if (!pte) return -1;
-    *pte = (phys & ADDR_MASK) | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+    *pte = (phys & ADDR_MASK) | PAGE_PRESENT | PAGE_USER | (writable ? PAGE_RW : 0);
     asm volatile("invlpg (%0)" :: "r"(virt) : "memory");
     return 0;
 }
 
 uint64_t paging_get_user_entry(uint64_t root, uint64_t virt) {
-    page_entry_t *pte = user_pte(root, virt, 0);
+    page_entry_t *pte = paging_user_pte(root, virt, 0);
     return pte ? *pte : 0;
+}
+
+/* Call fn for every present page of `root`'s lower half. */
+static void walk_level(page_entry_t *t, int level, uint64_t base,
+                       void (*fn)(uint64_t virt, uint64_t *pte, void *ctx), void *ctx) {
+    for (int i = 0; i < (level == 4 ? USER_ENTRIES : 512); i++) {
+        if (!(t[i] & PAGE_PRESENT)) continue;
+        uint64_t v = base | ((uint64_t)i << (12 + 9 * (level - 1)));
+        if (level == 1) fn(v, &t[i], ctx);
+        else walk_level(TABLE(t[i]), level - 1, v, fn, ctx);
+    }
+}
+
+void paging_walk_user(uint64_t root, void (*fn)(uint64_t virt, uint64_t *pte, void *ctx), void *ctx) {
+    if (root) walk_level(TABLE(root), 4, 0, fn, ctx);
+}
+
+void paging_flush(void) {
+    uint64_t cr3;
+    asm volatile("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) :: "memory");
 }
 
 /* Free the table under entry `e` (`level` 3 = PDPT ... 1 = PT) and all below it. */

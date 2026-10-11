@@ -15,7 +15,9 @@
 void physmem_init(uint64_t heap_start, uint64_t heap_end);
 
 uint64_t page_alloc(void);           /* a free 4 KiB page (physical address), 0 if none */
-void page_free(uint64_t phys);
+void page_free(uint64_t phys);       /* one mapping less: freed when it was the last */
+void page_ref(uint64_t phys);        /* one mapping more */
+int page_refcount(uint64_t phys);
 int page_owned(uint64_t phys);       /* did page_alloc hand this out (not the heap)? */
 
 /* The kernel's own address for a user page (from here or the heap). */

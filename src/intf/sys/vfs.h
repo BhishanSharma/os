@@ -12,6 +12,7 @@
 #ifndef VFS_H
 #define VFS_H
 
+#include "sys/task.h"
 #include <stdint.h>
 #include "drivers/disk.h"
 #include "drivers/fatvol.h"
@@ -36,6 +37,9 @@ int vfs_root_persistent(void);
 
 /* The absolute, upper-case form of `path` (relative to the current folder).
  * 0 on success, -1 if it is too long. */
+/* Held by every call that reaches the disk (recursive; see vfs.c). */
+extern kmutex_t vfs_lock;
+
 int vfs_normalize(const char *path, char *out, int size);
 /* The same against `base` instead of the current directory (which belongs to
  * the kernel's shell: programs keep their own and pass it here). */

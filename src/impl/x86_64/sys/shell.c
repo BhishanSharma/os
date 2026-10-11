@@ -30,6 +30,7 @@
 #include "drivers/part.h"
 #include "drivers/fatvol.h"
 #include "sys/vfs.h"
+#include "core/multiboot2.h"
 #include "net/tcp.h"
 #include "drivers/msi.h"
 #include "sys/smp.h"
@@ -127,9 +128,32 @@ static int user_shell(void)
 }
 
 /* pid 1: log a user in, run their shell, repeat. */
+/* launchd (a program, user/programs/launchd.c) starts login and the other
+ * services and keeps them running. Returns if there is none (or the `nolaunchd`
+ * boot option) or it ended. */
+static void run_launchd(void)
+{
+    if (mb2_cmdline_has("nolaunchd")) return;
+    char here[256] = "/";
+    fat32_get_current_directory(here, sizeof(here));
+    fat32_change_directory("/");
+    uint32_t size = 0;
+    uint8_t *image = process_find_program("launchd", &size);
+    fat32_change_directory(here);
+    if (!image) return;
+    char name[] = "launchd";
+    char *argv[] = { name, 0 };
+    int pid = process_spawn(image, size, 1, argv);
+    kfree(image);
+    if (pid < 0) return;
+    process_wait(pid, 1);                 // its console thread hands the keyboard on to login
+    print_warning("launchd ended; the kernel's own login takes over.");
+}
+
 void shell_run(void)
 {
-    users_init();
+    users_init();                         // first start: the accounts
+    run_launchd();
     while (1)
     {
         users_login();
@@ -510,7 +534,9 @@ static int kernel_command(const char *line, int run_programs) {
     else if (strcmp(line, "install") == 0)
     {
         if (!need_root("install")) return 1;
+        kmutex_lock(&vfs_lock);                         // it writes to mounted volumes directly
         install_run();
+        kmutex_unlock(&vfs_lock);
     }
     else if (strcmp(line, "battery") == 0)
     {

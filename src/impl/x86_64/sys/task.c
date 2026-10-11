@@ -18,6 +18,7 @@
 extern void task_switch(uint64_t *save_rsp, uint64_t new_rsp);   // taskswitch.asm
 extern void task_start_user(void);
 extern void task_start_kernel(void);
+extern void task_start_frame(void);
 
 int bkl_depth_get(void);                  // sys/smp.c
 void bkl_depth_set(int depth);
@@ -162,6 +163,80 @@ task_t *task_create_user(const char *name, uint64_t root, uint64_t entry, uint64
     return t;
 }
 
+static void schedule(void);
+
+task_t *task_create_frame(const char *name, uint64_t root, const struct exc_frame *frame) {
+    uint64_t flags = irq_save();
+    task_t *t = alloc_task(name);
+    if (!t || alloc_stack(t) != 0) {
+        if (t) t->state = TASK_FREE;
+        irq_restore(flags);
+        return 0;
+    }
+    task_t *me = task_current();
+    t->pid = next_pid++;
+    t->root = root;
+    t->is_user = 1;
+    t->parent = me ? me->pid : 1;
+    // The frame sits above task_switch's: task_start_frame pops it and irets.
+    uint8_t *top = (uint8_t *)t->kstack_top - sizeof(struct exc_frame);
+    memcpy(top, frame, sizeof(struct exc_frame));
+    initial_stack(t, (uint64_t *)top, task_start_frame, 0);
+    t->state = TASK_READY;
+    irq_restore(flags);
+    return t;
+}
+
+int task_block(const void *chan, uint32_t timeout_ms) {
+    task_t *me = task_current();
+    if (!me) return -1;
+    me->wait_chan = chan;
+    me->has_deadline = timeout_ms != 0;
+    me->wake_tick = get_tick() + (timeout_ms * TIMER_FREQ + 999) / 1000;
+    me->state = TASK_BLOCKED;
+    schedule();
+    int timed_out = me->wait_chan != 0;     /* task_wakeup clears it */
+    me->wait_chan = 0;
+    return timed_out ? -1 : 0;
+}
+
+void task_wakeup(const void *chan) {
+    uint64_t flags = irq_save();
+    for (int i = 0; i < MAX_TASKS; i++)
+        if (tasks[i].state == TASK_BLOCKED && tasks[i].wait_chan == chan) {
+            tasks[i].wait_chan = 0;
+            tasks[i].state = TASK_READY;
+        }
+    irq_restore(flags);
+}
+
+void task_interrupt(task_t *t) {
+    uint64_t flags = irq_save();
+    if (t->state == TASK_BLOCKED) {
+        t->wait_chan = 0;
+        t->state = TASK_READY;
+    } else if (t->state == TASK_SLEEPING) {
+        t->state = TASK_READY;
+    }
+    irq_restore(flags);
+}
+
+void kmutex_lock(kmutex_t *m) {
+    task_t *me = task_current();
+    if (!me) return;
+    while (m->owner && m->owner != me) task_block(m, 0);
+    m->owner = me;
+    m->depth++;
+}
+
+void kmutex_unlock(kmutex_t *m) {
+    if (!task_current() || !m->owner) return;
+    if (--m->depth == 0) {
+        m->owner = 0;
+        task_wakeup(m);
+    }
+}
+
 static int may_run_here(const task_t *t, int me) {
     if (t->state != TASK_READY || t->running_on >= 0 || t->is_idle) return 0;
     return t->is_user || t->pinned == me;
@@ -173,7 +248,8 @@ static void schedule(void) {
     task_t *prev = cur[me];
     uint32_t now = get_tick();
     for (int i = 0; i < MAX_TASKS; i++)
-        if (tasks[i].state == TASK_SLEEPING && (int32_t)(now - tasks[i].wake_tick) >= 0)
+        if ((tasks[i].state == TASK_SLEEPING || (tasks[i].state == TASK_BLOCKED && tasks[i].has_deadline))
+            && (int32_t)(now - tasks[i].wake_tick) >= 0)
             tasks[i].state = TASK_READY;
 
     // Round robin from the task after this one; this core's idle task only if
