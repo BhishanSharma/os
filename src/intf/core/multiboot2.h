@@ -19,6 +19,8 @@ typedef struct {
 /* Copy up to `max` usable-RAM regions from the memory map (tag 6). Returns the
  * number copied, or -1 if the bootloader gave no memory map. */
 int mb2_get_memory_map(mb2_region_t *out, int max);
+/* The same for usable RAM and ACPI memory (types 1, 3, 4): the direct map. */
+int mb2_get_ram_like(mb2_region_t *out, int max);
 
 /* First boot module (grub.cfg `module2`) whose command line is `name`. Returns
  * 0 and its physical range [start, end), or -1 if there is no such module. */

@@ -38,10 +38,15 @@ void *sbrk(long increment);                  /* (void *)-1 on failure */
 void sleep_ms(unsigned long ms);
 unsigned long uptime_ms(void);
 int gettime(struct os_time *t);              /* local date and time */
+int gettime_utc(struct os_time *t);          /* the same in UTC */
 
 int getkey(void);                            /* next key or 0, does not wait */
 int waitkey(void);                           /* next key, waits for one */
 int readdir(int index, struct os_dirent *entry);   /* 1 = filled, 0 = no more */
+int listdir(const char *path, struct os_dirent *entries, int max);   /* path 0: current -> count */
+int mkdir(const char *path);
+int stat(const char *path, struct os_stat *st);
+int meminfo(struct os_meminfo *m);
 int getuser(struct os_user *user);           /* who is running this program */
 int getpid(void);                            /* this program's process id */
 void yield(void);                            /* let other programs run now */

@@ -39,7 +39,7 @@ const char *vfs_error(int code) {
     switch (code) {
         case FATV_NOT_FOUND:      return "no such file or folder";
         case FATV_EXISTS:         return "already exists";
-        case FATV_BAD_NAME:       return "names are 8.3: up to 8 letters, a dot, up to 3 more";
+        case FATV_BAD_NAME:       return "not a valid name";
         case FATV_NOT_EMPTY:      return "the folder is not empty";
         case FATV_FULL:           return "the disk is full";
         case FATV_READ_ONLY:      return "read-only volume";

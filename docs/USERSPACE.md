@@ -56,9 +56,9 @@ waits for it. Everything you type goes to that ring-3 program. For each command 
 
 1. runs it itself if it is a shell command: `cd`, `pwd`, `jobs`, `ps`, `fg`, `kill`, `su`,
    `history`, `exit`;
-2. otherwise asks the kernel to run it if it is one of the commands built into the kernel
-   (`ls`, `cat`, `edit`, `ping`, `download`, ...) with the `kcommand` system call, which runs
-   it as you, in the shell's directory;
+2. otherwise asks the kernel to run it if it is one of the commands still built into the
+   kernel (`edit`, `ping`, `download`, `wifi`, `install`, ...: the ones that drive hardware)
+   with the `kcommand` system call, which runs it as you, in the shell's directory;
 3. otherwise starts the program of that name with `spawn` and `wait`s for it, or leaves it
    in the background for a trailing `&`.
 
@@ -90,6 +90,22 @@ which has the same commands.
 | `shell`               | The command line itself: `spawn`, `wait`, `kcommand`, line editing |
 | `paint`               | Draw with the mouse (`getmouse`): left paints, right erases, wheel picks the colour |
 
+The everyday file and system commands are programs too, as on Unix:
+
+| Program               | Does                                                          |
+| --------------------- | ------------------------------------------------------------- |
+| `ls [folder]`         | Folders first, then files with sizes (`listdir`)              |
+| `cat <file>`          | Shows a text file of any size (read as it is shown)           |
+| `write <file> <text>` | Puts text in a file                                           |
+| `touch`, `rm`, `mkdir` | Create a file, delete a file or empty folder, create a folder |
+| `tree [folder]`       | A folder and everything in it                                 |
+| `hexdump [-a] <file>` | Bytes in hex (the first 256; `-a`: all)                       |
+| `fileinfo <file>`     | Size, or that it is a folder (`stat`)                         |
+| `pwd`, `echo`, `date [-u]`, `uptime`, `sleep <s>` | The usual                         |
+| `meminfo`             | Kernel heap and program memory (`meminfo`)                    |
+
+A file name with spaces works with or without quotes: `cat my notes.txt`.
+
 ## Writing your own
 
 1. Create `user/programs/NAME.c` (8 characters at most, the FAT short-name limit):
@@ -114,8 +130,10 @@ The C library (`user/include`, `user/lib`) has:
   (formats `%d %u %x %p %c %s`, widths and zero padding; no floating point)
 * `stdlib.h`: `malloc`, `calloc`, `realloc`, `free`, `atoi`, `atol`, `rand`, `srand`, `exit`
 * `string.h`, `ctype.h`: the usual string, memory and character functions
-* `os.h`: who is running it (`getuser`), files (`open`, `read`, `write`, `close`, `unlink`, `readdir`), time (`sleep_ms`,
-  `uptime_ms`, `gettime`), keys (`getkey`, which does not wait, and `waitkey`), the screen
+* `args.h`: `args_join` (the rest of the command line as one file name)
+* `os.h`: who is running it (`getuser`), files (`open`, `read`, `write`, `close`, `lseek`,
+  `unlink`, `mkdir`, `stat`, `listdir`, `readdir`), memory (`meminfo`), time (`sleep_ms`,
+  `uptime_ms`, `gettime`, `gettime_utc`), keys (`getkey`, which does not wait, and `waitkey`), the screen
   (`clear_screen`, `gotoxy`, `set_color`, `set_theme_color`, `reset_color`, `console_size`,
   `cursor_column`, `show_cursor`), the mouse (`getmouse`: pointer cell, buttons, wheel), and programs: `spawn(path, argv, as_user)`,
   `wait(pid, &status, flags)` (`WAIT_NOHANG`, `WAIT_FOREGROUND`; pid -1 = any child),
@@ -125,12 +143,13 @@ Programs are compiled with `-mgeneral-regs-only`: no `float`/`double` yet.
 
 ## How it works
 
-* **Memory.** Programs are static ELF executables linked at 1 GiB (`user/user.ld`). Each
-  program has its own page tables: the range 1-2 GiB holds its segments, its heap (grown by
-  `sbrk`, up to 256 MiB) and a 256 KiB stack ending at 2 GiB, while the kernel is mapped the
-  same way in every program (`paging_create_address_space`). Only the program's pages have
-  the *user* bit; the kernel heap stays below 1 GiB. When a program ends, its page tables and
-  pages are freed.
+* **Memory.** Programs are static ELF executables linked at 4 MiB (`user/user.ld`). Each
+  program has the whole lower half of its own address space (128 TiB): its segments, its
+  heap after them (grown by `sbrk`, as far as RAM goes) and a 256 KiB stack ending just
+  below 128 TiB. The kernel is in the upper half, mapped the same way in every program
+  (`paging_create_address_space`, docs/ARCHITECTURE.md). Only the program's pages have the
+  *user* bit; the first 64 KiB stay unmapped, so a null pointer faults. When a program ends,
+  its page tables and pages are freed.
 * **Tasks and scheduling** (`sys/task.c`). Every program is a task with its own kernel
   stack; task 1 (`login`) logs users in and an idle task (pid 0) halts the CPU when nobody
   has work. Every program has a parent: the one that spawned it, which collects its exit

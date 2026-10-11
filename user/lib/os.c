@@ -25,9 +25,14 @@ void *sbrk(long increment) {
 void sleep_ms(unsigned long ms)                 { os_syscall(SYS_SLEEP, (long)ms, 0, 0); }
 unsigned long uptime_ms(void)                   { return (unsigned long)os_syscall(SYS_UPTIME, 0, 0, 0); }
 int gettime(struct os_time *t)                  { return (int)os_syscall(SYS_TIME, (long)t, 0, 0); }
+int gettime_utc(struct os_time *t)              { return (int)os_syscall(SYS_TIME, (long)t, 1, 0); }
 int getkey(void)                                { return (int)os_syscall(SYS_GETKEY, 0, 0, 0); }
 int waitkey(void)                               { return (int)os_syscall(SYS_GETKEY, 1, 0, 0); }
 int readdir(int index, struct os_dirent *e)     { return (int)os_syscall(SYS_READDIR, index, (long)e, 0); }
+int listdir(const char *path, struct os_dirent *e, int max) { return (int)os_syscall(SYS_LISTDIR, (long)path, (long)e, max); }
+int mkdir(const char *path)                     { return (int)os_syscall(SYS_MKDIR, (long)path, 0, 0); }
+int stat(const char *path, struct os_stat *st)  { return (int)os_syscall(SYS_STAT, (long)path, (long)st, 0); }
+int meminfo(struct os_meminfo *m)               { return (int)os_syscall(SYS_MEMINFO, (long)m, 0, 0); }
 int getuser(struct os_user *u)                  { return (int)os_syscall(SYS_GETUSER, (long)u, 0, 0); }
 int getpid(void)                                { return (int)os_syscall(SYS_GETPID, 0, 0, 0); }
 void yield(void)                                { os_syscall(SYS_YIELD, 0, 0, 0); }
@@ -70,6 +75,11 @@ const char *os_strerror(int err) {
         case SYSERR_NOUSER:  return "no such user";
         case SYSERR_AUTH:    return "authentication failure";
         case SYSERR_SRCH:    return "no such process";
+        case SYSERR_EXIST:   return "already exists";
+        case SYSERR_BADNAME: return "not a valid name";
+        case SYSERR_NOTEMPTY: return "the folder is not empty";
+        case SYSERR_NOSPC:   return "the disk is full";
+        case SYSERR_ROFS:    return "read-only volume";
         default:             return "error";
     }
 }

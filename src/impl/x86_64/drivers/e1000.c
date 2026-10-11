@@ -120,7 +120,7 @@ static inline void irq_restore(uint64_t f) {
     __asm__ volatile("push %0; popfq" :: "r"(f) : "memory", "cc");
 }
 
-static uint64_t phys(const void *v) { return (uint64_t)(uintptr_t)v; }   /* identity mapped */
+static uint64_t phys(const void *v) { return virt_to_phys(v); }
 
 static void *alloc_aligned(uint32_t size, uint32_t align) {
     uint8_t *p = kmalloc(size + align);
@@ -182,9 +182,7 @@ int e1000_probe_init(void) {
     uint64_t base = bar0 & ~0xFu;
     if (((bar0 >> 1) & 3) == 2) base |= (uint64_t)pci_config_read_dword(bus, slot, func, 0x14) << 32;
     if (!base) { print_str("[NET] e1000: BAR0 not assigned\n"); return -1; }
-    for (uint64_t a = base; a < base + MMIO_SIZE; a += PAGE_SIZE)
-        map_page(a, a, PAGE_PRESENT | PAGE_RW | PAGE_PCD | PAGE_PWT);
-    regs = (volatile uint8_t *)base;
+    regs = mmio_map(base, MMIO_SIZE);
 
     uint8_t line = pci_config_read_byte(bus, slot, func, 0x3C);
     irq_line = (line >= 1 && line < 16) ? line : NIC_IRQ_NONE;

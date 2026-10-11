@@ -44,7 +44,7 @@ void install_save_boot_info(void) {
         files[i].start = s;
         files[i].end = e;
         memory_reserve(s, e);                               /* keep the heap off them */
-        paging_add_identity_region(s, e - s);
+        paging_add_direct_region(s, e - s);
     }
 }
 
@@ -192,7 +192,7 @@ static int copy_files(const char *base) {
     fat32_mkdir(path);
     for (int i = 0; i < 3; i++) {
         uint32_t len = (uint32_t)(files[i].end - files[i].start);
-        const uint8_t *data = (const uint8_t *)files[i].start;
+        const uint8_t *data = (const uint8_t *)phys_to_virt(files[i].start);
         k_snprintf(path, sizeof(path), "%s/EFI/TERMINALOS/%s", base, files[i].file);
         kprintf("  %-12s %u KiB ", files[i].file, len / 1024);
         int r = fat32_write_file(path, data, len);

@@ -15,7 +15,7 @@
 #include "sys/process.h"
 
 extern void* isr_stub_table[32];             // exc_stubs.asm
-extern char kernel_start[];
+extern char kernel_start[], kernel_end[];
 extern char stack_guard[];                   // unmapped page below the boot stack
 
 #define VGA        (print_text_cells())
@@ -100,10 +100,10 @@ static int in_guard_page(uint64_t addr) {
     return addr >= (uint64_t)stack_guard && addr < (uint64_t)stack_guard + 4096;
 }
 
-// The identity-mapped kernel area; only dereference stack words inside it so
-// that the panic code itself can never fault.
+// The kernel image (the boot stack is in it); only dereference stack words
+// inside it so that the panic code itself can never fault.
 static int stack_readable(uint64_t addr) {
-    return addr >= (uint64_t)kernel_start && addr + 8 <= 0x600000 && (addr & 7) == 0
+    return addr >= (uint64_t)kernel_start && addr + 8 <= (uint64_t)kernel_end && (addr & 7) == 0
         && !in_guard_page(addr);
 }
 
@@ -142,7 +142,7 @@ static void describe_page_fault(uint64_t err, uint64_t cr2) {
     else if (cr2 < 4096)
         out_str("-> looks like a NULL pointer dereference\n");
     else
-        out_str("-> address is not mapped (only kernel, heap, page tables and VGA are)\n");
+        out_str("-> address is not mapped\n");
 }
 
 static void describe_gp(uint64_t err) {

@@ -84,6 +84,8 @@ CFLAGS := -c $(INCLUDE_FLAGS) \
           -fno-stack-protector \
           -fno-pie \
           -mno-red-zone \
+          -mgeneral-regs-only \
+          -mcmodel=kernel \
           -Wall \
           -Wextra \
           -Wno-unused-parameter \
@@ -100,6 +102,8 @@ CXXFLAGS := -c -I buildenv/freestanding/include $(INCLUDE_FLAGS) \
             -fno-unwind-tables \
             -fno-asynchronous-unwind-tables \
             -mno-red-zone \
+            -mgeneral-regs-only \
+            -mcmodel=kernel \
             -Os \
             -Wall \
             -Wextra \
@@ -111,11 +115,16 @@ ASFLAGS := -f elf64
 
 LDFLAGS := -n -T $(LINKER_LD) --gc-sections
 
-# `make DEBUG=1` -> debug symbols, no optimisation.
+# `make DEBUG=1` -> debug symbols, no optimisation; otherwise -O2.
+# -mgeneral-regs-only above keeps the kernel off the SSE registers, which
+# interrupts do not save (they belong to the running program). -mcmodel=kernel:
+# the kernel runs in the top 2 GiB of the address space (linker.ld).
 ifeq ($(DEBUG),1)
 CFLAGS += -g -O0
 CXXFLAGS += -g -O0
 ASFLAGS += -g -F dwarf
+else
+CFLAGS += -O2
 endif
 
 # Treat warnings as errors with `make WERROR=1`.
@@ -149,7 +158,7 @@ KERNEL_LIMIT := 4194304
 
 # ---- Targets --------------------------------------------------------------
 
-.PHONY: all build-x86_64 iso usb run run-iso run-nodisk debug disk size clean help test-net user
+.PHONY: all build-x86_64 iso usb run run-iso run-nodisk debug disk size clean help test-net user test test-unit test-assets test-os
 
 .DEFAULT_GOAL := help
 
@@ -183,7 +192,7 @@ $(BUILD)/x86_64/%.o: $(SRC_X86)/%.c
 $(BUILD)/uacpi/%.o: $(UACPI_DIR)/source/%.c
 	@mkdir -p $(dir $@)
 	$(CC) -c -I $(UACPI_DIR)/include -DUACPI_USE_BUILTIN_STRING -ffreestanding -fno-stack-protector \
-	    -fno-pie -mno-red-zone -mgeneral-regs-only -Os -ffunction-sections -fdata-sections -w \
+	    -fno-pie -mno-red-zone -mgeneral-regs-only -mcmodel=kernel -Os -ffunction-sections -fdata-sections -w \
 	    -MMD -MP $< -o $@
 
 
@@ -210,7 +219,7 @@ $(BEARSSL_LIB):
 	$(MAKE) -C $(BEARSSL_DIR) \
 	    BUILD=$(abspath $(BEARSSL_BUILD)) \
 	    CC=$(CC) AR=$(CROSS)ar \
-	    CFLAGS="-ffreestanding -fno-builtin -fno-stack-protector -fno-pie -mno-red-zone -Os -ffunction-sections -fdata-sections" \
+	    CFLAGS="-ffreestanding -fno-builtin -fno-stack-protector -fno-pie -mno-red-zone -mgeneral-regs-only -mcmodel=kernel -Os -ffunction-sections -fdata-sections" \
 	    INCFLAGS="-Isrc -Iinc -I$(abspath buildenv/freestanding/include)" \
 	    STATICLIB=lib DLL=no TOOLS=no TESTS=no
 
@@ -292,7 +301,7 @@ usb: $(USB_IMG) ## Build dist/x86_64/terminalos.img (the USB stick)
 size: $(KERNEL_BIN) ## Print kernel size and remaining headroom below the heap
 	@$(CROSS)size $(KERNEL_BIN)
 	@end=$$($(CROSS)nm $(KERNEL_BIN) | \
-		awk '$$3=="kernel_end"{print "0x"$$1}'); \
+		awk '$$3=="kernel_phys_end"{print "0x"$$1}'); \
 	used=$$(( end - $(KERNEL_BASE) )); \
 	free=$$(( $(KERNEL_LIMIT) - end )); \
 	echo "kernel image: $$used bytes mapped, $$free bytes of headroom (limit $$(( $(KERNEL_LIMIT) - $(KERNEL_BASE) )))"
@@ -368,6 +377,17 @@ test-wpa: ## Unit-test the WPA2 handshake on the host (IEEE/RFC vectors, simulat
 	gcc -g -O1 -Wall -I src/intf -I $(BEARSSL_DIR)/inc tests/wpa_host_test.c $(SRC_X86)/net/wpa.c \
 	    $(BEARSSL_DIR)/build/libbearssl.a -o $(BUILD)/test/wpa_host_test
 	$(BUILD)/test/wpa_host_test
+
+test-unit: test-net test-tcp test-wpa ## All the host-side unit tests
+
+test-assets: $(USB_IMG) $(KERNEL_ISO) scripts/mktestdisks.sh ## Disk images and a video for the system tests
+	sh scripts/mktestdisks.sh $(BUILD)/test
+
+test: test-unit test-assets ## Unit tests and what the system tests need (in Docker); then `make test-os` on the host
+	@echo "Now on the host: make test-os   (or: python tests/qemu/run_tests.py)"
+
+test-os: ## System tests: boot in QEMU, type commands, check the output (host-side; `make test` first)
+	python tests/qemu/run_tests.py
 
 
 # ---- Clean ----------------------------------------------------------------

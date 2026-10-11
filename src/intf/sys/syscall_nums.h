@@ -15,11 +15,11 @@
 #define SYS_SBRK     5   /* sbrk(increment)                              -> old break  */
 #define SYS_SLEEP    6   /* sleep(milliseconds)                          -> 0          */
 #define SYS_UPTIME   7   /* uptime()                                     -> milliseconds since boot */
-#define SYS_TIME     8   /* time(struct os_time *) local date and time   -> 0          */
+#define SYS_TIME     8   /* time(struct os_time *, utc) local date and time (UTC if utc) -> 0 */
 #define SYS_GETKEY   9   /* getkey(): next key, 0 if none (no waiting)   -> key code   */
 #define SYS_CONSOLE 10   /* console(op, a, b), op = CON_*                -> see below  */
-#define SYS_READDIR 11   /* readdir(index, struct os_dirent *)           -> 1, or 0 past the end */
-#define SYS_UNLINK  12   /* unlink(path)                                 -> 0          */
+#define SYS_READDIR 11   /* readdir(index, struct os_dirent *) current dir -> 1, or 0 past the end */
+#define SYS_UNLINK  12   /* unlink(path): a file, or an empty folder     -> 0          */
 #define SYS_GETUSER 13   /* getuser(struct os_user *) who runs this      -> 0          */
 #define SYS_GETPID  14   /* getpid()                                     -> process id */
 #define SYS_YIELD   15   /* yield(): let other programs run now          -> 0          */
@@ -46,6 +46,12 @@
 #define SYS_SOCKCLOSE 33 /* closesocket(socket)                           -> 0          */
 #define SYS_SEEK      34 /* seek(fd, offset, whence) a file opened for reading -> new position */
 #define SYS_SOUND     35 /* sound(op, a, b), op = SOUND_*: a 48 kHz 16-bit stereo stream -> see below */
+
+/* Files and folders */
+#define SYS_MKDIR     36 /* mkdir(path)                                   -> 0          */
+#define SYS_STAT      37 /* stat(path, struct os_stat *)                  -> 0          */
+#define SYS_LISTDIR   38 /* listdir(path, struct os_dirent *, max): a folder, 0 = current -> count */
+#define SYS_MEMINFO   39 /* meminfo(struct os_meminfo *)                  -> 0          */
 
 /* seek() whence */
 #define SEEK_SET  0
@@ -118,6 +124,11 @@
 #define SYSERR_NOROUTE -19   /* no network, or the gateway does not answer */
 #define SYSERR_INUSE   -20   /* port already in use */
 #define SYSERR_NOHOST  -21   /* DNS: no such host */
+#define SYSERR_EXIST   -22   /* already exists */
+#define SYSERR_BADNAME -23   /* not a valid file name */
+#define SYSERR_NOTEMPTY -24  /* the folder is not empty */
+#define SYSERR_NOSPC   -25   /* the disk is full */
+#define SYSERR_ROFS    -26   /* read-only volume */
 
 struct os_time {
     int year, month, day, hour, minute, second;
@@ -131,9 +142,23 @@ struct os_user {
 };
 
 struct os_dirent {
-    char name[13];         /* 8.3 name, e.g. "HELLO.ELF" */
+    char name[256];        /* the long name, e.g. "My Notes.txt" */
     unsigned char is_dir;
     unsigned int size;
+};
+
+struct os_stat {
+    unsigned int size;     /* bytes (0 for a folder) */
+    unsigned char is_dir;
+};
+
+struct os_meminfo {
+    unsigned long ram;           /* usable RAM, bytes */
+    unsigned long heap_total;    /* the kernel heap */
+    unsigned long heap_used;
+    unsigned long heap_blocks;   /* allocations */
+    unsigned long pages_total;   /* the rest of RAM, for programs */
+    unsigned long pages_used;
 };
 
 /* taskinfo() */

@@ -1,4 +1,5 @@
 #include "core/multiboot2.h"
+#include "drivers/addr.h"
 #include "lib/string.h"
 #include <stdint.h>
 
@@ -13,7 +14,7 @@
  * 8-byte header and are 8-byte aligned. */
 static const uint8_t *find_next_tag(uint32_t want, const uint8_t *prev) {
     if (!multiboot_info) return 0;
-    const uint8_t *base = (const uint8_t *)(uintptr_t)multiboot_info;
+    const uint8_t *base = (const uint8_t *)phys_to_virt(multiboot_info);
     uint32_t total = *(const uint32_t *)base;
     uint32_t off = 8;
     if (prev) off = (uint32_t)(prev - base) + ((*(const uint32_t *)(prev + 4) + 7) & ~7u);
@@ -43,7 +44,8 @@ int mb2_get_framebuffer(fb_info_t *out) {
     return 0;
 }
 
-int mb2_get_memory_map(mb2_region_t *out, int max) {
+/* Regions of the memory map whose type is in `types` (a bit per type). */
+static int memory_map(mb2_region_t *out, int max, uint32_t types) {
     const uint8_t *tag = find_tag(MB2_TAG_MMAP);
     if (!tag) return -1;
     uint32_t size = *(const uint32_t *)(tag + 4);
@@ -52,12 +54,22 @@ int mb2_get_memory_map(mb2_region_t *out, int max) {
     int n = 0;
     for (uint32_t off = 16; off + entry_size <= size && n < max; off += entry_size) {
         const uint8_t *e = tag + off;
-        if (*(const uint32_t *)(e + 16) != MB2_MEMORY_AVAILABLE) continue;
+        uint32_t type = *(const uint32_t *)(e + 16);
+        if (type >= 32 || !(types & (1u << type))) continue;
         out[n].base = *(const uint64_t *)e;
         out[n].length = *(const uint64_t *)(e + 8);
         n++;
     }
     return n;
+}
+
+int mb2_get_memory_map(mb2_region_t *out, int max) {
+    return memory_map(out, max, 1u << MB2_MEMORY_AVAILABLE);
+}
+
+/* Usable RAM, ACPI tables (3) and ACPI NVS (4): ordinary cacheable memory. */
+int mb2_get_ram_like(mb2_region_t *out, int max) {
+    return memory_map(out, max, 1u << MB2_MEMORY_AVAILABLE | 1u << 3 | 1u << 4);
 }
 
 int mb2_get_module(const char *name, uint64_t *start, uint64_t *end) {

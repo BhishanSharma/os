@@ -399,7 +399,7 @@ static int alloc_queues(void) {
         return -1;
     for (int i = 0; i < RX_COUNT; i++) {
         rx_free[i].rbid = (uint16_t)i;
-        rx_free[i].addr = (uint64_t)(rx_bufs + (uint64_t)i * RX_BUF_SIZE);
+        rx_free[i].addr = virt_to_phys(rx_bufs + (uint64_t)i * RX_BUF_SIZE);
     }
     return 0;
 }
@@ -416,32 +416,32 @@ static int start_firmware(void) {
     scratch->ctrl.version.mac_id = (uint16_t)rd(CSR_HW_REV);
     scratch->ctrl.version.size = (uint16_t)(sizeof(prph_scratch_t) / 4);
     scratch->ctrl.control.control_flags = PRPH_SCRATCH_RB_SIZE_4K | PRPH_SCRATCH_MTR_MODE | PRPH_MTR_FORMAT_256B;
-    scratch->ctrl.rbd.free_rbd_addr = (uint64_t)rx_free;
+    scratch->ctrl.rbd.free_rbd_addr = virt_to_phys(rx_free);
     for (int i = 0; i < lmac; i++) {
         void *p = copy_section(i);
         if (!p) return -1;
-        scratch->dram.lmac_img[i] = (uint64_t)p;
+        scratch->dram.lmac_img[i] = virt_to_phys(p);
     }
     for (int i = 0; i < umac; i++) {
         void *p = copy_section(lmac + 1 + i);
         if (!p) return -1;
-        scratch->dram.umac_img[i] = (uint64_t)p;
+        scratch->dram.umac_img[i] = virt_to_phys(p);
     }
     for (int i = 0; i < paging; i++) {
         void *p = copy_section(lmac + umac + 2 + i);
         if (!p) return -1;
-        scratch->dram.virtual_img[i] = (uint64_t)p;
+        scratch->dram.virtual_img[i] = virt_to_phys(p);
     }
 
     memset(ctxt, 0, sizeof(*ctxt));
-    ctxt->prph_info_base_addr = (uint64_t)prph_info;
-    ctxt->prph_scratch_base_addr = (uint64_t)scratch;
+    ctxt->prph_info_base_addr = virt_to_phys(prph_info);
+    ctxt->prph_scratch_base_addr = virt_to_phys(scratch);
     ctxt->prph_scratch_size = sizeof(prph_scratch_t);
-    ctxt->cr_head_idx_arr_base_addr = (uint64_t)rx_status;
-    ctxt->tr_tail_idx_arr_base_addr = (uint64_t)prph_info + 2048;
-    ctxt->cr_tail_idx_arr_base_addr = (uint64_t)prph_info + 3072;
-    ctxt->mtr_base_addr = (uint64_t)tx_cmd;
-    ctxt->mcr_base_addr = (uint64_t)rx_used;
+    ctxt->cr_head_idx_arr_base_addr = virt_to_phys(rx_status);
+    ctxt->tr_tail_idx_arr_base_addr = virt_to_phys(prph_info) + 2048;
+    ctxt->cr_tail_idx_arr_base_addr = virt_to_phys(prph_info) + 3072;
+    ctxt->mtr_base_addr = virt_to_phys(tx_cmd);
+    ctxt->mcr_base_addr = virt_to_phys(rx_used);
     ctxt->mtr_size = 8 - 3;                                 /* log2(TX_COUNT) - 3 */
     ctxt->mcr_size = 9;                                     /* log2(RX_COUNT) */
 
@@ -450,10 +450,10 @@ static int start_firmware(void) {
     if (!iml_dma) return -1;
     memcpy(iml_dma, iml, iml_len);
 
-    uint64_t a = (uint64_t)ctxt;
+    uint64_t a = virt_to_phys(ctxt);
     wr(CSR_CTXT_INFO_ADDR, (uint32_t)a);
     wr(CSR_CTXT_INFO_ADDR + 4, (uint32_t)(a >> 32));
-    a = (uint64_t)iml_dma;
+    a = virt_to_phys(iml_dma);
     wr(CSR_IML_DATA_ADDR, (uint32_t)a);
     wr(CSR_IML_DATA_ADDR + 4, (uint32_t)(a >> 32));
     wr(CSR_IML_SIZE, iml_len);
@@ -613,11 +613,11 @@ static int queue_cmd(uint8_t group, uint8_t opcode, const void *data, uint16_t l
     memset(tfd, 0, sizeof(*tfd));
     uint32_t total = 8u + len;
     tfd->tbs[0].len = (uint16_t)(total < 20 ? total : 20);  /* the first piece is at most 20 bytes */
-    tfd->tbs[0].addr = (uint64_t)cmd;
+    tfd->tbs[0].addr = virt_to_phys(cmd);
     tfd->num_tbs = 1;
     if (total > 20) {
         tfd->tbs[1].len = (uint16_t)(total - 20);
-        tfd->tbs[1].addr = (uint64_t)cmd + 20;
+        tfd->tbs[1].addr = virt_to_phys(cmd) + 20;
         tfd->num_tbs = 2;
     }
     cmd_hw++;
@@ -1369,13 +1369,13 @@ static int tx_frame(const uint8_t *hdr, int hdrlen, const uint8_t *b1, int l1, c
     tfh_tfd_t *d = &txq_tfd[slot];
     memset(d, 0, sizeof(*d));
     d->tbs[0].len = 20;
-    d->tbs[0].addr = (uint64_t)buf;
+    d->tbs[0].addr = virt_to_phys(buf);
     d->tbs[1].len = (uint16_t)(32 + hdrlen + pad - 20);
-    d->tbs[1].addr = (uint64_t)buf + 20;
+    d->tbs[1].addr = virt_to_phys(buf) + 20;
     d->num_tbs = 2;
     if (l1 + l2) {
         d->tbs[2].len = (uint16_t)(l1 + l2);
-        d->tbs[2].addr = (uint64_t)body;
+        d->tbs[2].addr = virt_to_phys(body);
         d->num_tbs = 3;
     }
     txq_bc[slot] = (uint16_t)total;                        /* bytes; one 64-byte TFD chunk */
@@ -1675,8 +1675,8 @@ static int enable_txq(void) {
     *(uint32_t *)(c + 4) = 1;                               /* station 0 */
     c[8] = 15;                                              /* the non-QoS ("management") TID */
     *(uint32_t *)(c + 16) = 5;                              /* log2(256) - 3 */
-    *(uint64_t *)(c + 20) = (uint64_t)txq_bc;
-    *(uint64_t *)(c + 28) = (uint64_t)txq_tfd;
+    *(uint64_t *)(c + 20) = virt_to_phys(txq_bc);
+    *(uint64_t *)(c + 28) = virt_to_phys(txq_tfd);
     if (send_cmd(DATA_PATH_GROUP, 0x17, c, sizeof(c)) != 0 || resp_len < 8) return -1;
     txq_hw = txq_done = *(const uint16_t *)(resp_buf + 4);
     txq_id = *(const uint16_t *)resp_buf;

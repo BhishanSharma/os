@@ -6,22 +6,28 @@
 
 typedef uint64_t page_entry_t;
 
+#define ADDR_MASK 0x000FFFFFFFFFF000ULL
+/* The table an entry points to (tables are reached through the direct map). */
+#define TABLE(e) ((page_entry_t *)phys_to_virt((e) & ADDR_MASK))
+
 extern char stack_guard[];   // boot stack guard page (main.asm): must stay unmapped
 
-static page_entry_t* pml4;
+static page_entry_t *pml4;   // the kernel's, through the direct map
+static uint64_t pml4_phys;
 
-// Page tables come from a fixed pool between the kernel image (ends below
-// 0x400000, see linker.ld) and the heap (starts at or above 0x600000).
+// The kernel's own page tables come from a fixed pool between the kernel
+// image (ends below 0x400000, see linker.ld) and the heap (starts at or
+// above 0x600000). Programs' tables come from the heap.
 #define PAGE_TABLE_AREA 0x400000
 #define PAGE_TABLE_END  0x600000
 static uint64_t next_table = PAGE_TABLE_AREA;
 
-/* Extra physical ranges (e.g. the framebuffer) to identity-map in paging_init. */
+/* Extra physical ranges (the framebuffer, boot modules) for the direct map. */
 #define MAX_EXTRA_REGIONS 16
 static struct { uint64_t base, size; } extra_regions[MAX_EXTRA_REGIONS];
 static int extra_count;
 
-void paging_add_identity_region(uint64_t base, uint64_t size) {
+void paging_add_direct_region(uint64_t base, uint64_t size) {
     if (extra_count < MAX_EXTRA_REGIONS && size) {
         extra_regions[extra_count].base = base;
         extra_regions[extra_count].size = size;
@@ -29,15 +35,10 @@ void paging_add_identity_region(uint64_t base, uint64_t size) {
     }
 }
 
-/* Device registers are mapped here (1 TiB up, PML4 entry 2), not at their
- * physical address: a device placed in the 1-2 GiB range would otherwise
- * take over the user programs' range. The PDPT for this window is created in
- * paging_init, before any user address space copies the PML4, so mappings
- * added later are visible in every address space. */
-#define MMIO_WINDOW 0x0000010000000000ULL
+/* Device registers are mapped into their own window. Its PDPT exists from
+ * the start (paging_init), before any program's address space copies the
+ * kernel's PML4 entries, so mappings added later are visible everywhere. */
 static uint64_t mmio_next = MMIO_WINDOW;
-
-static void* alloc_table();
 
 void *mmio_map(uint64_t phys, uint64_t size) {
     uint64_t first = phys & ~0xFFFULL, last = (phys + size + 0xFFF) & ~0xFFFULL;
@@ -48,271 +49,214 @@ void *mmio_map(uint64_t phys, uint64_t size) {
     return (void *)(va + (phys - first));
 }
 
-static void* alloc_table() {
+static page_entry_t *alloc_table(void) {
     if (next_table >= PAGE_TABLE_END) kpanic("page table pool exhausted");
-    void* t = (void*)next_table;
+    page_entry_t *t = phys_to_virt(next_table);
     next_table += 0x1000;
-    for (int i = 0; i < 512; i++) ((uint64_t*)t)[i] = 0;
+    for (int i = 0; i < 512; i++) t[i] = 0;
     return t;
 }
 
-void paging_init(uint64_t phys_base, uint64_t phys_end,
-                 uint64_t heap_start, uint64_t heap_size) {
-    pml4 = (page_entry_t*)alloc_table();
-
-    // Identity map everything BEFORE switching to these tables. Tables are
-    // allocated on demand; the last loop below maps them all, including any
-    // it allocates itself.
-    // Identity map kernel
-    for (uint64_t addr = phys_base; addr < phys_end; addr += PAGE_SIZE) {
-        if (addr == (uint64_t)stack_guard) continue;   // guard page stays unmapped
-        map_page(addr, addr, PAGE_PRESENT | PAGE_RW);
-    }
-
-    // Identity map heap: 2 MiB pages where aligned (the heap can be up to 1 GiB)
-    for (uint64_t addr = heap_start; addr < heap_start + heap_size; ) {
-        if ((addr & (LARGE_PAGE - 1)) == 0 && heap_start + heap_size - addr >= LARGE_PAGE) {
-            map_large_page(addr, addr);
-            addr += LARGE_PAGE;
-        } else {
-            map_page(addr, addr, PAGE_PRESENT | PAGE_RW);
-            addr += PAGE_SIZE;
-        }
-    }
-
-    // Identity map registered device regions (framebuffer)
-    for (int i = 0; i < extra_count; i++) {
-        uint64_t start = extra_regions[i].base & ~(uint64_t)(PAGE_SIZE - 1);
-        uint64_t end = extra_regions[i].base + extra_regions[i].size;
-        for (uint64_t addr = start; addr < end; addr += PAGE_SIZE)
-            map_page(addr, addr, PAGE_PRESENT | PAGE_RW);
-    }
-
-    // Identity map the whole page-table pool, not just the tables allocated so
-    // far: tables created later (user programs' mappings) must be reachable too.
-    for (uint64_t addr = PAGE_TABLE_AREA; addr < PAGE_TABLE_END; addr += PAGE_SIZE) {
-        map_page(addr, addr, PAGE_PRESENT | PAGE_RW);
-    }
-
-    // Identity map video memory (0xB8000)
-    map_page(0xB8000, 0xB8000, PAGE_PRESENT | PAGE_RW);
-
-    // The device register window: its PDPT exists from the start (see mmio_map).
-    pml4[(MMIO_WINDOW >> 39) & 0x1FF] = (uint64_t)alloc_table() | PAGE_PRESENT | PAGE_RW;
-
-    asm volatile("cli");
-
-    // Enable PAE (CR4.PAE = bit 5)
-    uint64_t cr4;
-    asm volatile("mov %%cr4, %0" : "=r"(cr4));
-    cr4 |= (1UL << 5);
-    asm volatile("mov %0, %%cr4" :: "r"(cr4));
-
-    // Load PML4
-    asm volatile("mov %0, %%cr3" :: "r"((uint64_t)pml4));
-
-    // Enable paging (CR0.PG = bit 31)
-    uint64_t cr0;
-    asm volatile("mov %%cr0, %0" : "=r"(cr0));
-    cr0 |= (1UL << 31);
-    asm volatile("mov %0, %%cr0" :: "r"(cr0));
-
-    asm volatile("sti");
+/* The next table down from entry `e`, created (kernel table) if missing. */
+static page_entry_t *kernel_next(page_entry_t *e, uint64_t upper) {
+    if (!(*e & PAGE_PRESENT)) *e = virt_to_phys(alloc_table()) | upper;
+    else *e |= upper;
+    return TABLE(*e);
 }
 
 // Page directory for `virt`, creating the PDPT and PD if needed.
-static page_entry_t* get_pd(uint64_t virt) {
-    uint64_t pml4_idx = (virt >> 39) & 0x1FF;
-    uint64_t pdpt_idx = (virt >> 30) & 0x1FF;
-    if (!(pml4[pml4_idx] & PAGE_PRESENT))
-        pml4[pml4_idx] = (uint64_t)alloc_table() | PAGE_PRESENT | PAGE_RW;
-    page_entry_t* pdpt = (page_entry_t*)(pml4[pml4_idx] & ~0xFFFULL);
-    if (!(pdpt[pdpt_idx] & PAGE_PRESENT))
-        pdpt[pdpt_idx] = (uint64_t)alloc_table() | PAGE_PRESENT | PAGE_RW;
-    return (page_entry_t*)(pdpt[pdpt_idx] & ~0xFFFULL);
+static page_entry_t *get_pd(uint64_t virt) {
+    page_entry_t *pdpt = kernel_next(&pml4[(virt >> 39) & 0x1FF], PAGE_PRESENT | PAGE_RW);
+    return kernel_next(&pdpt[(virt >> 30) & 0x1FF], PAGE_PRESENT | PAGE_RW);
 }
 
 void map_large_page(uint64_t virt, uint64_t phys) {
-    page_entry_t* pd = get_pd(virt);
+    page_entry_t *pd = get_pd(virt);
     pd[(virt >> 21) & 0x1FF] = (phys & ~(LARGE_PAGE - 1)) | PAGE_PRESENT | PAGE_RW | PAGE_SIZE_2MB;
+    asm volatile("invlpg (%0)" :: "r"(virt) : "memory");
 }
 
 void map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
-    uint64_t pml4_idx = (virt >> 39) & 0x1FF;
-    uint64_t pdpt_idx = (virt >> 30) & 0x1FF;
-    uint64_t pd_idx   = (virt >> 21) & 0x1FF;
-    uint64_t pt_idx   = (virt >> 12) & 0x1FF;
     // A user page needs the user bit at every level; kernel pages under the
     // same upper entries stay protected because their own entries lack it.
     uint64_t upper = PAGE_PRESENT | PAGE_RW | (flags & PAGE_USER);
-
-    page_entry_t *pdpt, *pd, *pt;
-
-    // Get or create PDPT
-    if (!(pml4[pml4_idx] & PAGE_PRESENT)) {
-        pdpt = (page_entry_t*)alloc_table();
-        pml4[pml4_idx] = ((uint64_t)pdpt) | upper;
-    } else {
-        // Page tables are identity mapped: physical address = virtual address
-        pml4[pml4_idx] |= upper;
-        pdpt = (page_entry_t*)(pml4[pml4_idx] & ~0xFFFULL);
-    }
-
-    // Get or create PD
-    if (!(pdpt[pdpt_idx] & PAGE_PRESENT)) {
-        pd = (page_entry_t*)alloc_table();
-        pdpt[pdpt_idx] = ((uint64_t)pd) | upper;
-    } else {
-        pdpt[pdpt_idx] |= upper;
-        pd = (page_entry_t*)(pdpt[pdpt_idx] & ~0xFFFULL);
-    }
-
-    // Get or create PT
-    if (!(pd[pd_idx] & PAGE_PRESENT)) {
-        pt = (page_entry_t*)alloc_table();
-        pd[pd_idx] = ((uint64_t)pt) | upper;
-    } else {
-        if (pd[pd_idx] & PAGE_SIZE_2MB) kpanic("map_page: address is inside a 2 MiB page");
-        pd[pd_idx] |= upper;
-        pt = (page_entry_t*)(pd[pd_idx] & ~0xFFFULL);
-    }
-
-    // Map the actual page
-    pt[pt_idx] = (phys & ~0xFFFULL) | (flags & 0xFFF) | PAGE_PRESENT;
+    page_entry_t *pdpt = kernel_next(&pml4[(virt >> 39) & 0x1FF], upper);
+    page_entry_t *pd = kernel_next(&pdpt[(virt >> 30) & 0x1FF], upper);
+    page_entry_t *pde = &pd[(virt >> 21) & 0x1FF];
+    if ((*pde & PAGE_PRESENT) && (*pde & PAGE_SIZE_2MB)) kpanic("map_page: address is inside a 2 MiB page");
+    page_entry_t *pt = kernel_next(pde, upper);
+    pt[(virt >> 12) & 0x1FF] = (phys & ~0xFFFULL) | (flags & 0xFFF) | PAGE_PRESENT;
     asm volatile("invlpg (%0)" :: "r"(virt) : "memory");
+}
+
+/* Put physical [start, end) into the direct map (write-back): 2 MiB pages
+ * where a whole aligned 2 MiB lies inside, 4 KiB pages at the edges. Parts
+ * mapped already are left alone. */
+static void direct_map_range(uint64_t start, uint64_t end) {
+    start &= ~0xFFFULL;
+    end = (end + 0xFFF) & ~0xFFFULL;
+    for (uint64_t a = start; a < end; ) {
+        uint64_t v = DIRECT_MAP + a;
+        page_entry_t *pde = &get_pd(v)[(v >> 21) & 0x1FF];
+        if ((*pde & PAGE_PRESENT) && (*pde & PAGE_SIZE_2MB)) {        /* covered */
+            a = (a & ~(LARGE_PAGE - 1)) + LARGE_PAGE;
+            continue;
+        }
+        if (!(*pde & PAGE_PRESENT) && !(a & (LARGE_PAGE - 1)) && end - a >= LARGE_PAGE) {
+            *pde = a | PAGE_PRESENT | PAGE_RW | PAGE_SIZE_2MB;
+            a += LARGE_PAGE;
+            continue;
+        }
+        if (!(paging_get_entry(v) & PAGE_PRESENT)) map_page(v, a, PAGE_PRESENT | PAGE_RW);
+        a += PAGE_SIZE;
+    }
+}
+
+void paging_init(uint64_t image_start, uint64_t image_end,
+                 uint64_t heap_start, uint64_t heap_size) {
+    // Everything is mapped BEFORE switching to these tables; until then the
+    // boot tables (main.asm) map the first 4 GiB in the direct map, which is
+    // where the pool and the heap are.
+    pml4 = alloc_table();
+    pml4_phys = virt_to_phys(pml4);
+
+    // The kernel image, at KERNEL_VMA
+    for (uint64_t addr = image_start; addr < image_end; addr += PAGE_SIZE) {
+        if (KERNEL_VMA + addr == (uint64_t)stack_guard) continue;   // guard page stays unmapped
+        map_page(KERNEL_VMA + addr, addr, PAGE_PRESENT | PAGE_RW);
+    }
+
+    // The direct map: the first MiB (VGA text, the SMP trampoline), the
+    // kernel image and the whole page-table pool (tables created later must
+    // be reachable too), the heap, all RAM and ACPI memory, and the
+    // registered ranges (framebuffer, boot modules).
+    direct_map_range(0, 0x100000);
+    direct_map_range(image_start, PAGE_TABLE_END);
+    direct_map_range(heap_start, heap_start + heap_size);
+    static mb2_region_t ram[64];
+    int n = memory_get_ram_like(ram, 64);
+    for (int i = 0; i < n; i++) direct_map_range(ram[i].base, ram[i].base + ram[i].length);
+    for (int i = 0; i < extra_count; i++)
+        direct_map_range(extra_regions[i].base, extra_regions[i].base + extra_regions[i].size);
+
+    // The device and ACPI windows: their PDPTs exist from the start (see mmio_map).
+    kernel_next(&pml4[(MMIO_WINDOW >> 39) & 0x1FF], PAGE_PRESENT | PAGE_RW);
+    kernel_next(&pml4[(ACPI_WINDOW >> 39) & 0x1FF], PAGE_PRESENT | PAGE_RW);
+
+    asm volatile("cli");
+    asm volatile("mov %0, %%cr3" :: "r"(pml4_phys) : "memory");
+    asm volatile("sti");
 }
 
 uint64_t paging_get_entry(uint64_t virt) {
     if (!pml4) return 0;
     page_entry_t e = pml4[(virt >> 39) & 0x1FF];
     if (!(e & PAGE_PRESENT)) return 0;
-    e = ((page_entry_t*)(e & ~0xFFFULL))[(virt >> 30) & 0x1FF];
+    e = TABLE(e)[(virt >> 30) & 0x1FF];
     if (!(e & PAGE_PRESENT)) return 0;
-    e = ((page_entry_t*)(e & ~0xFFFULL))[(virt >> 21) & 0x1FF];
+    e = TABLE(e)[(virt >> 21) & 0x1FF];
     if (!(e & PAGE_PRESENT) || (e & PAGE_SIZE_2MB)) return e;
-    return ((page_entry_t*)(e & ~0xFFFULL))[(virt >> 12) & 0x1FF];
+    return TABLE(e)[(virt >> 12) & 0x1FF];
 }
 
 uint64_t unmap_page(uint64_t virt) {
     page_entry_t e = pml4[(virt >> 39) & 0x1FF];
     if (!(e & PAGE_PRESENT)) return 0;
-    e = ((page_entry_t*)(e & ~0xFFFULL))[(virt >> 30) & 0x1FF];
+    e = TABLE(e)[(virt >> 30) & 0x1FF];
     if (!(e & PAGE_PRESENT)) return 0;
-    e = ((page_entry_t*)(e & ~0xFFFULL))[(virt >> 21) & 0x1FF];
+    e = TABLE(e)[(virt >> 21) & 0x1FF];
     if (!(e & PAGE_PRESENT) || (e & PAGE_SIZE_2MB)) return 0;
-    page_entry_t *pt = (page_entry_t*)(e & ~0xFFFULL);
+    page_entry_t *pt = TABLE(e);
     uint64_t pte = pt[(virt >> 12) & 0x1FF];
     if (!(pte & PAGE_PRESENT)) return 0;
     pt[(virt >> 12) & 0x1FF] = 0;
     asm volatile("invlpg (%0)" :: "r"(virt) : "memory");
-    return pte & ~0xFFFULL;
+    return pte & ADDR_MASK;
 }
 
 /* ---- Address spaces for user programs ------------------------------------
  *
- * Every program gets its own PML4. It shares the kernel's mappings: the
- * kernel PML4 entries are copied, and so is the kernel PDPT for the first
- * 512 GiB, except entry 1 (1-2 GiB, the user range), which points to the
- * program's own page directory. Kernel page directories and tables are shared
- * by pointer, so kernel mappings stay identical everywhere. The program's
- * tables and pages come from the heap (identity mapped below 1 GiB) and are
- * freed with the address space. */
+ * Every program gets its own PML4. Entries 256-511 (the upper half) are the
+ * kernel's, copied: the tables under them are shared, so kernel mappings are
+ * identical everywhere. Entries 0-255 (the lower half, 128 TiB) are the
+ * program's own. Its tables come from the heap and are freed with it. */
 
-#define USER_PDPT_INDEX 1     /* 1-2 GiB */
+#define USER_ENTRIES 256
 
-static uint64_t *new_table(void) {
-    uint64_t *t = alloc_frame();
+static page_entry_t *new_table(void) {
+    page_entry_t *t = alloc_frame();
     if (t) for (int i = 0; i < 512; i++) t[i] = 0;
     return t;
 }
 
 uint64_t paging_kernel_root(void) {
-    return (uint64_t)pml4;
-}
-
-int paging_user_range_free(void) {
-    if (!(pml4[0] & PAGE_PRESENT)) return 1;
-    page_entry_t *pdpt = (page_entry_t *)(pml4[0] & ~0xFFFULL);
-    return !(pdpt[USER_PDPT_INDEX] & PAGE_PRESENT);
+    return pml4_phys;
 }
 
 uint64_t paging_create_address_space(void) {
-    uint64_t *root = new_table(), *pdpt = new_table();
-    if (!root || !pdpt) {
-        if (root) free_frame(root);
-        if (pdpt) free_frame(pdpt);
-        return 0;
-    }
-    for (int i = 0; i < 512; i++) root[i] = pml4[i];
-    if (pml4[0] & PAGE_PRESENT) {
-        page_entry_t *kernel_pdpt = (page_entry_t *)(pml4[0] & ~0xFFFULL);
-        for (int i = 0; i < 512; i++) pdpt[i] = kernel_pdpt[i];
-    }
-    pdpt[USER_PDPT_INDEX] = 0;
-    root[0] = (uint64_t)pdpt | PAGE_PRESENT | PAGE_RW | PAGE_USER;
-    return (uint64_t)root;
+    page_entry_t *root = new_table();
+    if (!root) return 0;
+    for (int i = USER_ENTRIES; i < 512; i++) root[i] = pml4[i];
+    return virt_to_phys(root);
 }
 
-/* The user page directory of `root`, created if `create`. */
-static page_entry_t *user_pd(uint64_t root, int create) {
-    page_entry_t *pdpt = (page_entry_t *)(((page_entry_t *)root)[0] & ~0xFFFULL);
-    if (!(pdpt[USER_PDPT_INDEX] & PAGE_PRESENT)) {
+/* The next table down from user entry `e`, created if `create`; 0 if none. */
+static page_entry_t *user_next(page_entry_t *e, int create) {
+    if (!(*e & PAGE_PRESENT)) {
         if (!create) return 0;
-        uint64_t *pd = new_table();
-        if (!pd) return 0;
-        pdpt[USER_PDPT_INDEX] = (uint64_t)pd | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+        page_entry_t *t = new_table();
+        if (!t) return 0;
+        *e = virt_to_phys(t) | PAGE_PRESENT | PAGE_RW | PAGE_USER;
     }
-    return (page_entry_t *)(pdpt[USER_PDPT_INDEX] & ~0xFFFULL);
+    return TABLE(*e);
 }
 
-static int in_user_range(uint64_t virt) {
-    return ((virt >> 39) & 0x1FF) == 0 && ((virt >> 30) & 0x1FF) == USER_PDPT_INDEX;
+/* The page-table entry for `virt` in `root`'s lower half; 0 if not there. */
+static page_entry_t *user_pte(uint64_t root, uint64_t virt, int create) {
+    if (!root || virt >= USER_SPACE_END) return 0;
+    page_entry_t *t = TABLE(root);
+    for (int shift = 39; shift > 12; shift -= 9) {
+        t = user_next(&t[(virt >> shift) & 0x1FF], create);
+        if (!t) return 0;
+    }
+    return &t[(virt >> 12) & 0x1FF];
 }
 
 int paging_map_user(uint64_t root, uint64_t virt, uint64_t phys) {
-    if (!in_user_range(virt)) return -1;
-    page_entry_t *pd = user_pd(root, 1);
-    if (!pd) return -1;
-    uint64_t pd_idx = (virt >> 21) & 0x1FF;
-    if (!(pd[pd_idx] & PAGE_PRESENT)) {
-        uint64_t *pt = new_table();
-        if (!pt) return -1;
-        pd[pd_idx] = (uint64_t)pt | PAGE_PRESENT | PAGE_RW | PAGE_USER;
-    }
-    page_entry_t *pt = (page_entry_t *)(pd[pd_idx] & ~0xFFFULL);
-    pt[(virt >> 12) & 0x1FF] = (phys & ~0xFFFULL) | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+    page_entry_t *pte = user_pte(root, virt, 1);
+    if (!pte) return -1;
+    *pte = (phys & ADDR_MASK) | PAGE_PRESENT | PAGE_RW | PAGE_USER;
     asm volatile("invlpg (%0)" :: "r"(virt) : "memory");
     return 0;
 }
 
 uint64_t paging_get_user_entry(uint64_t root, uint64_t virt) {
-    if (!root || !in_user_range(virt)) return 0;
-    page_entry_t *pd = user_pd(root, 0);
-    if (!pd) return 0;
-    page_entry_t e = pd[(virt >> 21) & 0x1FF];
-    if (!(e & PAGE_PRESENT)) return 0;
-    return ((page_entry_t *)(e & ~0xFFFULL))[(virt >> 12) & 0x1FF];
+    page_entry_t *pte = user_pte(root, virt, 0);
+    return pte ? *pte : 0;
+}
+
+/* Free the table under entry `e` (`level` 3 = PDPT ... 1 = PT) and all below it. */
+static void free_user_table(page_entry_t e, int level) {
+    page_entry_t *t = TABLE(e);
+    for (int i = 0; i < 512; i++) {
+        if (!(t[i] & PAGE_PRESENT)) continue;
+        if (level > 1) {
+            free_user_table(t[i], level - 1);
+        } else {
+            uint64_t phys = t[i] & ADDR_MASK;
+            if (page_owned(phys)) page_free(phys);          /* all of RAM (physmem.c) */
+            else free_frame(phys_to_virt(phys));            /* the heap */
+        }
+    }
+    free_frame(t);
 }
 
 void paging_free_address_space(uint64_t root) {
     if (!root) return;
-    page_entry_t *pd = user_pd(root, 0);
-    if (pd) {
-        for (int i = 0; i < 512; i++) {
-            if (!(pd[i] & PAGE_PRESENT)) continue;
-            page_entry_t *pt = (page_entry_t *)(pd[i] & ~0xFFFULL);
-            for (int j = 0; j < 512; j++)
-                if (pt[j] & PAGE_PRESENT) {
-                    uint64_t phys = pt[j] & ~0xFFFULL;
-                    if (page_owned(phys)) page_free(phys);       /* all of RAM (physmem.c) */
-                    else free_frame((void *)phys);               /* the heap */
-                }
-            free_frame(pt);
-        }
-        free_frame(pd);
-    }
-    free_frame((void *)(((page_entry_t *)root)[0] & ~0xFFFULL));   // the PDPT copy
-    free_frame((void *)root);
+    page_entry_t *r = TABLE(root);
+    for (int i = 0; i < USER_ENTRIES; i++)
+        if (r[i] & PAGE_PRESENT) free_user_table(r[i], 3);
+    free_frame(r);
 }
 
 void paging_switch(uint64_t root) {
@@ -325,36 +269,36 @@ void paging_switch(uint64_t root) {
 
 /* Tables made for it (the rest are the kernel's, shared, and are copied
  * before anything is added to them). */
-static uint64_t *own_tables[128];
+static page_entry_t *own_tables[128];
 static int own_count;
 
-static int owned(uint64_t *t) {
+static int owned(page_entry_t *t) {
     for (int i = 0; i < own_count; i++)
         if (own_tables[i] == t) return 1;
     return 0;
 }
 
 /* The table that entry `e` points to, ours to change (copied if shared). */
-static uint64_t *own_table(uint64_t *e) {
-    uint64_t *t = (uint64_t *)(*e & ~0xFFFULL & 0x000FFFFFFFFFFFFFULL);
+static page_entry_t *own_table(page_entry_t *e) {
+    page_entry_t *t = TABLE(*e);
     if ((*e & PAGE_PRESENT) && owned(t)) return t;
     if (own_count == 128) return 0;
-    uint64_t *copy = new_table();
+    page_entry_t *copy = new_table();
     if (!copy) return 0;
     if (*e & PAGE_PRESENT)
         for (int i = 0; i < 512; i++) copy[i] = t[i];
     own_tables[own_count++] = copy;
-    *e = (uint64_t)copy | PAGE_PRESENT | PAGE_RW;
+    *e = virt_to_phys(copy) | PAGE_PRESENT | PAGE_RW;
     return copy;
 }
 
 uint64_t paging_create_identity_space(const paging_range_t *ranges, int count) {
     own_count = 0;
-    uint64_t root_entry = 0;
-    uint64_t *root = own_table(&root_entry);              /* a copy of nothing: all zero */
+    page_entry_t root_entry = 0;
+    page_entry_t *root = own_table(&root_entry);          /* a copy of nothing: all zero */
     if (!root) return 0;
     for (int i = 0; i < 512; i++) root[i] = pml4[i];
-    uint64_t *pdpt = own_table(&root[0]);                 /* the first 512 GiB, copied */
+    page_entry_t *pdpt = own_table(&root[0]);             /* the first 512 GiB */
     if (!pdpt) return 0;
     const uint64_t cache_off = 0x18;                      /* PCD | PWT */
     for (int r = 0; r < count; r++) {
@@ -362,31 +306,31 @@ uint64_t paging_create_identity_space(const paging_range_t *ranges, int count) {
         uint64_t end = (ranges[r].start + ranges[r].size + 0xFFF) & ~0xFFFULL;
         uint64_t flags = PAGE_PRESENT | PAGE_RW | (ranges[r].uncached ? cache_off : 0);
         for (uint64_t a = start; a < end && a < (512ULL << 30); ) {
-            uint64_t *pdpte = &pdpt[(a >> 30) & 0x1FF];
+            page_entry_t *pdpte = &pdpt[(a >> 30) & 0x1FF];
             if ((*pdpte & PAGE_PRESENT) && (*pdpte & PAGE_SIZE_2MB)) {     /* a 1 GiB page: there already */
                 a = ((a >> 30) + 1) << 30;
                 continue;
             }
-            uint64_t *pd = own_table(pdpte);
+            page_entry_t *pd = own_table(pdpte);
             if (!pd) return 0;
-            uint64_t *pde = &pd[(a >> 21) & 0x1FF];
+            page_entry_t *pde = &pd[(a >> 21) & 0x1FF];
             uint64_t big = a & ~(LARGE_PAGE - 1);
             if (!(*pde & PAGE_PRESENT)) {                 /* nothing here: one 2 MiB page */
                 *pde = big | flags | PAGE_SIZE_2MB;
                 a = big + LARGE_PAGE;
                 continue;
             }
-            if (*pde & PAGE_SIZE_2MB) {                   /* the kernel maps it already (identity) */
+            if (*pde & PAGE_SIZE_2MB) {                   /* mapped already */
                 a = big + LARGE_PAGE;
                 continue;
             }
-            uint64_t *pt = own_table(pde);                /* 4 KiB pages: fill in the gaps */
+            page_entry_t *pt = own_table(pde);            /* 4 KiB pages: fill in the gaps */
             if (!pt) return 0;
             for (; a < end && a < big + LARGE_PAGE; a += PAGE_SIZE) {
-                uint64_t *pte = &pt[(a >> 12) & 0x1FF];
+                page_entry_t *pte = &pt[(a >> 12) & 0x1FF];
                 if (!(*pte & PAGE_PRESENT)) *pte = a | flags;
             }
         }
     }
-    return (uint64_t)root;
+    return virt_to_phys(root);
 }

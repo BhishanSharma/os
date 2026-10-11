@@ -49,8 +49,6 @@ static void cmd_help(void);
 static void cmd_crash(const char *what);
 static void cmd_ping(const char *args);
 static void cmd_download(const char *args);
-static void cmd_ls(const char *path);
-static void cmd_cat(const char *filename);
 static void cmd_mount(const char *which);
 static void cmd_umount(const char *path);
 static int run_program(const char *line, int report_missing);
@@ -160,29 +158,20 @@ static int need_root(const char *what)
     return 0;
 }
 
-static void print_fs_error(const char *what, const char *name, int result)
-{
-    if (result == FAT32_ERR_PERMISSION)
-        kprintf("%s: %s: permission denied (you can change files in %s and /tmp)\n", what, name,
-                user_current()->home);
-    else
-        kprintf("%s: %s: %s\n", what, name, vfs_error(result));
-}
-
 static void cmd_help(void)
 {
     print_info("Available commands:\n");
     print_str("\n=== Files ===\n");
     print_str("ls                 - list current directory\n");
-    print_str("cat <file>         - display file (max 1 MB)\n");
+    print_str("cat <file>         - display a text file\n");
     print_str("write <file> <txt> - write text to file (\"quote\" a name with spaces)\n");
     print_str("touch <file>       - create empty file\n");
     print_str("rm <file>          - delete file\n");
     print_str("mkdir <dir>        - create directory\n");
     print_str("cd <dir>           - change directory\n");
     print_str("pwd                - print working directory\n");
-    print_str("tree               - list current directory\n");
-    print_str("hexdump <file>     - hex dump of a file\n");
+    print_str("tree [dir]         - a folder and everything in it\n");
+    print_str("hexdump [-a] <file> - hex dump of a file (first 256 bytes; -a: all)\n");
     print_str("fileinfo <file>    - file name and size\n");
     print_str("edit <file>        - open text editor\n");
     print_str("\n=== Programs and Scripts ===\n");
@@ -212,7 +201,7 @@ static void cmd_help(void)
     print_str("touchpad           - find the I2C touchpad and show what it sends\n");
     print_str("clear              - clear screen\n");
     print_str("echo <text>        - print text\n");
-    print_str("uptime             - seconds since boot\n");
+    print_str("uptime             - time since boot\n");
     print_str("date [-u]          - current date and time (IST, or UTC with -u)\n");
     print_str("clock [local|utc]  - does the hardware clock hold local time (Windows) or UTC?\n");
     print_str("sleep <seconds>    - wait\n");
@@ -223,7 +212,7 @@ static void cmd_help(void)
     print_str("bootmenu           - the PC's boot menu entries (UEFI)\n");
     print_str("battery            - battery charge, health and time left; the charger\n");
     print_str("\n=== Memory and Disk (debug) ===\n");
-    print_str("meminfo            - heap statistics\n");
+    print_str("meminfo            - kernel heap and program memory\n");
     print_str("alloc              - allocate a physical frame\n");
     print_str("malloc <bytes>     - allocate heap memory (test)\n");
     print_str("free               - free last test allocation\n");
@@ -266,17 +255,6 @@ static void cmd_help(void)
     print_str("demo               - show themed message examples\n");
 }
 
-/* "71 B", "31.7 KiB", "2.4 MiB" */
-static void format_size(char *out, size_t size, uint32_t bytes)
-{
-    if (bytes < 1024)
-        k_snprintf(out, size, "%u B", bytes);
-    else if (bytes < 1024 * 1024)
-        k_snprintf(out, size, "%u.%u KiB", bytes / 1024, (bytes % 1024) * 10 / 1024);
-    else
-        k_snprintf(out, size, "%u.%u MiB", bytes >> 20, (bytes % (1024 * 1024)) * 10 / (1024 * 1024));
-}
-
 /* A file name argument. Names may have spaces: without quotes the name is
  * the rest of the line ("cat my notes.txt"); in quotes ("write "my notes.txt"
  * hello") it ends at the closing quote and *rest gets what follows. */
@@ -301,64 +279,6 @@ static const char *name_arg(const char *s, const char **rest)
         *rest = s;
     }
     return name_arg_buf;
-}
-
-static void cmd_ls(const char *path)
-{
-    // fat32_file_info_t is 268 bytes: these must not live on the boot stack.
-    fat32_file_info_t *files = kmalloc(128 * sizeof(fat32_file_info_t));
-    if (!files)
-    {
-        print_str("Out of memory\n");
-        return;
-    }
-    path = name_arg(path, 0);
-    int count = fat32_list_directory_ex(path, files, 128);
-
-    if (count < 0)
-    {
-        kprintf("ls: %s: no such folder\n", *path ? path : ".");
-    }
-    else if (count == 0)
-    {
-        print_str("(empty)\n");
-    }
-    else
-    {
-        int dirs = 0, regular = 0, width = 16;
-        uint32_t total = 0;
-        char size[16], name[300];
-        for (int i = 0; i < count; i++)                    /* the name column fits the longest */
-        {
-            int len = (int)strlen(files[i].name) + 1;
-            if (len > width) width = len > 48 ? 48 : len;
-        }
-        for (int i = 0; i < count; i++)
-        {
-            if (files[i].is_directory)
-            {
-                k_snprintf(name, sizeof(name), "%s/", files[i].name);
-                print_accent("  ");
-                print_accent(name);
-                for (int pad = (int)strlen(name); pad < width; pad++) print_str(" ");
-                print_str("     <DIR>\n");
-                dirs++;
-            }
-            else
-            {
-                format_size(size, sizeof(size), files[i].size);
-                kprintf("  %s", files[i].name);
-                for (int pad = (int)strlen(files[i].name); pad < width; pad++) print_str(" ");
-                kprintf("%10s\n", size);
-                regular++;
-                total += files[i].size;
-            }
-        }
-        format_size(size, sizeof(size), total);
-        kprintf("\n  %d file%s, %d director%s, %s\n", regular, regular == 1 ? "" : "s",
-                dirs, dirs == 1 ? "y" : "ies", size);
-    }
-    kfree(files);
 }
 
 /* `dmesg`: everything the kernel printed during boot, including the driver
@@ -450,73 +370,10 @@ static void cmd_umount(const char *path)
     if (r != 0) kprintf("umount: %s: %s\n", path, r == FATV_BAD_NAME ? "cannot unmount /" : "not a mount point");
 }
 
-#define CAT_MAX   (1024 * 1024)   // largest file `cat` will show
-#define CAT_CHUNK 4096
-
-static void cmd_cat(const char *filename)
-{
-    if (!fat32_file_exists(filename))
-    {
-        kprintf("File not found: %s\n", filename);
-    }
-    else
-    {
-        uint32_t size = fat32_get_file_size(filename);
-
-        if (size == 0)
-        {
-            print_str("Empty file\n");
-        }
-        else if (size > CAT_MAX)
-        {
-            kprintf("File too large to display (%u KB, max %u KB)\n", size / 1024, CAT_MAX / 1024);
-        }
-        else
-        {
-            uint8_t *buffer = kmalloc(size);
-            char *chunk = kmalloc(CAT_CHUNK + 8);
-            if (!buffer || !chunk)
-            {
-                print_str("Out of memory\n");
-            }
-            else
-            {
-                int bytes = fat32_read_file(filename, buffer, size);
-                if (bytes == FAT32_ERR_PERMISSION)
-                {
-                    kprintf("cat: %s: permission denied (only root can read it)\n", filename);
-                }
-                else if (bytes < 0)
-                {
-                    print_str("Failed to read file\n");
-                }
-                else
-                {
-                    // Print in chunks; drop CR (web pages use CRLF), expand tabs,
-                    // and show other control bytes (binary files) as '.'.
-                    print_str("=== File Contents ===\n");
-                    int n = 0;
-                    for (int i = 0; i < bytes; i++)
-                    {
-                        uint8_t c = buffer[i];
-                        if (c == '\r') continue;
-                        if (c == '\t') { chunk[n++] = ' '; chunk[n++] = ' '; chunk[n++] = ' '; chunk[n++] = ' '; }
-                        else if (c == '\n' || (c >= 32 && c != 127)) chunk[n++] = (char)c;
-                        else chunk[n++] = '.';
-                        if (n >= CAT_CHUNK) { chunk[n] = '\0'; print_str(chunk); n = 0; }
-                    }
-                    chunk[n] = '\0';
-                    print_str(chunk);
-                    print_str("\n=== End === (Shift+Up/Down scrolls)\n");
-                }
-            }
-            kfree(chunk);
-            kfree(buffer);
-        }
-    }
-}
-
 // Deliberately trigger a CPU exception, to see the panic screen / test handlers.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winfinite-recursion"
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
 static void stack_overflow(int depth)
 {
     volatile char pad[512];
@@ -524,6 +381,7 @@ static void stack_overflow(int depth)
     stack_overflow(depth + 1);
     pad[1] = 0; // keeps the recursion from being turned into a loop
 }
+#pragma GCC diagnostic pop
 
 static void cmd_crash(const char *what)
 {
@@ -580,10 +438,6 @@ static int kernel_command(const char *line, int run_programs) {
     {
         cmd_help();
     }
-    else if (strncmp(line, "echo ", 5) == 0)
-    {
-        kprintf("%s\n", line + 5);
-    }
     else if (strcmp(line, "clear") == 0)
     {
         print_clear();
@@ -628,25 +482,6 @@ static int kernel_command(const char *line, int run_programs) {
     {
         cmd_fg(line + 2);
     }
-    else if (strcmp(line, "uptime") == 0)
-    {
-        uint32_t seconds = get_seconds();
-        kprintf("Uptime: %d seconds\n", seconds);
-    }
-    else if (strcmp(line, "date") == 0 || strcmp(line, "date -u") == 0)
-    {
-        rtc_time_t t;
-        int utc = line[4] != '\0';
-        if (rtc_read(&t) != 0) {
-            print_str("date: real-time clock unreadable\n");
-        } else {
-            if (!utc) rtc_add_minutes(&t, RTC_LOCAL_OFFSET_MIN);
-            kprintf("%d-%s%d-%s%d %s%d:%s%d:%s%d %s\n", t.year,
-                    t.month < 10 ? "0" : "", t.month, t.day < 10 ? "0" : "", t.day,
-                    t.hour < 10 ? "0" : "", t.hour, t.minute < 10 ? "0" : "", t.minute,
-                    t.second < 10 ? "0" : "", t.second, utc ? "UTC" : RTC_LOCAL_TZ_NAME);
-        }
-    }
     else if (strcmp(line, "clock") == 0 || strncmp(line, "clock ", 6) == 0)
     {
         const char *arg = line[5] ? line + 6 : "";
@@ -690,7 +525,6 @@ static int kernel_command(const char *line, int run_programs) {
     else if (strcmp(line, "status") == 0)
     {
         uint32_t sec = get_seconds();
-        uint32_t frames = 0; // You'd get this from your frame allocator
         kprintf("Uptime: %d sec, Test allocations: %d\n", sec, test_alloc_count);
     }
     else if (strcmp(line, "alloc") == 0)
@@ -751,7 +585,7 @@ static int kernel_command(const char *line, int run_programs) {
     else if (strncmp(line, "freeidx ", 8) == 0)
     {
         uint32_t idx = kstr_to_uint32(line + 8);
-        if (idx >= test_alloc_count)
+        if (idx >= (uint32_t)test_alloc_count)
         {
             print_str("Invalid index\n");
         }
@@ -780,117 +614,6 @@ static int kernel_command(const char *line, int run_programs) {
             {
                 kprintf("[%d] (freed)\n", i);
             }
-        }
-    }
-    else if (strcmp(line, "meminfo") == 0)
-    {
-        uint64_t total = heap_get_total();
-        uint64_t used = heap_get_used();
-        uint64_t free = heap_get_free();
-        uint64_t allocs = heap_get_allocations();
-
-        print_str("=== Heap Memory Info ===\n");
-        kprintf("Physical:    %d MB usable RAM\n", (uint32_t)(get_total_memory() >> 20));
-        kprintf("Programs:    %u of %u MB in use (pages from the rest of RAM)\n",
-                (uint32_t)(physmem_used() >> 20), (uint32_t)(physmem_total() >> 20));
-        kprintf("Total:       %d bytes (%d KB)\n", total, total / 1024);
-        kprintf("Used:        %d bytes (%d KB)\n", used, used / 1024);
-        kprintf("Free:        %d bytes (%d KB)\n", free, free / 1024);
-        kprintf("Allocations: %d active\n", allocs);
-        kprintf("Test slots:  %d/%d used\n", test_alloc_count, MAX_TEST_ALLOCS);
-    }
-    else if (strncmp(line, "sleep ", 6) == 0)
-    {
-        uint32_t s = kstr_to_uint32(line + 6);
-        sleep(s * 1000);
-        print_str("Done sleeping\n");
-    }
-    else if (strcmp(line, "ls") == 0 || strncmp(line, "ls ", 3) == 0)
-    {
-        cmd_ls(line[2] ? line + 3 : "");
-    }
-    else if (strncmp(line, "cat ", 4) == 0)
-    {
-        const char *filename = name_arg(line + 4, 0);
-        cmd_cat(filename);
-    }
-    else if (strncmp(line, "hexdump ", 8) == 0)
-    {
-        const char *filename = name_arg(line + 8, 0);
-
-        if (!fat32_file_exists(filename))
-        {
-            kprintf("File not found: %s\n", filename);
-        }
-        else
-        {
-            uint32_t size = fat32_get_file_size(filename);
-            uint32_t display_size = (size > 256) ? 256 : size;
-
-            uint8_t *buffer = kmalloc(display_size);
-            if (!buffer)
-            {
-                print_str("Out of memory\n");
-            }
-            else
-            {
-                int bytes = fat32_read_file(filename, buffer, display_size);
-                if (bytes < 0)
-                {
-                    print_str("Failed to read file\n");
-                }
-                else
-                {
-                    kprintf("=== Hex Dump (first %d bytes) ===\n", bytes);
-
-                    for (int i = 0; i < bytes; i += 16)
-                    {
-                        kprintf("%04x: ", i);
-
-                        // Hex values
-                        for (int j = 0; j < 16 && i + j < bytes; j++)
-                        {
-                            kprintf("%02X ", buffer[i + j]);
-                        }
-                        for (int j = bytes - i; j < 16; j++)
-                            print_str("   ");   // keep the text column aligned
-
-                        print_str(" | ");
-
-                        // ASCII representation
-                        for (int j = 0; j < 16 && i + j < bytes; j++)
-                        {
-                            char c = buffer[i + j];
-                            if (c >= 32 && c <= 126)
-                            {
-                                print_char(c);
-                            }
-                            else
-                            {
-                                print_char('.');
-                            }
-                        }
-
-                        print_char('\n');
-                    }
-                }
-                kfree(buffer);
-            }
-        }
-    }
-    else if (strncmp(line, "fileinfo ", 9) == 0)
-    {
-        const char *filename = name_arg(line + 9, 0);
-
-        if (!fat32_file_exists(filename))
-        {
-            kprintf("File not found: %s\n", filename);
-        }
-        else
-        {
-            uint32_t size = fat32_get_file_size(filename);
-            kprintf("File: %s\n", filename);
-            kprintf("Size: %u bytes (%u KB)\n", size, size / 1024);
         }
     }
     else if (strcmp(line, "mount") == 0 || strncmp(line, "mount ", 6) == 0)
@@ -1031,69 +754,6 @@ static int kernel_command(const char *line, int run_programs) {
             kfree(buffer);
         }
     }
-    else if (strncmp(line, "write ", 6) == 0)
-    {
-        const char *content;
-        const char *filename = name_arg(line + 6, &content);
-        if (filename[0] && content[0])
-        {
-
-            fat32_create_file(filename);   // fails harmlessly if it already exists
-            int result = fat32_write_file(filename, (uint8_t *)content, strlen(content));
-            if (result < 0)
-            {
-                print_fs_error("write", filename, result);
-            }
-            else
-            {
-                kprintf("Wrote %d bytes to %s\n", result, filename);
-            }
-        }
-        else
-        {
-            print_str("Usage: write <filename> <content>\n");
-        }
-    }
-    else if (strncmp(line, "touch ", 6) == 0)
-    {
-        const char *filename = name_arg(line + 6, 0);
-
-        int result = fat32_create_file(filename);
-        if (result == 0)
-        {
-            kprintf("Created file: %s\n", filename);
-        }
-        else
-        {
-            print_fs_error("touch", filename, result);
-        }
-    }
-    else if (strncmp(line, "rm ", 3) == 0)
-    {
-        const char *filename = name_arg(line + 3, 0);
-        int result = fat32_delete_file(filename);
-        if (result == 0)
-        {
-            kprintf("Deleted: %s\n", filename);
-        }
-        else
-        {
-            print_fs_error("rm", filename, result);
-        }
-    }
-    else if (strncmp(line, "mkdir ", 6) == 0)
-    {
-        const char *dirname = name_arg(line + 6, 0);
-        int result = fat32_mkdir(dirname);
-        if (result == 0)
-        {
-            kprintf("Created directory: %s\n", dirname);
-        }
-        else
-        {
-            print_fs_error("mkdir", dirname, result);
-        }
-    }
     else if (strcmp(line, "cd") == 0 || strncmp(line, "cd ", 3) == 0)
     {
         const char *path = line[2] ? name_arg(line + 3, 0) : "~";
@@ -1101,39 +761,6 @@ static int kernel_command(const char *line, int run_programs) {
         if (fat32_change_directory(path) != 0)
         {
             print_str("Directory not found\n");
-        }
-    }
-    else if (strcmp(line, "pwd") == 0)
-    {
-        char cwd[256];
-        fat32_get_current_directory(cwd, sizeof(cwd));
-        kprintf("Current directory: %s\n", cwd);
-    }
-    else if (strcmp(line, "tree") == 0)
-    {
-        // Show directory tree (simple version)
-        print_str("Directory tree:\n");
-        fat32_file_info_t *files = kmalloc(32 * sizeof(fat32_file_info_t));
-        if (!files)
-        {
-            print_str("Out of memory\n");
-        }
-        else
-        {
-            int count = fat32_list_directory_ex(NULL, files, 32);
-
-            for (int i = 0; i < count; i++)
-            {
-                if (files[i].is_directory)
-                {
-                    kprintf("  [DIR]  %s/\n", files[i].name);
-                }
-                else
-                {
-                    kprintf("  [FILE] %s\n", files[i].name);
-                }
-            }
-            kfree(files);
         }
     }
     else if (strncmp(line, "theme ", 6) == 0)

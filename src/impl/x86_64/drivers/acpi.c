@@ -6,10 +6,10 @@
 #include "lib/string.h"
 #include <stdint.h>
 
-/* Tables can lie anywhere in physical memory (often near the top of RAM,
- * in the 1-2 GiB user range), so they are looked at through a window of
- * kernel addresses at 512 GiB, unmapped again afterwards. */
-#define WINDOW      0x0000008000000000ULL
+/* Tables can lie anywhere in physical memory, also outside RAM the direct
+ * map holds, so they are looked at through a window of kernel addresses
+ * (drivers/addr.h), unmapped again afterwards. */
+#define WINDOW      ACPI_WINDOW
 #define WINDOW_MAX  (4u << 20)               /* 4 MiB: larger tables are skipped */
 
 static uint64_t mapped_pages;
@@ -23,9 +23,9 @@ void acpi_save_rsdp(void) {
     have_rsdp = 1;
 }
 
-/* The kernel image is identity mapped: the copy's address is physical too. */
+/* The copy is in the kernel image: its physical address. */
 uint64_t acpi_rsdp_phys(void) {
-    return have_rsdp ? (uint64_t)rsdp_copy : 0;
+    return have_rsdp ? virt_to_phys(rsdp_copy) : 0;
 }
 
 static void unmap_window(void) {

@@ -83,9 +83,7 @@ static int apic_enable(void) {
     }
     x2apic = (base & APIC_BASE_X2) != 0;
     if (!x2apic) {
-        uint64_t phys = base & 0xFFFFFF000ULL;
-        map_page(phys, phys, PAGE_PRESENT | PAGE_RW | PAGE_PCD | PAGE_PWT);
-        lapic = (volatile uint32_t *)phys;
+        lapic = mmio_map(base & 0xFFFFFF000ULL, 4096);
     }
     lapic_write(LAPIC_TPR, 0);                          /* accept every priority */
     lapic_write(LAPIC_SVR, 0x100 | SPURIOUS_VECTOR);    /* software enable */

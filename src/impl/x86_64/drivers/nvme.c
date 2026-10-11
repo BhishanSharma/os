@@ -194,7 +194,7 @@ int nvme_init(char *how, int size) {
         bounce = dma_alloc(BOUNCE_PAGES * 4096);
         prp_list = dma_alloc(4096);
         if (!admin.sq || !admin.cq || !io.sq || !io.cq || !bounce || !prp_list) return -1;
-        for (int i = 0; i < BOUNCE_PAGES; i++) prp_list[i] = (uint64_t)bounce + (uint64_t)i * 4096;
+        for (int i = 0; i < BOUNCE_PAGES; i++) prp_list[i] = virt_to_phys(bounce) + (uint64_t)i * 4096;
     }
     memset(admin.sq, 0, 4096);
     memset(admin.cq, 0, 4096);
@@ -202,8 +202,8 @@ int nvme_init(char *how, int size) {
     admin.phase = 1;
     admin.id = 0;
     wr32(REG_AQA, (QDEPTH - 1) << 16 | (QDEPTH - 1));
-    wr64(REG_ASQ, (uint64_t)admin.sq);
-    wr64(REG_ACQ, (uint64_t)admin.cq);
+    wr64(REG_ASQ, virt_to_phys(admin.sq));
+    wr64(REG_ACQ, virt_to_phys(admin.cq));
     wr32(REG_CC, (4u << 20) | (6u << 16) | 1u);             /* CQ entry 16 B, SQ entry 64 B, NVM, 4 KiB, enable */
     if (wait_ready(1, timeout) != 0) {
         k_snprintf(how, (size_t)size, "the controller did not start (CSTS %08x)", rd32(REG_CSTS));
@@ -214,7 +214,7 @@ int nvme_init(char *how, int size) {
     sqe_t cmd;
     memset(&cmd, 0, sizeof(cmd));
     cmd.opcode = 0x06;
-    cmd.prp1 = (uint64_t)bounce;
+    cmd.prp1 = virt_to_phys(bounce);
     cmd.cdw10 = 1;
     if (submit(&admin, &cmd, 2000) != 0) {
         k_snprintf(how, (size_t)size, "identify failed");
@@ -225,7 +225,7 @@ int nvme_init(char *how, int size) {
     memset(&cmd, 0, sizeof(cmd));
     cmd.opcode = 0x06;
     cmd.nsid = 1;
-    cmd.prp1 = (uint64_t)bounce;
+    cmd.prp1 = virt_to_phys(bounce);
     cmd.cdw10 = 0;
     if (submit(&admin, &cmd, 2000) != 0) {
         k_snprintf(how, (size_t)size, "namespace 1 not found");
@@ -253,13 +253,13 @@ int nvme_init(char *how, int size) {
     io.id = 1;
     memset(&cmd, 0, sizeof(cmd));
     cmd.opcode = 0x05;                                      /* create I/O completion queue */
-    cmd.prp1 = (uint64_t)io.cq;
+    cmd.prp1 = virt_to_phys(io.cq);
     cmd.cdw10 = (QDEPTH - 1) << 16 | 1;
     cmd.cdw11 = 1 | (irq_mode ? 2u : 0);                    /* contiguous; interrupts on vector 0 */
     int s1 = submit(&admin, &cmd, 2000);
     memset(&cmd, 0, sizeof(cmd));
     cmd.opcode = 0x01;                                      /* create I/O submission queue */
-    cmd.prp1 = (uint64_t)io.sq;
+    cmd.prp1 = virt_to_phys(io.sq);
     cmd.cdw10 = (QDEPTH - 1) << 16 | 1;
     cmd.cdw11 = 1u << 16 | 1;                               /* completion queue 1, contiguous */
     int s2 = s1 == 0 ? submit(&admin, &cmd, 2000) : -1;
@@ -291,9 +291,9 @@ static int rw(int write, uint64_t lba, uint32_t count, uint8_t *buf) {
         memset(&cmd, 0, sizeof(cmd));
         cmd.opcode = write ? 0x01 : 0x02;
         cmd.nsid = 1;
-        cmd.prp1 = (uint64_t)bounce;
-        if (bytes > 8192) cmd.prp2 = (uint64_t)&prp_list[1];   /* the rest of the pages */
-        else if (bytes > 4096) cmd.prp2 = (uint64_t)bounce + 4096;
+        cmd.prp1 = virt_to_phys(bounce);
+        if (bytes > 8192) cmd.prp2 = virt_to_phys(&prp_list[1]);   /* the rest of the pages */
+        else if (bytes > 4096) cmd.prp2 = virt_to_phys(bounce) + 4096;
         uint64_t blk = lba / per;
         cmd.cdw10 = (uint32_t)blk;
         cmd.cdw11 = (uint32_t)(blk >> 32);

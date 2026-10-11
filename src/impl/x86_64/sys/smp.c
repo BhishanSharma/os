@@ -163,11 +163,14 @@ int smp_init(int enabled) {
     }
     idt_set_entry(AP_TIMER_VECTOR, ap_timer_stub, 0x8E);
 
-    /* The trampoline below 1 MiB, identity mapped (it turns paging on mid-way). */
+    /* The trampoline below 1 MiB, identity mapped while the cores start (it
+     * turns paging on mid-way); written through the direct map. Only the
+     * kernel's own tables get the identity page: programs' address spaces
+     * never copy the lower half. */
     map_page(TRAMPOLINE, TRAMPOLINE, PAGE_PRESENT | PAGE_RW);
     uint64_t size = (uint64_t)(trampoline_end - trampoline_start);
-    memcpy((void *)TRAMPOLINE, trampoline_start, size);
-    uint64_t *params = (uint64_t *)(TRAMPOLINE + (trampoline_params - trampoline_start));
+    memcpy(phys_to_virt(TRAMPOLINE), trampoline_start, size);
+    uint64_t *params = (uint64_t *)phys_to_virt(TRAMPOLINE + (trampoline_params - trampoline_start));
 
     /* From here on the kernel lock is real: this core holds it. */
     __asm__ volatile("cli");
@@ -176,6 +179,7 @@ int smp_init(int enabled) {
     bkl_depth = 1;
     __asm__ volatile("sti");
 
+    int late = 0;
     for (int i = 0; i < n && ncpus < MAX_CPUS; i++) {
         if (ids[i] == cpu_apic[0]) continue;
         int idx = ncpus;
@@ -197,8 +201,10 @@ int smp_init(int enabled) {
             ncpus--;
             kfree(stack);
             kprintf("Core with APIC ID %u did not start\n", ids[i]);
+            late = 1;
         }
     }
+    if (!late) unmap_page(TRAMPOLINE);     /* a core that is late still needs it */
     smp_note = ncpus > 1 ? "cores" : "one core (the others did not start)";
     return ncpus;
 }

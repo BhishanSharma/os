@@ -4,10 +4,11 @@
 
 #include <stdint.h>
 
-/* User programs live in 1-2 GiB: no kernel memory is mapped there (the heap
- * stays below 1 GiB), and every page in it has the user bit. */
-#define USER_BASE        0x40000000ULL
-#define USER_TOP         0x80000000ULL
+/* A program owns the whole lower half of its address space (128 TiB): the
+ * kernel lives in the upper half (drivers/addr.h). The first 64 KiB stay
+ * unmapped so that null pointers fault; the stack ends at the top. */
+#define USER_BASE        0x10000ULL
+#define USER_TOP         0x00007FFFFFFFF000ULL
 
 /* Exit codes for programs the kernel ends (as in Unix shells: 128 + signal). */
 #define EXIT_INTERRUPTED 130   /* Ctrl+C */
@@ -46,7 +47,6 @@ void process_end_all(void);
 #define PROC_ERR_NOT_ELF    -2
 #define PROC_ERR_NO_MEMORY  -3
 #define PROC_ERR_BUSY       -4
-#define PROC_ERR_NO_WINDOW  -5   /* kernel memory mapped in the user range */
 
 const char *process_error_text(int err);
 

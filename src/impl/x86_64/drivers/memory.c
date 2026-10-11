@@ -7,6 +7,8 @@
 static mb2_region_t regions[MAX_REGIONS];
 static int region_count = -1;            /* -1: no memory map */
 static uint64_t total_usable;
+static mb2_region_t ram_like[MAX_REGIONS * 2];
+static int ram_like_count;
 
 void* memset(void* ptr, int value, uint64_t num) {
     uint8_t* p = (uint8_t*)ptr;
@@ -18,6 +20,8 @@ void* memset(void* ptr, int value, uint64_t num) {
 
 int memory_init(void) {
     region_count = mb2_get_memory_map(regions, MAX_REGIONS);
+    ram_like_count = mb2_get_ram_like(ram_like, MAX_REGIONS * 2);
+    if (ram_like_count < 0) ram_like_count = 0;
     total_usable = 0;
     for (int i = 0; i < region_count; i++) total_usable += regions[i].length;
     return region_count;
@@ -72,8 +76,9 @@ uint64_t get_total_memory() {
     return total_usable;
 }
 
-/* Page frames come from the heap (which is identity mapped): over-allocate,
- * align to 4 KiB and keep the original pointer just below the frame. */
+/* Page frames come from the heap (in the direct map, so virt_to_phys gives
+ * the frame's physical address): over-allocate, align to 4 KiB and keep the
+ * original pointer just below the frame. */
 void* alloc_frame() {
     uint8_t* raw = kmalloc(2 * PAGE_SIZE);
     if (!raw) return 0;
@@ -84,6 +89,12 @@ void* alloc_frame() {
 
 void free_frame(void* frame) {
     if (frame) kfree(((void**)frame)[-1]);
+}
+
+int memory_get_ram_like(mb2_region_t *out, int max) {
+    int n = 0;
+    for (int i = 0; i < ram_like_count && n < max; i++) out[n++] = ram_like[i];
+    return n;
 }
 
 int memory_get_regions(mb2_region_t *out, int max) {

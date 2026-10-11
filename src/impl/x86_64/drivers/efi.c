@@ -2,7 +2,7 @@
 //
 // The firmware's runtime code and data stay where the firmware put them
 // (physical addresses: Terminal OS never calls SetVirtualAddressMap). They
-// can lie anywhere, also in the 1-2 GiB range user programs use, so calls go
+// can lie anywhere, also where user programs live (the lower half), so calls go
 // through an address space of their own: the kernel's mappings plus identity
 // mappings of the firmware's runtime regions (paging_create_identity_space),
 // switched to for the length of a call, with interrupts off.

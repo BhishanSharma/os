@@ -1,4 +1,5 @@
 // vmmdev.c - the VirtualBox guest device
+#include "drivers/addr.h"
 #include "drivers/vmmdev.h"
 #include "drivers/pci.h"
 #include "lib/print.h"
@@ -27,7 +28,7 @@ int vmmdev_request(void *req, uint32_t type, uint32_t size) {
     *h = (vmmdev_header_t){ size, VMMDEV_REQUEST_VERSION, type, -1, 0, 0 };
     uint64_t flags;                                    // one request at a time (the mouse asks from IRQs)
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
-    outl(port, (uint32_t)(uintptr_t)req);
+    outl(port, (uint32_t)virt_to_phys(req));
     if (flags & 0x200) __asm__ volatile("sti");
     return h->rc;
 }

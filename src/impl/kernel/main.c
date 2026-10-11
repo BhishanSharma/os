@@ -51,17 +51,18 @@ extern void irq_mouse_stub();
 extern void irq_spurious_slave();
 extern void syscall_stub();
 
-// Exported by targets/x86_64/linker.ld: the real extent of the kernel image
-// (.text, .rodata, .data, .bss and the boot stack), page aligned at the end.
-extern char kernel_start[];
-extern char kernel_end[];
+// Exported by targets/x86_64/linker.ld: where the kernel image was loaded
+// (.boot, .text, .rodata, .data, .bss and the boot stack), page aligned at the end.
+extern char kernel_phys_start[];
+extern char kernel_phys_end[];
 
 // Physical layout: kernel image 1-4 MiB (linker.ld asserts it stays below
 // 4 MiB), page-table pool 4-6 MiB (paging.c), heap in the largest usable RAM
-// region between 6 MiB and 1 GiB: 1-2 GiB is the user program range, and the
-// NICs DMA from kmalloc'd buffers with 32-bit addresses.
+// region between 6 MiB and 1 GiB (the NICs DMA from kmalloc'd buffers with
+// 32-bit addresses). The kernel reaches all of it through the direct map
+// (drivers/addr.h).
 #define HEAP_LOW       0x600000ULL
-#define HEAP_HIGH      0x40000000ULL      // user programs own 1-2 GiB (sys/process.h)
+#define HEAP_HIGH      0x40000000ULL
 #define HEAP_MAX       (1024ULL * 1024 * 1024)
 #define HEAP_FALLBACK  (1024 * 1024)      // no memory map: assume 1 MiB at 4 MiB
 #define HEAP_MIN       (8ULL * 1024 * 1024) // heap left after carving out the RAM disk
@@ -140,8 +141,10 @@ void kernel_main() {
         fbcon_grid_size(&fb, &cols, &rows);
         print_use_shadow_buffer(cols, rows);
         // All of video memory if the mode can be changed later (`resolution`).
-        paging_add_identity_region(fb.addr, display_early_init(&fb));
+        paging_add_direct_region(fb.addr, display_early_init(&fb));
     }
+    // The multiboot information stays readable after paging_init.
+    if (multiboot_info) paging_add_direct_region(multiboot_info, *(const uint32_t *)phys_to_virt(multiboot_info));
     boot_info.uefi = mb2_booted_from_uefi();
     acpi_save_rsdp();
     efi_save_boot_info();                     // the firmware's runtime services (boot menu, reset)
@@ -164,12 +167,13 @@ void kernel_main() {
     }
     if (mem_regions > 0) memory_pick_heap(HEAP_LOW, HEAP_HIGH, HEAP_MAX + rd_span, &heap_start, &heap_size);
     if (have_rd && !rd_copy) {
-        disk_set_ramdisk((uint8_t *)rd_start, rd_end - rd_start);
-        paging_add_identity_region(rd_start, rd_end - rd_start);
+        disk_set_ramdisk(phys_to_virt(rd_start), rd_end - rd_start);
+        paging_add_direct_region(rd_start, rd_end - rd_start);
     } else if (rd_copy && heap_size >= rd_span + HEAP_MIN) {
-        memcpy((void *)heap_start, (const void *)rd_start, rd_end - rd_start);
-        disk_set_ramdisk((uint8_t *)heap_start, rd_end - rd_start);
-        paging_add_identity_region(heap_start, rd_end - rd_start);
+        memcpy(phys_to_virt(heap_start), phys_to_virt(rd_start), rd_end - rd_start);
+        disk_set_ramdisk(phys_to_virt(heap_start), rd_end - rd_start);
+        paging_add_direct_region(heap_start, rd_end - rd_start);
+        memory_reserve(heap_start, heap_start + rd_span);   // not free RAM for programs (physmem)
         heap_start += rd_span;
         heap_size -= rd_span;
     }
@@ -204,8 +208,8 @@ void kernel_main() {
     timer_init();
     int have_mouse = mouse_init() == 0;      // interrupts are still off: answers are read directly
 
-    paging_init((uint64_t)kernel_start, (uint64_t)kernel_end, heap_start, heap_size);
-    heap_init(heap_start, heap_size);
+    paging_init((uint64_t)kernel_phys_start, (uint64_t)kernel_phys_end, heap_start, heap_size);
+    heap_init((uint64_t)phys_to_virt(heap_start), heap_size);
     if (mem_regions > 0) {
         physmem_init(heap_start, heap_start + heap_size);   // the rest of RAM, for programs
         print_boot_status(BOOT_OK, "Memory", "%u MiB RAM: %u MiB kernel heap, %u MiB for programs",

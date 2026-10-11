@@ -1,7 +1,7 @@
 // process.c - user programs: loading ELF files, system calls, ending programs
 //
-// Every program is a task (sys/task.c) with its own page tables: the user
-// range (1-2 GiB) holds its code, heap and stack, and the kernel is mapped the
+// Every program is a task (sys/task.c) with its own page tables: the lower
+// half holds its code, heap and stack, and the kernel (upper half) is mapped the
 // same way in every address space, so a system call can read the program's
 // memory directly once the pointer is checked (user_range_ok). Several
 // programs can run at once; the timer switches between them. One of them may
@@ -20,6 +20,8 @@
 #include "drivers/physmem.h"
 #include "drivers/hda.h"
 #include "drivers/fat32.h"
+#include "drivers/fatvol.h"
+#include "drivers/memory.h"
 #include "net/tcp.h"
 #include "net/net.h"
 #include "sys/vfs.h"
@@ -33,7 +35,7 @@
 #include "lib/string.h"
 
 #define USER_STACK_SIZE  (256 * 1024)
-#define USER_HEAP_MAX    (256ULL * 1024 * 1024)
+#define USER_HEAP_MAX    (64ULL << 30)     /* in practice: as much as RAM gives */
 #define MAX_ARGS         16
 #define MAX_FDS          8
 #define MAX_PATH         256              /* FAT32_MAX_PATH: long names */
@@ -107,12 +109,15 @@ static int map_user_range(uint64_t root, uint64_t lo, uint64_t hi) {
         if (paging_get_user_entry(root, v) & PAGE_PRESENT) continue;
         /* A page from all of RAM (drivers/physmem.h), or from the heap. */
         uint64_t phys = page_alloc();
-        if (!phys) phys = (uint64_t)alloc_frame();
-        if (!phys) return -1;
+        if (!phys) {
+            void *frame = alloc_frame();
+            if (!frame) return -1;
+            phys = virt_to_phys(frame);
+        }
         memset(page_address(phys), 0, PAGE_SIZE);
         if (paging_map_user(root, v, phys) != 0) {
             if (page_owned(phys)) page_free(phys);
-            else free_frame((void *)phys);
+            else free_frame(page_address(phys));
             return -1;
         }
     }
@@ -595,15 +600,15 @@ static int64_t sys_sleep(uint64_t ms) {
     return 0;
 }
 
-static int64_t sys_time(uint64_t ptr) {
+static int64_t sys_time(uint64_t ptr, uint64_t utc) {
     if (!user_range_ok(ptr, sizeof(struct os_time), 1)) return SYSERR_FAULT;
     rtc_time_t t;
     if (rtc_read(&t) != 0) return SYSERR_IO;
-    rtc_add_minutes(&t, RTC_LOCAL_OFFSET_MIN);
+    if (!utc) rtc_add_minutes(&t, RTC_LOCAL_OFFSET_MIN);
     struct os_time *out = (struct os_time *)ptr;
     out->year = t.year; out->month = t.month; out->day = t.day;
     out->hour = t.hour; out->minute = t.minute; out->second = t.second;
-    k_snprintf(out->zone, sizeof(out->zone), "%s", RTC_LOCAL_TZ_NAME);
+    k_snprintf(out->zone, sizeof(out->zone), "%s", utc ? "UTC" : RTC_LOCAL_TZ_NAME);
     return 0;
 }
 
@@ -644,13 +649,31 @@ static int64_t sys_console(uint64_t op, uint64_t a, uint64_t b) {
     }
 }
 
+/* A file system result for the program: FATV_* codes become SYSERR_*. */
+static int64_t fs_result(int r) {
+    if (r >= 0) return r;
+    switch (r) {
+        case FATV_NOT_FOUND:       return SYSERR_NOENT;
+        case FATV_EXISTS:          return SYSERR_EXIST;
+        case FATV_BAD_NAME:        return SYSERR_BADNAME;
+        case FATV_NOT_EMPTY:       return SYSERR_NOTEMPTY;
+        case FATV_FULL:            return SYSERR_NOSPC;
+        case FATV_READ_ONLY:       return SYSERR_ROFS;
+        case FAT32_ERR_PERMISSION: return SYSERR_PERM;
+        default:                   return SYSERR_IO;
+    }
+}
+
+#define LISTDIR_MAX 1024
+
 static int64_t sys_readdir(uint64_t index, uint64_t ptr) {
     if (!user_range_ok(ptr, sizeof(struct os_dirent), 1)) return SYSERR_FAULT;
-    fat32_file_info_t *list = kmalloc(32 * sizeof(fat32_file_info_t));
+    if (index >= LISTDIR_MAX) return 0;
+    fat32_file_info_t *list = kmalloc((index + 1) * sizeof(fat32_file_info_t));
     if (!list) return SYSERR_NOMEM;
     char saved[256];
     enter_cwd(saved, sizeof(saved));
-    int count = fat32_list_directory(list, 32);
+    int count = fat32_list_directory(list, (uint32_t)index + 1);
     leave_cwd(saved);
     int64_t result = 0;
     if (count < 0) {
@@ -670,15 +693,74 @@ static int64_t sys_unlink(uint64_t path_ptr) {
     char path[MAX_PATH], saved[256];
     if (copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
     enter_cwd(saved, sizeof(saved));
-    int64_t result;
-    if (!fat32_file_exists(path)) {
-        result = SYSERR_NOENT;
+    int64_t result = fat32_file_exists(path) ? fs_result(fat32_delete_file(path)) : SYSERR_NOENT;
+    leave_cwd(saved);
+    return result;
+}
+
+static int64_t sys_mkdir(uint64_t path_ptr) {
+    char path[MAX_PATH], saved[256];
+    if (copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
+    enter_cwd(saved, sizeof(saved));
+    int64_t result = fs_result(fat32_mkdir(path));
+    leave_cwd(saved);
+    return result;
+}
+
+static int64_t sys_stat(uint64_t path_ptr, uint64_t ptr) {
+    char path[MAX_PATH], saved[256];
+    if (copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
+    if (!user_range_ok(ptr, sizeof(struct os_stat), 1)) return SYSERR_FAULT;
+    struct os_stat *out = (struct os_stat *)ptr;
+    fat32_file_info_t one;
+    int64_t result = 0;
+    enter_cwd(saved, sizeof(saved));
+    if (fat32_list_directory_ex(path, &one, 1) >= 0) {        /* a folder */
+        out->is_dir = 1;
+        out->size = 0;
+    } else if (fat32_file_exists(path)) {
+        out->is_dir = 0;
+        out->size = fat32_get_file_size(path);
     } else {
-        int r = fat32_delete_file(path);
-        result = r == 0 ? 0 : r == FAT32_ERR_PERMISSION ? SYSERR_PERM : SYSERR_IO;
+        result = SYSERR_NOENT;
     }
     leave_cwd(saved);
     return result;
+}
+
+/* The whole folder at once (with long names): path 0 is the current one. */
+static int64_t sys_listdir(uint64_t path_ptr, uint64_t buf, uint64_t max) {
+    char path[MAX_PATH], saved[256];
+    path[0] = 0;
+    if (path_ptr && copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
+    if (max > LISTDIR_MAX) max = LISTDIR_MAX;
+    if (!max) return 0;
+    if (!user_range_ok(buf, max * sizeof(struct os_dirent), 1)) return SYSERR_FAULT;
+    fat32_file_info_t *list = kmalloc(max * sizeof(fat32_file_info_t));
+    if (!list) return SYSERR_NOMEM;
+    enter_cwd(saved, sizeof(saved));
+    int count = fat32_list_directory_ex(path[0] ? path : 0, list, (uint32_t)max);
+    leave_cwd(saved);
+    struct os_dirent *out = (struct os_dirent *)buf;
+    for (int i = 0; i < count; i++) {
+        k_snprintf(out[i].name, sizeof(out[i].name), "%s", list[i].name);
+        out[i].is_dir = list[i].is_directory;
+        out[i].size = list[i].size;
+    }
+    kfree(list);
+    return count < 0 ? SYSERR_NOENT : count;
+}
+
+static int64_t sys_meminfo(uint64_t ptr) {
+    if (!user_range_ok(ptr, sizeof(struct os_meminfo), 1)) return SYSERR_FAULT;
+    struct os_meminfo *m = (struct os_meminfo *)ptr;
+    m->ram = get_total_memory();
+    m->heap_total = heap_get_total();
+    m->heap_used = heap_get_used();
+    m->heap_blocks = heap_get_allocations();
+    m->pages_total = physmem_total();
+    m->pages_used = physmem_used();
+    return 0;
 }
 
 static int64_t sys_getuser(uint64_t ptr) {
@@ -726,7 +808,7 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
         case SYS_SBRK:    r = sys_sbrk((int64_t)f->rdi); break;
         case SYS_SLEEP:   r = sys_sleep(f->rdi); break;
         case SYS_UPTIME:  r = (int64_t)get_tick() * 10; break;
-        case SYS_TIME:    r = sys_time(f->rdi); break;
+        case SYS_TIME:    r = sys_time(f->rdi, f->rsi); break;
         case SYS_GETKEY:  r = sys_getkey(f->rdi); break;
         case SYS_CONSOLE: r = sys_console(f->rdi, f->rsi, f->rdx); break;
         case SYS_READDIR: r = sys_readdir(f->rdi, f->rsi); break;
@@ -754,6 +836,10 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
         case SYS_SOCKCLOSE: r = own_socket((int)f->rdi) ? (tcp_close((int)f->rdi), 0) : SYSERR_BADFD; break;
         case SYS_SEEK:    r = sys_seek(f->rdi, (int64_t)f->rsi, f->rdx); break;
         case SYS_SOUND:   r = sys_sound(f->rdi, f->rsi, f->rdx); break;
+        case SYS_MKDIR:   r = sys_mkdir(f->rdi); break;
+        case SYS_STAT:    r = sys_stat(f->rdi, f->rsi); break;
+        case SYS_LISTDIR: r = sys_listdir(f->rdi, f->rsi, f->rdx); break;
+        case SYS_MEMINFO: r = sys_meminfo(f->rdi); break;
         default:          r = SYSERR_BADCALL; break;
     }
     f->rax = (uint64_t)r;
@@ -767,7 +853,6 @@ const char *process_error_text(int err) {
         case PROC_ERR_NOT_ELF:   return "not an x86_64 ELF executable for this OS";
         case PROC_ERR_NO_MEMORY: return "out of memory";
         case PROC_ERR_BUSY:      return "too many programs running";
-        case PROC_ERR_NO_WINDOW: return "kernel memory occupies the user address range";
         default:                 return "error";
     }
 }
@@ -830,7 +915,6 @@ static uint64_t build_stack(uint64_t root, int argc, char **argv) {
 
 /* Start a program as `user`, in the FAT32 current directory. */
 static int spawn_as(const uint8_t *data, uint32_t size, int argc, char **argv, const user_t *user) {
-    if (!paging_user_range_free()) return PROC_ERR_NO_WINDOW;
     if (argc > MAX_ARGS) argc = MAX_ARGS;
 
     process_t *p = kmalloc(sizeof(process_t));

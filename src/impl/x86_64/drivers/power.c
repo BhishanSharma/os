@@ -162,10 +162,10 @@ static uacpi_status pci_write(uacpi_handle h, uacpi_size off, int bytes, uint32_
 }
 
 uacpi_status uacpi_kernel_pci_read8(uacpi_handle h, uacpi_size off, uacpi_u8 *v) {
-    uint32_t x; uacpi_status s = pci_read(h, off, 1, &x); *v = (uacpi_u8)x; return s;
+    uint32_t x = 0; uacpi_status s = pci_read(h, off, 1, &x); *v = (uacpi_u8)x; return s;
 }
 uacpi_status uacpi_kernel_pci_read16(uacpi_handle h, uacpi_size off, uacpi_u16 *v) {
-    uint32_t x; uacpi_status s = pci_read(h, off, 2, &x); *v = (uacpi_u16)x; return s;
+    uint32_t x = 0; uacpi_status s = pci_read(h, off, 2, &x); *v = (uacpi_u16)x; return s;
 }
 uacpi_status uacpi_kernel_pci_read32(uacpi_handle h, uacpi_size off, uacpi_u32 *v) {
     return pci_read(h, off, 4, v);

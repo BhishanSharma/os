@@ -1,10 +1,10 @@
-/* User programs: static ELF executables loaded at 1 GiB, the start of the
- * user address range (USER_BASE in src/intf/sys/process.h). */
+/* User programs: static ELF executables loaded at 4 MiB, low in the program's
+ * own half of the address space (USER_BASE..USER_TOP in src/intf/sys/process.h). */
 ENTRY(_start)
 
 SECTIONS
 {
-    . = 0x40000000;
+    . = 0x400000;
 
     .text : {
         *(.text._start)

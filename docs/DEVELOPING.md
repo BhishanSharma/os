@@ -23,11 +23,27 @@ itself fails with an explanatory `ASSERT` message (see ARCHITECTURE.md, "Memory 
 ## Build options
 
 ```text
-make build-x86_64            normal build
+make build-x86_64            normal build (-O2)
 make DEBUG=1 build-x86_64    -g -O0, for gdb
 make WERROR=1 build-x86_64   warnings are errors
 make CROSS= build-x86_64     use the host gcc instead of x86_64-elf-gcc (syntax check only)
 ```
+
+## Tests
+
+```text
+make test                    inside Docker: unit tests (net, TCP, WPA2), the USB image, the ISO,
+                             and build/test/ (NVMe disk images and a test video)
+make test-os                 on the host: python tests/qemu/run_tests.py
+python tests/qemu/run_tests.py boot files    some of them; --list, --offline
+```
+
+Each system test boots its own QEMU, types at the console through the QEMU
+monitor and waits for the text it expects on the serial port, so they do not
+depend on fixed delays. A failure shows the end of that machine's output; the
+full logs and screenshots are in `build/test/qemu/`. The kernel is built with
+`-O2`, `-mgeneral-regs-only` (interrupts do not save the SSE registers) and
+`-mcmodel=kernel` (it runs in the top 2 GiB).
 
 ## Debugging
 

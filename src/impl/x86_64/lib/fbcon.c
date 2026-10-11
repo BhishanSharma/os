@@ -1,5 +1,6 @@
 #include "lib/fbcon.h"
 #include <stdint.h>
+#include "drivers/addr.h"
 
 #define GLYPH_W 8
 #define GLYPH_H 16
@@ -26,7 +27,7 @@ static uint32_t pack(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 static void put_pixel(uint32_t x, uint32_t y, uint32_t value) {
-    uint8_t *p = (uint8_t *)(uintptr_t)fb.addr + (uint64_t)y * fb.pitch + (uint64_t)x * (fb.bpp / 8);
+    uint8_t *p = (uint8_t *)phys_to_virt(fb.addr) + (uint64_t)y * fb.pitch + (uint64_t)x * (fb.bpp / 8);
     if (fb.bpp == 32) *(volatile uint32_t *)p = value;
     else { p[0] = (uint8_t)value; p[1] = (uint8_t)(value >> 8); p[2] = (uint8_t)(value >> 16); }
 }
@@ -126,7 +127,7 @@ void fbcon_blit(int x, int y, int w, int h, const uint32_t *src, int stride) {
             int sy = y + j;
             if (sy < 0 || (uint32_t)sy >= fb.height) continue;
             const uint32_t *from = src + (int64_t)j * stride + (x0 - x);
-            uint32_t *to = (uint32_t *)((uintptr_t)fb.addr + (uint64_t)sy * fb.pitch) + x0;
+            uint32_t *to = (uint32_t *)((uintptr_t)phys_to_virt(fb.addr) + (uint64_t)sy * fb.pitch) + x0;
             uint64_t n = (uint64_t)(x1 - x0);
             __asm__ volatile("rep movsl" : "+D"(to), "+S"(from), "+c"(n) : : "memory");
         }

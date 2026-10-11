@@ -3,6 +3,7 @@
 #define PAGING_H
 
 #include <stdint.h>
+#include "drivers/addr.h"
 
 #define PAGE_PRESENT   0x1
 #define PAGE_RW        0x2
@@ -11,19 +12,22 @@
 
 #define PAGE_SIZE 4096
 
-void paging_init(uint64_t phys_base, uint64_t phys_end, uint64_t heap_start, uint64_t heap_size);
+/* Build the kernel's page tables and switch to them: the kernel image at
+ * KERNEL_VMA + [image_start, image_end) and, in the direct map, the RAM-like
+ * regions of the memory map, the heap and every range given to
+ * paging_add_direct_region(). */
+void paging_init(uint64_t image_start, uint64_t image_end, uint64_t heap_start, uint64_t heap_size);
 void map_page(uint64_t virt, uint64_t phys, uint64_t flags);
 
 /* Map device registers at [phys, phys + size), uncached, into the kernel's
- * device window; returns where they are. Use this, not an identity mapping,
- * for anything a device decodes (BARs can sit in the user range). */
+ * device window; returns where they are. */
 void *mmio_map(uint64_t phys, uint64_t size);
 #define LARGE_PAGE 0x200000ULL
 void map_large_page(uint64_t virt, uint64_t phys);   // 2 MiB, both 2 MiB aligned
 
-/* Register a physical range (e.g. the framebuffer) for paging_init() to identity-map.
- * Call before paging_init(). */
-void paging_add_identity_region(uint64_t base, uint64_t size);
+/* Register a physical range (the framebuffer, a boot module) for paging_init()
+ * to put in the direct map. Call before paging_init(). */
+void paging_add_direct_region(uint64_t base, uint64_t size);
 
 /* The page-table entry for `virt` (flags in the low 12 bits), the 2 MiB PD
  * entry if a large page maps it, or 0 if it is not mapped. */
@@ -33,10 +37,10 @@ uint64_t paging_get_entry(uint64_t virt);
  * was not mapped. */
 uint64_t unmap_page(uint64_t virt);
 
-/* Address spaces for user programs (the 1-2 GiB range; the kernel is shared).
- * Roots are physical (= virtual) addresses of PML4 tables. */
+/* Address spaces for user programs: the whole lower half is the program's,
+ * the upper half (PML4 entries 256-511) is the kernel's, shared by all.
+ * Roots are physical addresses of PML4 tables (what CR3 holds). */
 uint64_t paging_kernel_root(void);
-int paging_user_range_free(void);                    /* no kernel mapping in 1-2 GiB */
 uint64_t paging_create_address_space(void);          /* 0 if out of memory */
 int paging_map_user(uint64_t root, uint64_t virt, uint64_t phys);   /* 0 on success */
 uint64_t paging_get_user_entry(uint64_t root, uint64_t virt);       /* 0 if unmapped */

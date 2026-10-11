@@ -39,7 +39,7 @@ The USB stick image ends up at `dist/x86_64/terminalos.img` (`make iso` still bu
 | Exceptions     | Handlers for CPU vectors 0-31, panic screen with register dump, stack guard page  |
 | Input          | PS/2 keyboard and mouse; USB keyboards and mice (xHCI driver); I2C laptop touchpads (HID over I2C, Precision Touchpad gestures: tap to click, two-finger scroll, press-and-drag to select); command history, arrow keys |
 | Real hardware  | Boots from a USB stick on UEFI laptops: falls back to the local APIC timer when the PIT gives no interrupts, reads the hardware clock as local time (as Windows keeps it), assigns PCI addresses the firmware left out, reads ACPI tables |
-| Memory         | Paging; a kernel heap (`kmalloc`, up to 1 GiB, identity mapped for device DMA) and every other page of RAM for programs, reached through a direct map at 2 TiB, so all of the RAM is used |
+| Memory         | A higher-half kernel: every program has the whole lower half (128 TiB) of its own address space; the kernel, a direct map of all RAM and the device registers are in the upper half. A kernel heap (`kmalloc`, up to 1 GiB) and every other page of RAM for programs, so all of the RAM is used |
 | CPU cores      | SMP: the other cores are started from the ACPI MADT (INIT-SIPI-SIPI, a real-mode trampoline at 0x8000) and run user programs in parallel; the kernel runs under one big lock, released while it waits. `cpus` shows them; safe mode (S at boot, `nosmp`) keeps one |
 | Power          | ACPI through [uACPI](https://github.com/uACPI/uACPI) (MIT, vendored in `third_party/uacpi`), which runs the firmware's AML: `shutdown` and the power button switch off (S5); the battery (charge, health, time left) and charger are read through the embedded controller, shown in the status bar and by `battery`. ACPI events are polled from the idle loop |
 | Interrupts     | 8259 PIC for legacy devices, plus PCI MSI / MSI-X through the local APIC for USB (xHCI), NVMe and Intel Wi-Fi (`interrupts` counts them); the timer polls stay as a backstop |
@@ -79,7 +79,9 @@ make disk            create disk.img          (host: needs dosfstools + mtools)
 make run             boot in QEMU             (host)
 make debug           boot paused for gdb      (host)
 make clean
-make test-net        host-side unit test of the ARP/IP/ICMP code (no QEMU needed)
+make test            unit tests (network, TCP, WPA2) and the system tests' disks (inside Docker)
+make test-os         system tests: boots it in QEMU and checks boot, files, programs,
+                     crashes, NVMe, video and sound, install, HTTPS, BIOS boot (host)
 ```
 
 ## Hardware (real or virtual)

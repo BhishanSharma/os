@@ -1,3 +1,4 @@
+#include "drivers/addr.h"
 #include "drivers/rtl8139.h"
 #include "drivers/pci.h"
 #include "drivers/pic.h"
@@ -105,10 +106,6 @@ static uint32_t pci_get_bar0(uint8_t bus, uint8_t slot, uint8_t func) {
     return 0; // we expect IO BAR for many RTL8139 in QEMU
 }
 
-/* Identity mapped: physical == virtual. */
-static uint32_t virt_to_phys(void* v) {
-    return (uint32_t)(uintptr_t)v;
-}
 
 /* (Re)start the receiver from an empty ring. */
 static void rtl8139_rx_restart(void) {

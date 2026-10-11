@@ -1,3 +1,4 @@
+#include "drivers/addr.h"
 #include "drivers/rtl8168.h"
 #include "drivers/pci.h"
 #include "drivers/pic.h"
@@ -104,7 +105,7 @@ static inline void irq_restore(uint64_t f) {
 }
 
 /* Identity mapped: physical == virtual. */
-static uint64_t phys(const void *v) { return (uint64_t)(uintptr_t)v; }
+static uint64_t phys(const void *v) { return virt_to_phys(v); }
 
 /* Descriptor rings must be 256-byte aligned; kmalloc gives no such promise. */
 static void *alloc_aligned(uint32_t size, uint32_t align) {

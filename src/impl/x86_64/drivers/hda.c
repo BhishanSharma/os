@@ -223,10 +223,10 @@ static int setup_rings(void) {
     corb_entries = sz == 2 ? 256 : sz == 1 ? 16 : 2;
     wr8(CORBSIZE, (uint8_t)((cs & ~3) | sz));
     wr8(RIRBSIZE, (uint8_t)((rs & ~3) | sz));
-    wr32(CORBLBASE, (uint32_t)(uint64_t)corb);
-    wr32(CORBUBASE, (uint32_t)((uint64_t)corb >> 32));
-    wr32(RIRBLBASE, (uint32_t)(uint64_t)rirb);
-    wr32(RIRBUBASE, (uint32_t)((uint64_t)rirb >> 32));
+    wr32(CORBLBASE, (uint32_t)virt_to_phys(corb));
+    wr32(CORBUBASE, (uint32_t)(virt_to_phys(corb) >> 32));
+    wr32(RIRBLBASE, (uint32_t)virt_to_phys(rirb));
+    wr32(RIRBUBASE, (uint32_t)(virt_to_phys(rirb) >> 32));
     wr16(CORBRP, 0x8000);                                   /* reset the read pointer */
     for (int t = 0; t < 100 && !(rd16(CORBRP) & 0x8000); t++) udelay(10);
     wr16(CORBRP, 0);
@@ -473,7 +473,7 @@ int sound_init(char *how, int size) {
         if (!ring || !bdl) return -1;
     }
     for (int i = 0; i < BDL_ENTRIES; i++) {
-        uint64_t a = (uint64_t)ring + (uint64_t)i * (RING_BYTES / BDL_ENTRIES);
+        uint64_t a = virt_to_phys(ring) + (uint64_t)i * (RING_BYTES / BDL_ENTRIES);
         bdl[i * 4] = (uint32_t)a;
         bdl[i * 4 + 1] = (uint32_t)(a >> 32);
         bdl[i * 4 + 2] = RING_BYTES / BDL_ENTRIES;
@@ -565,8 +565,8 @@ static int play(source_fn src, void *ctx) {
         cmd(outs[i].dac, V_SET_FORMAT, FORMAT_48K16);
         cmd(outs[i].dac, V_SET_STREAM, STREAM_TAG << 4);
     }
-    wr32(sd + SD_BDPL, (uint32_t)(uint64_t)bdl);
-    wr32(sd + SD_BDPU, (uint32_t)((uint64_t)bdl >> 32));
+    wr32(sd + SD_BDPL, (uint32_t)virt_to_phys(bdl));
+    wr32(sd + SD_BDPU, (uint32_t)(virt_to_phys(bdl) >> 32));
     wr32(sd + SD_CBL, RING_BYTES);
     wr16(sd + SD_LVI, BDL_ENTRIES - 1);
     wr16(sd + SD_FMT, FORMAT_48K16);
@@ -763,8 +763,8 @@ int sound_stream_open(void) {
         cmd(outs[i].dac, V_SET_STREAM, STREAM_TAG << 4);
     }
     memset(ring, 0, RING_BYTES);
-    wr32(sd + SD_BDPL, (uint32_t)(uint64_t)bdl);
-    wr32(sd + SD_BDPU, (uint32_t)((uint64_t)bdl >> 32));
+    wr32(sd + SD_BDPL, (uint32_t)virt_to_phys(bdl));
+    wr32(sd + SD_BDPU, (uint32_t)(virt_to_phys(bdl) >> 32));
     wr32(sd + SD_CBL, RING_BYTES);
     wr16(sd + SD_LVI, BDL_ENTRIES - 1);
     wr16(sd + SD_FMT, FORMAT_48K16);

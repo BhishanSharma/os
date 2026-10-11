@@ -537,7 +537,7 @@ int fatvol_create(fatvol_t *v, uint32_t dir, const char *name, int is_dir, faten
     }
     kfree(buf);
 
-    uint32_t c, i;
+    uint32_t c = 0, i = 0;
     int r = free_run(v, dir, pieces + 1, &c, &i);
     uint32_t first_c = c, first_i = i;
     uint8_t sum = lfn_checksum(fn);

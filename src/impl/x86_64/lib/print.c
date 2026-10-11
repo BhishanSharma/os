@@ -5,10 +5,11 @@
 #include "lib/serial.h"
 #include "lib/fbcon.h"
 #include "drivers/heap.h"
+#include "drivers/addr.h"
 
 #define VGA_CTRL_REGISTER 0x3D4
 #define VGA_DATA_REGISTER 0x3D5
-#define VIDEO_MEMORY 0xB8000
+
 
 // Scrollback buffer configuration
 #define EARLY_SCROLLBACK_LINES 50   // Small buffer for early boot
@@ -57,7 +58,7 @@ static int scrollback_view_offset = 0;
 static int scrollback_total_lines = 0;
 static int scrollback_expanded = 0;
 
-struct Char* buffer = (struct Char*) 0xb8000;
+struct Char* buffer = (struct Char*)(DIRECT_MAP + 0xB8000);   // VGA text memory
 size_t col = 0;
 size_t row = 0;
 uint8_t color = PRINT_COLOR_WHITE | (PRINT_COLOR_BLUE << 4);
@@ -75,7 +76,7 @@ static int flush_deferred = 0;   // >0 while print_str/kprintf run: redraw once 
 /* Rows reserved at the top for the status bar (print_reserve_status_line).
  * `buffer` and num_rows describe only the text area below them; `screen` is
  * the whole grid, status rows included. */
-static struct Char *screen = (struct Char *)0xb8000;
+static struct Char *screen = (struct Char *)(DIRECT_MAP + 0xB8000);
 static int status_rows = 0;
 
 /* Quiet boot: while muted, output goes only to serial and the boot log. The

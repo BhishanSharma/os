@@ -10,6 +10,8 @@ RUN apt-get install -y xorriso git
 RUN apt-get install -y grub-efi-amd64-bin mtools
 # Terminal OS's own UEFI boot loader (boot/): a PE/COFF program, built with MinGW.
 RUN apt-get install -y gcc-mingw-w64-x86-64 dosfstools fdisk
+# The system tests' disk images (make test-assets): a test video, made with ffmpeg.
+RUN apt-get install -y --no-install-recommends ffmpeg
 
 # Build the official BearSSL source library during the kernel build.
 RUN git clone --depth 1 https://www.bearssl.org/git/BearSSL /root/bearssl

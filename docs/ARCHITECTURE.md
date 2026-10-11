@@ -35,16 +35,22 @@ included with a relative path.
 ## Boot flow
 
 ```
-BIOS or UEFI -> GRUB -> loads /boot/kernel.bin at 1 MiB (Multiboot2, header.asm)
-  start            (main.asm, 32-bit)
-    save the multiboot2 info pointer (EBX) in `multiboot_info`
-    check multiboot magic, CPUID, long-mode support   (error codes 'M', 'C', 'L' on screen)
-    build page tables: PML4 -> PDPT -> 4 PDs, 2048 x 2 MiB pages = first 4 GiB identity-mapped
-    enable PAE + long mode + paging, load a minimal GDT, far-jump
+UEFI -> TERMOS.EFI (loader/, 64-bit)    or    BIOS/UEFI -> GRUB (the legacy ISO)
+  both load kernel.bin's segments at their physical addresses from 1 MiB
+  start64 (main.asm, from TERMOS.EFI)      start (main.asm, 32-bit, from GRUB)
+                                             check multiboot magic, CPUID, long mode
+    save the multiboot2 info pointer in `multiboot_info`
+    boot page tables, 2 MiB pages: the first 4 GiB at 0 (identity) and at the
+    direct map, the first 1 GiB at KERNEL_VMA; long mode, a minimal GDT
+  enter_high: jump to the kernel's own addresses (top 2 GiB)
   long_mode_start  (main64.asm, 64-bit)
     zero the data segment registers, call kernel_main
   kernel_main      (kernel/main.c)
 ```
+
+`main.asm` lives in section `.boot`, linked at its load address; everything
+else is linked at `KERNEL_VMA` + its load address (`targets/x86_64/linker.ld`),
+so before paging it refers to kernel symbols as `PHYS(symbol)`.
 
 `kernel_main` then, in order:
 
@@ -56,7 +62,7 @@ BIOS or UEFI -> GRUB -> loads /boot/kernel.bin at 1 MiB (Multiboot2, header.asm)
 3. `init_keyboard()`, `timer_init()` (PIT at 100 Hz). (`memory_init()` already ran in step 0:
    it copies the usable-RAM regions from the multiboot2 memory map, and the heap is placed in the
    largest one.)
-4. `paging_init()` builds a **new** set of page tables (identity map of the kernel image `kernel_start`..`kernel_end`, heap, page tables, VGA memory and the framebuffer, if any) and switches to them. With a framebuffer, `fbcon_init()` then starts the console (`lib/fbcon.c`, font from `scripts/gen-font.py`). Then `heap_init()`.
+4. `paging_init()` builds the kernel's own page tables (the kernel image at `KERNEL_VMA`; in the direct map all RAM and ACPI memory, the page tables, the heap, the first MiB, and the registered ranges: framebuffer, boot modules, the multiboot information) and switches to them. The lower half is now empty: it belongs to programs. With a framebuffer, `fbcon_init()` then starts the console (`lib/fbcon.c`, font from `scripts/gen-font.py`). Then `heap_init()`.
 5. `expand_scrollback()`: grows the scrollback buffer to 2000 lines.
 6. `nic_probe_init()`: RTL8139 or RTL8168; installs its IRQ handler if it has a PIC line.
 7. `mount_filesystem()`: FAT32 from the ATA disk if `ata_init()` finds one with a FAT32 volume,
@@ -64,12 +70,32 @@ BIOS or UEFI -> GRUB -> loads /boot/kernel.bin at 1 MiB (Multiboot2, header.asm)
    `disk_read_sectors`/`disk_write_sectors` to the ATA driver or to the RAM disk in memory.
 8. `sti` (enable interrupts), DHCP (`net_configure()`), then `shell_run()`, which never returns.
 
-## Memory map (physical == virtual, identity mapped)
+## Virtual memory (`src/intf/drivers/addr.h`)
+
+The kernel lives in the upper half of every address space; the lower half is
+the running program's own (128 TiB). A program's PML4 shares entries 256-511
+with the kernel's, so kernel mappings are the same everywhere.
+
+| Virtual address              | What                                                        |
+| ---------------------------- | ----------------------------------------------------------- |
+| `0x0000000000010000`-`0x00007FFFFFFFF000` | The program: code at 4 MiB (`user/user.ld`), heap after it, stack at the top |
+| `0xFFFF800000000000` (`DIRECT_MAP`) | All of RAM: physical `X` is at `DIRECT_MAP + X` (`phys_to_virt`). The heap, page tables and programs' pages are reached here |
+| `0xFFFFC00000000000` (`MMIO_WINDOW`) | Device registers, uncached (`mmio_map`) |
+| `0xFFFFC08000000000` (`ACPI_WINDOW`) | ACPI tables being scanned (`acpi.c`) |
+| `0xFFFFFFFF80000000` (`KERNEL_VMA`) | The kernel image: `KERNEL_VMA` + its physical address (`-mcmodel=kernel`) |
+
+Devices see physical addresses: drivers hand them `virt_to_phys(buffer)`
+(the heap and the kernel image both work), never the pointer. While the
+other cores start, the kernel's own tables also map the SMP trampoline page at
+`0x8000` to itself. Firmware calls (`efi.c`) run on a copy of the kernel's
+tables plus identity mappings of the firmware's runtime memory.
+
+## Physical memory
 
 | Address                  | What                                                        |
 | ------------------------ | ----------------------------------------------------------- |
 | `0x000B8000`             | VGA text buffer                                             |
-| `0x00100000`-`kernel_end` | Kernel image (text/rodata/data/bss, 32 KiB boot stack with a guard page below it); `kernel_end` comes from `linker.ld`, currently about `0x126000` |
+| `0x00100000`-`kernel_phys_end` | Kernel image (boot code, text/rodata/data/bss, 32 KiB boot stack with a guard page below it); `kernel_phys_end` comes from `linker.ld`, currently about `0x1EB000` |
 | `0x00400000`-`0x00600000`| Page-table pool for `paging_init()` (`PAGE_TABLE_AREA`..`PAGE_TABLE_END`) |
 | start of the heap region | RAM disk: GRUB loads `ramdisk.img.gz` (unpacked) wherever it likes; `kernel_main()` keeps the heap out of that range (`memory_reserve`), copies the image to the bottom of the chosen region and starts the heap at the next 2 MiB boundary |
 | largest RAM region in 6 MiB-1 GiB | Kernel heap (`kmalloc`), 2 MiB aligned, at most 1 GiB, mapped with 2 MiB pages; falls back to 1 MiB at `0x600000` without a memory map |
@@ -123,7 +149,7 @@ use `build.ps1 -Log` for those.
 | Keyboard   | `drivers/keyboard.c`       | Scancode set 1, line input with history, shift/ctrl             |
 | Timer      | `drivers/timer.c`          | PIT channel 0 at 100 Hz, `get_tick`, `sleep(ms)`                |
 | PIC        | `drivers/pic.c`            | 8259 remap; `enable_irq()` lives in `keyboard.c` for historical reasons |
-| Paging     | `drivers/paging.c`         | 4-level tables, 4 KiB pages, identity mapping                   |
+| Paging     | `drivers/paging.c`         | 4-level tables; the kernel in the upper half, a direct map of RAM, programs in the lower half |
 | Frames     | `drivers/memory.c`         | Bitmap physical-frame allocator (barely used)                   |
 | Heap       | `drivers/heap.c`           | First-fit free list, 8-byte alignment, `kmalloc`/`kfree`        |
 | Disk       | `drivers/disk.c`           | Sector I/O for FAT32: the ATA disk or the RAM disk (`mount`)    |

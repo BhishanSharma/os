@@ -173,8 +173,8 @@ static void w64(volatile uint8_t *base, uint32_t off, uint64_t v) {
 
 static uint64_t mmio_size;                  /* how much of the BAR is mapped at `mmio` */
 
-/* Zeroed memory with the given alignment (the heap is identity-mapped, so
- * the address is also what the controller uses). Never freed. */
+/* Zeroed memory with the given alignment (devices get virt_to_phys of it).
+ * Never freed. */
 static void *dma_alloc(uint64_t size, uint64_t align) {
     uint8_t *raw = kmalloc(size + align);
     if (!raw) return 0;
@@ -196,7 +196,7 @@ static int ring_init(ring_t *r) {
     r->enqueue = 0;
     r->cycle = 1;
     trb_t *link = &r->trbs[RING_TRBS - 1];
-    link->param = (uint64_t)r->trbs;
+    link->param = virt_to_phys(r->trbs);
     link->control = TRB_TYPE(TRB_LINK) | TRB_TOGGLE;
     return 0;
 }
@@ -231,7 +231,7 @@ static int event_pop(trb_t *out) {
         event_dequeue = 0;
         event_cycle ^= 1;
     }
-    w64(rt, IR0_ERDP, (uint64_t)&event_ring[event_dequeue] | (1u << 3));   /* EHB: handled */
+    w64(rt, IR0_ERDP, virt_to_phys(&event_ring[event_dequeue]) | (1u << 3));   /* EHB: handled */
     return 1;
 }
 
@@ -246,7 +246,7 @@ static int wait_for(trb_t *trb, uint32_t ms, trb_t *event_out) {
         trb_t e;
         while (event_pop(&e)) {
             uint32_t type = TRB_GET_TYPE(e.control);
-            if ((type == TRB_EV_COMMAND || type == TRB_EV_TRANSFER) && e.param == (uint64_t)trb) {
+            if ((type == TRB_EV_COMMAND || type == TRB_EV_TRANSFER) && e.param == virt_to_phys(trb)) {
                 if (event_out) *event_out = e;
                 return (int)(e.status >> 24);
             }
@@ -288,7 +288,7 @@ static int control(usb_device_t *d, uint8_t type, uint8_t request, uint16_t valu
     uint32_t trt = length ? (in ? 3u : 2u) : 0u;
     ring_push(&d->ep0, setup, 8, TRB_TYPE(TRB_SETUP) | TRB_IDT | (trt << 16));
     if (length)
-        ring_push(&d->ep0, (uint64_t)data, length, TRB_TYPE(TRB_DATA) | (in ? TRB_DIR_IN : 0));
+        ring_push(&d->ep0, virt_to_phys(data), length, TRB_TYPE(TRB_DATA) | (in ? TRB_DIR_IN : 0));
     trb_t *status = ring_push(&d->ep0, 0, 0,
                               TRB_TYPE(TRB_STATUS) | TRB_IOC | ((length && in) ? 0 : TRB_DIR_IN));
     ring_doorbell(d->slot, 1);
@@ -332,19 +332,19 @@ static int address_device(usb_device_t *d) {
     d->out_ctx = dma_alloc((uint64_t)ctx_size * 32, 64);
     d->in_ctx = dma_alloc((uint64_t)ctx_size * 33, 64);
     if (!d->out_ctx || !d->in_ctx || ring_init(&d->ep0) != 0) { d->note = "out of memory"; return -1; }
-    dcbaa[d->slot] = (uint64_t)d->out_ctx;
+    dcbaa[d->slot] = virt_to_phys(d->out_ctx);
 
     uint32_t *icc = in_entry(d, 0), *slot = in_entry(d, 1), *ep0 = in_entry(d, 2);
     icc[1] = 0x3;                                           /* add: slot, EP0 */
     slot[0] = ((uint32_t)d->speed << 20) | (1u << 27);      /* one context entry */
     slot[1] = (uint32_t)d->port << 16;                      /* root hub port */
     ep0[1] = (3u << 1) | (4u << 3) | ((uint32_t)ep0_max_packet(d->speed) << 16);   /* CErr 3, control */
-    uint64_t deq = (uint64_t)d->ep0.trbs | 1;
+    uint64_t deq = virt_to_phys(d->ep0.trbs) | 1;
     ep0[2] = (uint32_t)deq;
     ep0[3] = (uint32_t)(deq >> 32);
     ep0[4] = 8;                                             /* average TRB length */
 
-    int cc = command((uint64_t)d->in_ctx, 0, TRB_TYPE(TRB_ADDRESS_DEVICE) | ((uint32_t)d->slot << 24), 0);
+    int cc = command(virt_to_phys(d->in_ctx), 0, TRB_TYPE(TRB_ADDRESS_DEVICE) | ((uint32_t)d->slot << 24), 0);
     if (cc != CC_SUCCESS) { d->note = "did not take an address"; return -1; }
     return 0;
 }
@@ -360,7 +360,7 @@ static int fix_ep0_size(usb_device_t *d, uint8_t *buf) {
     icc[0] = 0;
     icc[1] = 0x2;                                           /* evaluate EP0 */
     ep0[1] = (ep0[1] & 0xFFFF) | ((uint32_t)mps << 16);
-    return command((uint64_t)d->in_ctx, 0, TRB_TYPE(TRB_EVALUATE) | ((uint32_t)d->slot << 24), 0)
+    return command(virt_to_phys(d->in_ctx), 0, TRB_TYPE(TRB_EVALUATE) | ((uint32_t)d->slot << 24), 0)
            == CC_SUCCESS ? 0 : -1;
 }
 
@@ -376,7 +376,7 @@ static uint32_t xhci_interval(int speed, uint8_t b_interval) {
 }
 
 static void queue_report(usb_device_t *d, hid_t *h) {
-    ring_push(&h->ring, (uint64_t)h->report, (uint32_t)h->len, TRB_TYPE(TRB_NORMAL) | TRB_IOC | TRB_ISP);
+    ring_push(&h->ring, virt_to_phys(h->report), (uint32_t)h->len, TRB_TYPE(TRB_NORMAL) | TRB_IOC | TRB_ISP);
     ring_doorbell(d->slot, h->dci);
 }
 
@@ -398,14 +398,14 @@ static int setup_hid(usb_device_t *d, uint8_t config_value, const uint16_t *mps,
         if (h->dci > last_dci) last_dci = h->dci;
         ep[0] = xhci_interval(d->speed, b_interval[i]) << 16;
         ep[1] = (3u << 1) | (7u << 3) | ((uint32_t)mps[i] << 16);   /* CErr 3, interrupt IN */
-        uint64_t deq = (uint64_t)h->ring.trbs | 1;
+        uint64_t deq = virt_to_phys(h->ring.trbs) | 1;
         ep[2] = (uint32_t)deq;
         ep[3] = (uint32_t)(deq >> 32);
         ep[4] = (uint32_t)mps[i] | ((uint32_t)mps[i] << 16);   /* average TRB length, max ESIT payload */
     }
     slot[0] = (slot[0] & ~(0x1Fu << 27)) | ((uint32_t)last_dci << 27);
 
-    if (command((uint64_t)d->in_ctx, 0, TRB_TYPE(TRB_CONFIGURE_EP) | ((uint32_t)d->slot << 24), 0)
+    if (command(virt_to_phys(d->in_ctx), 0, TRB_TYPE(TRB_CONFIGURE_EP) | ((uint32_t)d->slot << 24), 0)
         != CC_SUCCESS) { d->note = "endpoint setup failed"; return -1; }
     if (control(d, 0x00, 9, config_value, 0, 0, 0) != 0) { d->note = "SET_CONFIGURATION failed"; return -1; }
     for (int i = 0; i < d->hid_count; i++) {
@@ -672,25 +672,25 @@ static int controller_start(uint64_t base) {
         for (uint32_t i = 0; i < scratch; i++) {
             void *p = dma_alloc(page, page);
             if (!p) return -1;
-            list[i] = (uint64_t)p;
+            list[i] = virt_to_phys(p);
         }
-        dcbaa[0] = (uint64_t)list;
+        dcbaa[0] = virt_to_phys(list);
     }
-    w64(op, OP_DCBAAP, (uint64_t)dcbaa);
+    w64(op, OP_DCBAAP, virt_to_phys(dcbaa));
     w32(op, OP_CONFIG, (uint32_t)max_slots);
 
     if (ring_init(&cmd_ring) != 0) return -1;
-    w64(op, OP_CRCR, (uint64_t)cmd_ring.trbs | 1);
+    w64(op, OP_CRCR, virt_to_phys(cmd_ring.trbs) | 1);
 
     /* One event ring segment. */
     event_ring = dma_alloc(RING_TRBS * sizeof(trb_t), 4096);
     uint64_t *erst = dma_alloc(16, 64);
     if (!event_ring || !erst) return -1;
-    erst[0] = (uint64_t)event_ring;
+    erst[0] = virt_to_phys(event_ring);
     erst[1] = RING_TRBS;
     w32(rt, IR0_ERSTSZ, 1);
-    w64(rt, IR0_ERDP, (uint64_t)event_ring);
-    w64(rt, IR0_ERSTBA, (uint64_t)erst);
+    w64(rt, IR0_ERDP, virt_to_phys(event_ring));
+    w64(rt, IR0_ERSTBA, virt_to_phys(erst));
 
     w32(op, OP_USBCMD, CMD_RUN);
     for (int i = 0; i < 100 && (r32(op, OP_USBSTS) & STS_HALTED); i++) delay_ms(1);

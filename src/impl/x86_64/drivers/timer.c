@@ -17,7 +17,7 @@ typedef struct registers {
 } registers_t;
 
 
-static uint32_t tick = 0;
+static volatile uint32_t tick = 0;
 static void (*poll_hook)(void);
 static void (*more_hooks[4])(void);
 

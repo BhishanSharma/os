@@ -28,7 +28,11 @@ uint64_t get_total_memory();   // usable RAM in bytes, from the memory map
 /* The usable regions, minus what memory_reserve() took out. Returns how many. */
 int memory_get_regions(mb2_region_t *out, int max);
 
-/* One 4 KiB page from the heap (the `alloc` debug command). */
+/* Usable RAM and ACPI memory as the memory map has it (for the direct map). */
+int memory_get_ram_like(mb2_region_t *out, int max);
+
+/* One 4 KiB page from the heap (a kernel address: virt_to_phys for the
+ * physical one). */
 void* alloc_frame();
 void free_frame(void* frame);
 
