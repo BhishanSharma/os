@@ -36,6 +36,9 @@
 #include "drivers/display.h"
 #include "lib/fbcon.h"
 #include "drivers/power.h"
+#include "drivers/efi.h"
+#include "sys/install.h"
+#include "drivers/physmem.h"
 
 #define MAX_TEST_ALLOCS 16
 static void *test_allocs[MAX_TEST_ALLOCS];
@@ -216,6 +219,8 @@ static void cmd_help(void)
     print_str("status             - uptime and allocation count\n");
     print_str("reboot             - reboot system\n");
     print_str("shutdown           - switch the computer off (the power button does too)\n");
+    print_str("install            - put Terminal OS on this PC's SSD (from the USB stick)\n");
+    print_str("bootmenu           - the PC's boot menu entries (UEFI)\n");
     print_str("battery            - battery charge, health and time left; the charger\n");
     print_str("\n=== Memory and Disk (debug) ===\n");
     print_str("meminfo            - heap statistics\n");
@@ -660,7 +665,17 @@ static int kernel_command(const char *line, int run_programs) {
     {
         print_str("Shutting down...\n");
         power_off();
-        print_str("shutdown: ACPI could not switch the computer off; hold the power button.\n");
+        efi_reset(1);                                   // ACPI failed: ask the firmware
+        print_str("shutdown: the computer could not be switched off; hold the power button.\n");
+    }
+    else if (strcmp(line, "bootmenu") == 0)
+    {
+        install_print_boot_menu();
+    }
+    else if (strcmp(line, "install") == 0)
+    {
+        if (!need_root("install")) return 1;
+        install_run();
     }
     else if (strcmp(line, "battery") == 0)
     {
@@ -776,6 +791,8 @@ static int kernel_command(const char *line, int run_programs) {
 
         print_str("=== Heap Memory Info ===\n");
         kprintf("Physical:    %d MB usable RAM\n", (uint32_t)(get_total_memory() >> 20));
+        kprintf("Programs:    %u of %u MB in use (pages from the rest of RAM)\n",
+                (uint32_t)(physmem_used() >> 20), (uint32_t)(physmem_total() >> 20));
         kprintf("Total:       %d bytes (%d KB)\n", total, total / 1024);
         kprintf("Used:        %d bytes (%d KB)\n", used, used / 1024);
         kprintf("Free:        %d bytes (%d KB)\n", free, free / 1024);

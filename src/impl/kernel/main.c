@@ -37,6 +37,9 @@
 #include "drivers/touchpad.h"
 #include "drivers/acpi.h"
 #include "drivers/power.h"
+#include "drivers/efi.h"
+#include "sys/install.h"
+#include "drivers/physmem.h"
 #include "drivers/vmmdev.h"
 
 extern void irq0_stub();
@@ -53,11 +56,11 @@ extern void syscall_stub();
 extern char kernel_start[];
 extern char kernel_end[];
 
-// Physical layout: kernel image 1-2 MiB (linker.ld asserts it stays below
-// 2 MiB), page-table pool 2-4 MiB (paging.c), heap in the largest usable RAM
-// region between 4 MiB and 1 GiB: 1-2 GiB is the user program range, and the
+// Physical layout: kernel image 1-4 MiB (linker.ld asserts it stays below
+// 4 MiB), page-table pool 4-6 MiB (paging.c), heap in the largest usable RAM
+// region between 6 MiB and 1 GiB: 1-2 GiB is the user program range, and the
 // NICs DMA from kmalloc'd buffers with 32-bit addresses.
-#define HEAP_LOW       0x400000ULL
+#define HEAP_LOW       0x600000ULL
 #define HEAP_HIGH      0x40000000ULL      // user programs own 1-2 GiB (sys/process.h)
 #define HEAP_MAX       (1024ULL * 1024 * 1024)
 #define HEAP_FALLBACK  (1024 * 1024)      // no memory map: assume 1 MiB at 4 MiB
@@ -141,6 +144,7 @@ void kernel_main() {
     }
     boot_info.uefi = mb2_booted_from_uefi();
     acpi_save_rsdp();
+    efi_save_boot_info();                     // the firmware's runtime services (boot menu, reset)
     int no_smp = mb2_cmdline_has("nosmp");    // the `nosmp` boot option (read now, for the same reason)
     // The memory map is in the multiboot info, which the heap may overwrite.
     int mem_regions = memory_init();
@@ -152,6 +156,7 @@ void kernel_main() {
     // bottom of the heap region and start the heap after it.
     uint64_t rd_start = 0, rd_end = 0, rd_span = 0;
     int have_rd = mem_regions > 0 && mb2_get_module("ramdisk", &rd_start, &rd_end) == 0;
+    if (mem_regions > 0) install_save_boot_info();         // the installer's files (USB stick boot)
     int rd_copy = have_rd && rd_start < HEAP_LOW;
     if (have_rd) {
         memory_reserve(rd_start, rd_end);
@@ -202,8 +207,10 @@ void kernel_main() {
     paging_init((uint64_t)kernel_start, (uint64_t)kernel_end, heap_start, heap_size);
     heap_init(heap_start, heap_size);
     if (mem_regions > 0) {
-        print_boot_status(BOOT_OK, "Memory", "%u MiB RAM, %u MiB kernel heap",
-                          (uint32_t)(get_total_memory() >> 20), (uint32_t)(heap_size >> 20));
+        physmem_init(heap_start, heap_start + heap_size);   // the rest of RAM, for programs
+        print_boot_status(BOOT_OK, "Memory", "%u MiB RAM: %u MiB kernel heap, %u MiB for programs",
+                          (uint32_t)(get_total_memory() >> 20), (uint32_t)(heap_size >> 20),
+                          (uint32_t)(physmem_total() >> 20));
         kprintf("Heap at %u MiB\n", (uint32_t)(heap_start >> 20));
         if (!memory_range_usable(0x100000, HEAP_LOW))
             kprintf("Note: RAM at 1-4 MiB (kernel, page tables) is not listed as usable\n");
@@ -259,6 +266,7 @@ void kernel_main() {
     mount_filesystem();
     fat32_change_directory("/");
     report_clock();
+    if (install_boot_description()[0]) print_boot_status(BOOT_OK, "Boot", "%s", install_boot_description());
 
     __asm__ volatile("sti");
 

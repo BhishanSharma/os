@@ -343,3 +343,10 @@ int fat32_list_directory_ex(const char *path, fat32_file_info_t *files, uint32_t
 int fat32_list_directory(fat32_file_info_t *files, uint32_t max_files) {
     return fat32_list_directory_ex(0, files, max_files);
 }
+
+const char *vfs_partition_mount(uint64_t start) {
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++)
+        if (mounts[i].used && mounts[i].vol.dev.kind == DISK_NVME && mounts[i].vol.dev.part_start == start)
+            return mounts[i].path;
+    return 0;
+}

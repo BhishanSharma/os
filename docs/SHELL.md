@@ -112,6 +112,8 @@ disk the accounts last until reboot.
 | `reboot`                   | Reset the machine                                        |
 | `shutdown`                 | Switch the computer off (ACPI); the power button does the same |
 | `battery`                  | Battery charge, health, rate and time left; the charger  |
+| `install`                  | (root) Put Terminal OS on this PC's SSD (started from the USB stick): pick a partition, it adds "Terminal OS" to the boot menu |
+| `bootmenu`                 | The PC's boot menu entries (UEFI), and which one started this time |
 
 ### Network
 | Command                    | Description                                              |

@@ -13,6 +13,8 @@
 #include "net/net.h"
 #include "sys/users.h"
 #include "drivers/power.h"
+#include "drivers/physmem.h"
+#include "sys/install.h"
 
 boot_info_t boot_info;
 
@@ -145,11 +147,17 @@ void statusbar_update(int force) {
     char ip[24], up[24], left[160], right[72], battery[32];
     format_ip(ip, sizeof(ip));
     format_uptime(up, sizeof(up));
-    uint64_t used = heap_get_used();
-    uint32_t total = (uint32_t)(heap_get_total() >> 20);
-    k_snprintf(left, sizeof(left), " %s %s" SEP "%s" SEP "%s" SEP "RAM %u.%u/%u MiB" SEP "%s" SEP "up %s",
-               OS_NAME, OS_VERSION, user_current()->name, ip, (uint32_t)(used >> 20), (uint32_t)((used & 0xFFFFF) * 10 >> 20),
-               total, vfs_root_name(), up);
+    /* All of RAM: the kernel heap plus the pages programs get (drivers/physmem.h). */
+    uint64_t used = heap_get_used() + physmem_used(), all = heap_get_total() + physmem_total();
+    char ram[32];
+    if (all >= (2ULL << 30))
+        k_snprintf(ram, sizeof(ram), "RAM %u.%u/%u.%u GiB", (uint32_t)(used >> 30), (uint32_t)((used & 0x3FFFFFFF) * 10 >> 30),
+                   (uint32_t)(all >> 30), (uint32_t)((all & 0x3FFFFFFF) * 10 >> 30));
+    else
+        k_snprintf(ram, sizeof(ram), "RAM %u.%u/%u MiB", (uint32_t)(used >> 20), (uint32_t)((used & 0xFFFFF) * 10 >> 20),
+                   (uint32_t)(all >> 20));
+    k_snprintf(left, sizeof(left), " %s %s" SEP "%s" SEP "%s" SEP "%s" SEP "%s" SEP "up %s",
+               OS_NAME, OS_VERSION, user_current()->name, ip, ram, vfs_root_name(), up);
 
     power_battery_text(battery, sizeof(battery));
     if (battery[0]) {
@@ -189,13 +197,15 @@ void sysinfo_print(void) {
 
     info_line("OS", "%s %s x86_64", OS_NAME, OS_VERSION);
     info_line("Kernel", "built %s %s", __DATE__, __TIME__);
-    info_line("Boot", "%s, GRUB 2 (multiboot2)", boot_info.uefi ? "UEFI" : "BIOS");
+    info_line("Boot", "%s, %s", boot_info.uefi ? "UEFI" : "BIOS",
+              install_own_loader() ? "Terminal OS's own loader (TERMOS.EFI)" : "GRUB 2");
     format_uptime(buf, sizeof(buf));
     info_line("Uptime", "%s", buf);
     info_line("CPU", "%s", sysinfo_cpu_name());
-    info_line("Memory", "%u MiB RAM, heap %u / %u MiB used",
+    info_line("Memory", "%u MiB RAM: kernel heap %u / %u MiB, programs %u / %u MiB",
               (uint32_t)(get_total_memory() >> 20), (uint32_t)(heap_get_used() >> 20),
-              (uint32_t)(heap_get_total() >> 20));
+              (uint32_t)(heap_get_total() >> 20), (uint32_t)(physmem_used() >> 20),
+              (uint32_t)(physmem_total() >> 20));
     if (boot_info.fb_width)
         info_line("Display", "%ux%u, %u bpp, %ux%u text", boot_info.fb_width, boot_info.fb_height,
                   boot_info.fb_bpp, (uint32_t)print_get_cols(), (uint32_t)print_get_rows() + 1);

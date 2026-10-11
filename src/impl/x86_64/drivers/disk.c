@@ -85,6 +85,7 @@ int disk_open_nvme_partition(uint64_t start, uint64_t sectors, int writable, int
     p->writable = writable;
     memset(out, 0, sizeof(*out));
     out->kind = DISK_NVME;
+    out->part_start = start;
     out->read = nvme_part_read;
     out->write = nvme_part_write;
     out->ctx = p;

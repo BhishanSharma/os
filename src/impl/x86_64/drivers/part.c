@@ -28,8 +28,17 @@ static void set_label(partition_t *p, const uint8_t *name) {
 static void probe_fat32(sector_reader_t rd, partition_t *p, uint8_t *buf) {
     p->fat32 = 0;
     p->label[0] = 0;
-    if (rd(p->start, 1, buf) != 0 || buf[510] != 0x55 || buf[511] != 0xAA) return;
+    p->fs = "unknown";
+    if (rd(p->start, 1, buf) != 0) return;
+    int zero = 1;
+    for (int i = 0; i < 512; i++) zero &= buf[i] == 0;
+    if (zero) p->fs = "empty";                              /* never formatted ("RAW" in Windows) */
+    else if (!memcmp(buf + 3, "NTFS    ", 8)) p->fs = "NTFS";
+    else if (!memcmp(buf + 3, "EXFAT   ", 8)) p->fs = "exFAT";
+    else if (!memcmp(buf + 3, "-FVE-FS-", 8)) p->fs = "BitLocker";
+    if (buf[510] != 0x55 || buf[511] != 0xAA) return;
     if (memcmp(buf + 82, "FAT32   ", 8) != 0) return;
+    p->fs = "FAT32";
     p->fat32 = 1;
     set_label(p, buf + 71);
 
@@ -71,6 +80,7 @@ int part_scan(sector_reader_t rd, partition_t *out, int max) {
             if (!type || type == 0x05 || type == 0x0F) continue;   /* empty, extended */
             partition_t *p = &out[n++];
             memset(p, 0, sizeof(*p));
+            p->number = i + 1;
             p->start = le32(e + 8);
             p->sectors = le32(e + 12);
             p->kind = type == 0x07 ? "NTFS / exFAT" : (type == 0x0B || type == 0x0C) ? "FAT32" :
@@ -100,6 +110,9 @@ int part_scan(sector_reader_t rd, partition_t *out, int max) {
         if (empty) continue;
         partition_t *p = &out[n++];
         memset(p, 0, sizeof(*p));
+        p->number = (int)i + 1;
+        p->gpt = 1;
+        memcpy(p->guid, e + 16, 16);
         p->start = le64(e + 32);
         p->sectors = le64(e + 40) - p->start + 1;
         for (int k = 0; k < 36; k++) {                      /* UTF-16 name: keep ASCII */
@@ -114,4 +127,11 @@ int part_scan(sector_reader_t rd, partition_t *out, int max) {
     }
     kfree(buf);
     return n;
+}
+
+int part_is_protected(const partition_t *p) {
+    if (!p->kind || !strcmp(p->kind, "EFI system") || !strcmp(p->kind, "Microsoft reserved") ||
+        !strcmp(p->kind, "Windows recovery"))
+        return 1;
+    return !p->fs || !strcmp(p->fs, "NTFS") || !strcmp(p->fs, "exFAT") || !strcmp(p->fs, "BitLocker");
 }

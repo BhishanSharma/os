@@ -10,6 +10,10 @@
 
 typedef struct {
     uint64_t start, sectors;          /* in 512-byte sectors */
+    int number;                       /* its number in the table (GPT entry or MBR slot), from 1 */
+    int gpt;                          /* from a GPT (else MBR) */
+    uint8_t guid[16];                 /* GPT: the partition's own GUID, as stored */
+    const char *fs;                   /* "FAT32", "NTFS", "exFAT", "BitLocker", "empty", "unknown" */
     char name[40];                    /* GPT name ("Basic data partition"), or "" */
     char label[12];                   /* FAT32 volume label, or "" */
     int fat32;                        /* holds a FAT32 file system */
@@ -23,5 +27,10 @@ typedef int (*sector_reader_t)(uint64_t lba, uint32_t count, void *buf);
 int part_scan(sector_reader_t rd, partition_t *out, int max);
 
 #define OUR_LABEL "TERMINALOS"
+
+/* Is this a partition Windows (or the firmware) needs: the EFI system
+ * partition, Microsoft reserved, Windows recovery, or one holding NTFS,
+ * exFAT or BitLocker? Terminal OS never writes to those. */
+int part_is_protected(const partition_t *p);
 
 #endif

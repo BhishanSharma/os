@@ -14,6 +14,7 @@ typedef struct {
     uint64_t sectors;
     int writable;
     disk_kind_t kind;
+    uint64_t part_start;                 /* NVMe partitions: the first sector on the drive */
     char name[40];                       /* "RAM disk", "NVMe partition 3" */
 } blockdev_t;
 

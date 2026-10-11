@@ -43,6 +43,11 @@ typedef struct {
 
 int fatvol_open(fatvol_t *v, const blockdev_t *dev);     /* 0 if `dev` holds FAT32 */
 
+/* Make an empty FAT32 file system on all of `dev` (at least 33 MiB), with
+ * this volume label. `hidden` is where the partition starts on the drive.
+ * Everything on it is lost. 0 on success. */
+int fatvol_format(const blockdev_t *dev, uint64_t hidden, const char *label);
+
 /* Can a file be called this? (Long names: printable ASCII, no \ / : * ? " < > |) */
 int fatvol_valid_name(const char *name);
 

@@ -103,3 +103,26 @@ int mb2_cmdline_has(const char *word) {
     }
     return 0;
 }
+
+int mb2_cmdline_value(const char *key, char *out, int size) {
+    const uint8_t *tag = find_tag(1);
+    if (!tag || size < 1) return -1;
+    const char *p = (const char *)(tag + 8);
+    size_t n = strlen(key);
+    while (*p) {
+        while (*p == ' ') p++;
+        if (!strncmp(p, key, n) && p[n] == '=') {
+            p += n + 1;
+            int i = 0;
+            while (*p && *p != ' ' && i < size - 1) out[i++] = *p++;
+            out[i] = 0;
+            return 0;
+        }
+        while (*p && *p != ' ') p++;
+    }
+    return -1;
+}
+
+const uint8_t *mb2_get_tag(uint32_t type) {
+    return find_tag(type);
+}

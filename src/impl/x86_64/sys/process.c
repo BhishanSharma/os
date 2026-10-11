@@ -17,6 +17,7 @@
 #include "drivers/paging.h"
 #include "drivers/memory.h"
 #include "drivers/heap.h"
+#include "drivers/physmem.h"
 #include "drivers/fat32.h"
 #include "net/tcp.h"
 #include "net/net.h"
@@ -98,18 +99,21 @@ static int takes_ctrl_c(task_t *t) {
 static int map_user_range(uint64_t root, uint64_t lo, uint64_t hi) {
     for (uint64_t v = PAGE_DOWN(lo); v < hi; v += PAGE_SIZE) {
         if (paging_get_user_entry(root, v) & PAGE_PRESENT) continue;
-        void *frame = alloc_frame();
-        if (!frame) return -1;
-        memset(frame, 0, PAGE_SIZE);
-        if (paging_map_user(root, v, (uint64_t)frame) != 0) {
-            free_frame(frame);
+        /* A page from all of RAM (drivers/physmem.h), or from the heap. */
+        uint64_t phys = page_alloc();
+        if (!phys) phys = (uint64_t)alloc_frame();
+        if (!phys) return -1;
+        memset(page_address(phys), 0, PAGE_SIZE);
+        if (paging_map_user(root, v, phys) != 0) {
+            if (page_owned(phys)) page_free(phys);
+            else free_frame((void *)phys);
             return -1;
         }
     }
     return 0;
 }
 
-/* Copy into another address space through the pages' identity mapping. */
+/* Copy into another address space through the kernel's mapping of its pages. */
 static void copy_to_space(uint64_t root, uint64_t vaddr, const void *src, uint64_t len) {
     const uint8_t *s = src;
     while (len) {
@@ -117,7 +121,7 @@ static void copy_to_space(uint64_t root, uint64_t vaddr, const void *src, uint64
         uint64_t n = PAGE_SIZE - page_off;
         if (n > len) n = len;
         uint64_t phys = paging_get_user_entry(root, vaddr) & ~0xFFFULL;
-        memcpy((void *)(phys + page_off), s, n);
+        memcpy((uint8_t *)page_address(phys) + page_off, s, n);
         vaddr += n;
         s += n;
         len -= n;

@@ -33,4 +33,10 @@ const void *mb2_get_rsdp(void);
 /* A word on the kernel command line (grub.cfg: multiboot2 /boot/kernel.bin nosmp). */
 int mb2_cmdline_has(const char *word);
 
+/* The value of `key=value` on the command line (copied into out); 0 if found. */
+int mb2_cmdline_value(const char *key, char *out, int size);
+
+/* A tag of this type, or 0 (its 8-byte header first). */
+const uint8_t *mb2_get_tag(uint32_t type);
+
 #endif

@@ -43,4 +43,7 @@ int vfs_read_sectors(uint64_t lba, uint32_t count, void *buf);
 /* "no such file", "names are 8.3", ... for a negative result. */
 const char *vfs_error(int code);
 
+/* Where the NVMe partition starting at `start` is mounted, or 0. */
+const char *vfs_partition_mount(uint64_t start);
+
 #endif

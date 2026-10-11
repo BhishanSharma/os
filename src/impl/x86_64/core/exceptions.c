@@ -103,7 +103,7 @@ static int in_guard_page(uint64_t addr) {
 // The identity-mapped kernel area; only dereference stack words inside it so
 // that the panic code itself can never fault.
 static int stack_readable(uint64_t addr) {
-    return addr >= (uint64_t)kernel_start && addr + 8 <= 0x400000 && (addr & 7) == 0
+    return addr >= (uint64_t)kernel_start && addr + 8 <= 0x600000 && (addr & 7) == 0
         && !in_guard_page(addr);
 }
 

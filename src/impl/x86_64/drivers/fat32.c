@@ -664,3 +664,101 @@ int fatvol_delete(fatvol_t *v, fatent_t *f) {
     f->e.name[0] = 0xE5;
     return entry_store(v, f);
 }
+
+/* ---- Formatting ----------------------------------------------------------------- */
+
+/* Cluster size by volume size, as Windows chooses it for FAT32. */
+static uint32_t format_cluster_sectors(uint64_t sectors) {
+    if (sectors <= 532480) return 1;                        /* up to 260 MiB: 512 bytes */
+    if (sectors <= 16777216) return 8;                      /* 8 GiB: 4 KiB */
+    if (sectors <= 33554432) return 16;                     /* 16 GiB: 8 KiB */
+    if (sectors <= 67108864) return 32;                     /* 32 GiB: 16 KiB */
+    return 64;                                              /* 32 KiB */
+}
+
+static void put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+static void put32(uint8_t *p, uint32_t v) { put16(p, (uint16_t)v); put16(p + 2, (uint16_t)(v >> 16)); }
+
+int fatvol_format(const blockdev_t *dev, uint64_t hidden, const char *label) {
+    if (!dev->writable) return FATV_READ_ONLY;
+    uint64_t total = dev->sectors;
+    if (total < 67584 || total > 0xFFFFFFFFull) return FATV_BAD_NAME;   /* 33 MiB .. 2 TiB */
+    uint32_t spc = format_cluster_sectors(total), reserved = 32, fats = 2;
+    /* The FAT size, as the FAT specification computes it. */
+    uint64_t tmp1 = total - reserved, tmp2 = (256ull * spc + fats) / 2;
+    uint32_t fat_size = (uint32_t)((tmp1 + tmp2 - 1) / tmp2);
+    uint32_t data_start = reserved + fats * fat_size;
+    uint32_t clusters = (uint32_t)((total - data_start) / spc);
+    if (clusters < 65525) return FATV_BAD_NAME;            /* too small to be FAT32 */
+
+    enum { CHUNK = 64 };                                    /* sectors written at a time */
+    uint8_t *buf = kmalloc(CHUNK * 512);
+    if (!buf) return FATV_IO;
+    int r = 0;
+    memset(buf, 0, CHUNK * 512);
+    /* Wipe the reserved area, both FATs and the root folder's cluster, the
+     * boot sector last of all (so a half-done format is not a file system). */
+    uint64_t wipe_end = data_start + spc;
+    for (uint64_t s = 1; s < wipe_end && !r; s += CHUNK) {
+        uint32_t n = (uint32_t)(wipe_end - s < CHUNK ? wipe_end - s : CHUNK);
+        r = dev->write(dev->ctx, s, n, buf);
+    }
+    /* FAT[0] = media, FAT[1] = end marker, FAT[2] = the root folder (one cluster). */
+    for (uint32_t f = 0; f < fats && !r; f++) {
+        memset(buf, 0, 512);
+        put32(buf, 0x0FFFFFF8u);
+        put32(buf + 4, 0x0FFFFFFFu);
+        put32(buf + 8, 0x0FFFFFFFu);
+        r = dev->write(dev->ctx, reserved + f * fat_size, 1, buf);
+    }
+    /* The root folder: just the volume label. */
+    char name[11];
+    memset(name, ' ', 11);
+    for (int i = 0; i < 11 && label[i]; i++) name[i] = upper(label[i]);
+    if (!r) {
+        memset(buf, 0, 512);
+        memcpy(buf, name, 11);
+        buf[11] = FAT_ATTR_VOLUME_ID;
+        r = dev->write(dev->ctx, data_start, 1, buf);
+    }
+    /* FSInfo (sector 1, backup 7): free count unknown. */
+    if (!r) {
+        memset(buf, 0, 512);
+        put32(buf, 0x41615252u);
+        put32(buf + 484, 0x61417272u);
+        put32(buf + 488, 0xFFFFFFFFu);
+        put32(buf + 492, 0xFFFFFFFFu);
+        put32(buf + 508, 0xAA550000u);
+        r = dev->write(dev->ctx, 1, 1, buf);
+        if (!r) r = dev->write(dev->ctx, 7, 1, buf);
+    }
+    /* The boot sector (backup at 6, then the real one). */
+    if (!r) {
+        memset(buf, 0, 512);
+        buf[0] = 0xEB; buf[1] = 0x58; buf[2] = 0x90;
+        memcpy(buf + 3, "TERMOS  ", 8);
+        put16(buf + 11, 512);
+        buf[13] = (uint8_t)spc;
+        put16(buf + 14, (uint16_t)reserved);
+        buf[16] = (uint8_t)fats;
+        buf[21] = 0xF8;                                     /* fixed disk */
+        put16(buf + 24, 63);
+        put16(buf + 26, 255);
+        put32(buf + 28, (uint32_t)hidden);
+        put32(buf + 32, (uint32_t)total);
+        put32(buf + 36, fat_size);
+        put32(buf + 44, 2);                                 /* root folder cluster */
+        put16(buf + 48, 1);                                 /* FSInfo */
+        put16(buf + 50, 6);                                 /* backup boot sector */
+        buf[64] = 0x80;
+        buf[66] = 0x29;
+        put32(buf + 67, (uint32_t)(hidden * 2654435761u) ^ 0x7E57u);   /* volume serial number */
+        memcpy(buf + 71, name, 11);
+        memcpy(buf + 82, "FAT32   ", 8);
+        buf[510] = 0x55; buf[511] = 0xAA;
+        r = dev->write(dev->ctx, 6, 1, buf);
+        if (!r) r = dev->write(dev->ctx, 0, 1, buf);
+    }
+    kfree(buf);
+    return r ? FATV_IO : 0;
+}

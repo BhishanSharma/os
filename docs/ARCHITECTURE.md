@@ -70,15 +70,15 @@ BIOS or UEFI -> GRUB -> loads /boot/kernel.bin at 1 MiB (Multiboot2, header.asm)
 | ------------------------ | ----------------------------------------------------------- |
 | `0x000B8000`             | VGA text buffer                                             |
 | `0x00100000`-`kernel_end` | Kernel image (text/rodata/data/bss, 32 KiB boot stack with a guard page below it); `kernel_end` comes from `linker.ld`, currently about `0x126000` |
-| `0x00200000`-`0x00400000`| Page-table pool for `paging_init()` (`PAGE_TABLE_AREA`..`PAGE_TABLE_END`) |
+| `0x00400000`-`0x00600000`| Page-table pool for `paging_init()` (`PAGE_TABLE_AREA`..`PAGE_TABLE_END`) |
 | start of the heap region | RAM disk: GRUB loads `ramdisk.img.gz` (unpacked) wherever it likes; `kernel_main()` keeps the heap out of that range (`memory_reserve`), copies the image to the bottom of the chosen region and starts the heap at the next 2 MiB boundary |
-| largest RAM region in 4 MiB-4 GiB | Kernel heap (`kmalloc`), 2 MiB aligned, at most 1 GiB, mapped with 2 MiB pages; falls back to 1 MiB at `0x400000` without a memory map |
+| largest RAM region in 6 MiB-1 GiB | Kernel heap (`kmalloc`), 2 MiB aligned, at most 1 GiB, mapped with 2 MiB pages; falls back to 1 MiB at `0x600000` without a memory map |
 
 The kernel image is mapped from the linker-provided `kernel_start`/`kernel_end`, so it can grow
-freely up to the page-table pool at `0x200000`. `linker.ld` has an `ASSERT` that fails the link if
+freely up to the page-table pool at `0x400000`. `linker.ld` has an `ASSERT` that fails the link if
 the image would reach it; `make size` prints the headroom. The heap stays below 4 GiB because the
 NIC drivers hand `kmalloc` buffers to the card for DMA with 32-bit addresses. If the kernel ever
-needs more than 1 MiB, move the pool (`PAGE_TABLE_AREA`/`PAGE_TABLE_END` in `paging.c`) and
+needs more than 3 MiB, move the pool (`PAGE_TABLE_AREA`/`PAGE_TABLE_END` in `paging.c`) and
 `HEAP_LOW` in `kernel_main()`, then raise `KERNEL_LIMIT` in `linker.ld`.
 
 ## Interrupts

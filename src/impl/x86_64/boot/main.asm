@@ -78,6 +78,52 @@ enable_paging:
 
     ret
 
+; ---- From Terminal OS's UEFI loader (loader/main.c) ------------------------
+; Already in long mode, on the loader's identity page tables, interrupts off;
+; edi = the multiboot2 information (below 4 GiB). Same state as after
+; enable_paging + lgdt above, then on to the same 64-bit start.
+    bits 64
+global start64
+start64:
+    cli
+    mov rsp, stack_top
+    mov [multiboot_info], edi
+
+    ; The same identity map of the first 4 GiB as setup_page_tables.
+    mov rax, page_table_l3
+    or rax, 0b11
+    mov [page_table_l4], rax
+    xor ecx, ecx
+.l3:
+    mov rax, rcx
+    shl rax, 12
+    add rax, page_table_l2
+    or rax, 0b11
+    mov [page_table_l3 + rcx * 8], rax
+    inc ecx
+    cmp ecx, 4
+    jne .l3
+    xor ecx, ecx
+.l2:
+    mov rax, rcx
+    shl rax, 21
+    or rax, 0b10000011
+    mov [page_table_l2 + rcx * 8], rax
+    inc ecx
+    cmp ecx, 2048
+    jne .l2
+    mov rax, page_table_l4
+    mov cr3, rax
+
+    lgdt [gdt64.pointer]
+    push gdt64.code_segment
+    lea rax, [rel .reload]
+    push rax
+    retfq
+.reload:
+    jmp long_mode_start
+
+    bits 32
 error:
     mov dword [0xb8000], 0x4f524f45
     mov dword [0xb8004], 0x4f3a4f52

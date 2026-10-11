@@ -22,3 +22,10 @@ header_start:
     dw 0
     dd 8
 header_end:
+
+    ; Terminal OS's own UEFI loader (loader/) finds the 64-bit entry here: it
+    ; starts the kernel in long mode instead of 32-bit protected mode.
+    extern start64
+    align 8
+    db "TERMOS64"
+    dq start64

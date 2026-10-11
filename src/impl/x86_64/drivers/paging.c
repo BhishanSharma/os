@@ -1,4 +1,5 @@
 #include "drivers/paging.h"
+#include "drivers/physmem.h"
 #include "drivers/memory.h"
 #include "core/exceptions.h"
 #include <stdint.h>
@@ -10,13 +11,13 @@ extern char stack_guard[];   // boot stack guard page (main.asm): must stay unma
 static page_entry_t* pml4;
 
 // Page tables come from a fixed pool between the kernel image (ends below
-// 0x200000, see linker.ld) and the heap (starts at or above 0x400000).
-#define PAGE_TABLE_AREA 0x200000
-#define PAGE_TABLE_END  0x400000
+// 0x400000, see linker.ld) and the heap (starts at or above 0x600000).
+#define PAGE_TABLE_AREA 0x400000
+#define PAGE_TABLE_END  0x600000
 static uint64_t next_table = PAGE_TABLE_AREA;
 
 /* Extra physical ranges (e.g. the framebuffer) to identity-map in paging_init. */
-#define MAX_EXTRA_REGIONS 4
+#define MAX_EXTRA_REGIONS 16
 static struct { uint64_t base, size; } extra_regions[MAX_EXTRA_REGIONS];
 static int extra_count;
 
@@ -301,7 +302,11 @@ void paging_free_address_space(uint64_t root) {
             if (!(pd[i] & PAGE_PRESENT)) continue;
             page_entry_t *pt = (page_entry_t *)(pd[i] & ~0xFFFULL);
             for (int j = 0; j < 512; j++)
-                if (pt[j] & PAGE_PRESENT) free_frame((void *)(pt[j] & ~0xFFFULL));
+                if (pt[j] & PAGE_PRESENT) {
+                    uint64_t phys = pt[j] & ~0xFFFULL;
+                    if (page_owned(phys)) page_free(phys);       /* all of RAM (physmem.c) */
+                    else free_frame((void *)phys);               /* the heap */
+                }
             free_frame(pt);
         }
         free_frame(pd);
@@ -314,4 +319,74 @@ void paging_switch(uint64_t root) {
     uint64_t current;
     asm volatile("mov %%cr3, %0" : "=r"(current));
     if (current != root) asm volatile("mov %0, %%cr3" :: "r"(root) : "memory");
+}
+
+/* ---- An address space for the firmware ----------------------------------------- */
+
+/* Tables made for it (the rest are the kernel's, shared, and are copied
+ * before anything is added to them). */
+static uint64_t *own_tables[128];
+static int own_count;
+
+static int owned(uint64_t *t) {
+    for (int i = 0; i < own_count; i++)
+        if (own_tables[i] == t) return 1;
+    return 0;
+}
+
+/* The table that entry `e` points to, ours to change (copied if shared). */
+static uint64_t *own_table(uint64_t *e) {
+    uint64_t *t = (uint64_t *)(*e & ~0xFFFULL & 0x000FFFFFFFFFFFFFULL);
+    if ((*e & PAGE_PRESENT) && owned(t)) return t;
+    if (own_count == 128) return 0;
+    uint64_t *copy = new_table();
+    if (!copy) return 0;
+    if (*e & PAGE_PRESENT)
+        for (int i = 0; i < 512; i++) copy[i] = t[i];
+    own_tables[own_count++] = copy;
+    *e = (uint64_t)copy | PAGE_PRESENT | PAGE_RW;
+    return copy;
+}
+
+uint64_t paging_create_identity_space(const paging_range_t *ranges, int count) {
+    own_count = 0;
+    uint64_t root_entry = 0;
+    uint64_t *root = own_table(&root_entry);              /* a copy of nothing: all zero */
+    if (!root) return 0;
+    for (int i = 0; i < 512; i++) root[i] = pml4[i];
+    uint64_t *pdpt = own_table(&root[0]);                 /* the first 512 GiB, copied */
+    if (!pdpt) return 0;
+    const uint64_t cache_off = 0x18;                      /* PCD | PWT */
+    for (int r = 0; r < count; r++) {
+        uint64_t start = ranges[r].start & ~0xFFFULL;
+        uint64_t end = (ranges[r].start + ranges[r].size + 0xFFF) & ~0xFFFULL;
+        uint64_t flags = PAGE_PRESENT | PAGE_RW | (ranges[r].uncached ? cache_off : 0);
+        for (uint64_t a = start; a < end && a < (512ULL << 30); ) {
+            uint64_t *pdpte = &pdpt[(a >> 30) & 0x1FF];
+            if ((*pdpte & PAGE_PRESENT) && (*pdpte & PAGE_SIZE_2MB)) {     /* a 1 GiB page: there already */
+                a = ((a >> 30) + 1) << 30;
+                continue;
+            }
+            uint64_t *pd = own_table(pdpte);
+            if (!pd) return 0;
+            uint64_t *pde = &pd[(a >> 21) & 0x1FF];
+            uint64_t big = a & ~(LARGE_PAGE - 1);
+            if (!(*pde & PAGE_PRESENT)) {                 /* nothing here: one 2 MiB page */
+                *pde = big | flags | PAGE_SIZE_2MB;
+                a = big + LARGE_PAGE;
+                continue;
+            }
+            if (*pde & PAGE_SIZE_2MB) {                   /* the kernel maps it already (identity) */
+                a = big + LARGE_PAGE;
+                continue;
+            }
+            uint64_t *pt = own_table(pde);                /* 4 KiB pages: fill in the gaps */
+            if (!pt) return 0;
+            for (; a < end && a < big + LARGE_PAGE; a += PAGE_SIZE) {
+                uint64_t *pte = &pt[(a >> 12) & 0x1FF];
+                if (!(*pte & PAGE_PRESENT)) *pte = a | flags;
+            }
+        }
+    }
+    return (uint64_t)root;
 }

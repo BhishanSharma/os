@@ -3,6 +3,7 @@
 #define MEMORY_H
 
 #include <stdint.h>
+#include "core/multiboot2.h"
 
 #define PAGE_SIZE 4096  // 4 KB
 
@@ -23,6 +24,9 @@ int memory_pick_heap(uint64_t low, uint64_t high, uint64_t max_size,
                      uint64_t* start, uint64_t* size);
 
 uint64_t get_total_memory();   // usable RAM in bytes, from the memory map
+
+/* The usable regions, minus what memory_reserve() took out. Returns how many. */
+int memory_get_regions(mb2_region_t *out, int max);
 
 /* One 4 KiB page from the heap (the `alloc` debug command). */
 void* alloc_frame();

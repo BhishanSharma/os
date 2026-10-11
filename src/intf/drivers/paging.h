@@ -43,4 +43,10 @@ uint64_t paging_get_user_entry(uint64_t root, uint64_t virt);       /* 0 if unma
 void paging_free_address_space(uint64_t root);       /* also frees every mapped page */
 void paging_switch(uint64_t root);                   /* load CR3 */
 
+/* An address space for calling the firmware (drivers/efi.c): the kernel's
+ * mappings plus identity mappings of these physical ranges (below 512 GiB).
+ * The kernel's own tables are not changed. 0 if out of memory. */
+typedef struct { uint64_t start, size; int uncached; } paging_range_t;
+uint64_t paging_create_identity_space(const paging_range_t *ranges, int count);
+
 #endif

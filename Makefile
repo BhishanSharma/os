@@ -15,6 +15,8 @@ CXX   := $(CROSS)g++
 LD    := $(CROSS)ld
 NASM  ?= nasm
 QEMU  ?= qemu-system-x86_64
+# UEFI firmware for QEMU (`make run`); on Linux e.g. /usr/share/OVMF/OVMF_CODE.fd
+OVMF  ?= C:/Program Files/qemu/share/edk2-x86_64-code.fd
 
 # ---- Layout ---------------------------------------------------------------
 SRC_KERNEL := src/impl/kernel
@@ -36,6 +38,11 @@ ISO_STAGE  := $(BUILD)/iso
 
 KERNEL_BIN := $(DIST)/kernel.bin
 KERNEL_ISO := $(DIST)/kernel.iso
+
+# Terminal OS's own UEFI boot loader (loader/), and the USB stick image.
+LOADER_EFI := $(BUILD)/loader/TERMOS.EFI
+USB_IMG    := $(DIST)/terminalos.img
+LOADER_CC  := x86_64-w64-mingw32-gcc
 
 DISK_IMG   ?= disk.img
 
@@ -136,13 +143,13 @@ uacpi_obj := $(patsubst $(UACPI_DIR)/source/%.c,$(BUILD)/uacpi/%.o,$(uacpi_c))
 
 objects := $(kernel_obj) $(x86_c_obj) $(x86_cpp_obj) $(x86_asm_obj) $(uacpi_obj)
 
-# The kernel image starts at 1 MiB and must end before the heap at 2 MiB.
+# The kernel image starts at 1 MiB and must end before the page-table pool at 4 MiB.
 KERNEL_BASE  := 1048576
-KERNEL_LIMIT := 2097152
+KERNEL_LIMIT := 4194304
 
 # ---- Targets --------------------------------------------------------------
 
-.PHONY: all build-x86_64 iso run run-nodisk debug disk size clean help test-net user
+.PHONY: all build-x86_64 iso usb run run-iso run-nodisk debug disk size clean help test-net user
 
 .DEFAULT_GOAL := help
 
@@ -155,9 +162,9 @@ help: ## Show this help
 
 all: build-x86_64 ## Alias for build-x86_64
 
-build-x86_64: $(KERNEL_ISO) size ## Build dist/x86_64/kernel.iso (run inside Docker)
+build-x86_64: $(USB_IMG) size ## Build dist/x86_64/terminalos.img, the USB stick (run inside Docker)
 
-iso: build-x86_64 ## Alias for build-x86_64
+iso: $(KERNEL_ISO) ## Legacy: a GRUB ISO (BIOS + UEFI), for virtual machines without UEFI
 
 
 # ---- C sources ------------------------------------------------------------
@@ -258,6 +265,23 @@ $(KERNEL_ISO): $(KERNEL_BIN) $(RAMDISK_GZ) $(ISO_SRC)/boot/grub/grub.cfg
 	grub-mkrescue -o $@ $(ISO_STAGE)   # BIOS + UEFI (all installed GRUB platforms)
 
 
+# ---- The boot loader and the USB stick image ------------------------------------
+#
+# The loader is a UEFI program (PE/COFF), so MinGW builds it, not the ELF
+# cross compiler. terminalos.img is what goes on a USB stick (written raw).
+
+$(LOADER_EFI): $(wildcard loader/*.c loader/*.h)
+	@mkdir -p $(dir $@)
+	$(LOADER_CC) -std=gnu11 -O2 -ffreestanding -fno-stack-protector -fno-stack-check -mno-stack-arg-probe \
+	    -mno-red-zone -mgeneral-regs-only -fshort-wchar -Wall -Wextra -nostdlib \
+	    -Wl,--subsystem,10 -Wl,-e,efi_main -o $@ loader/main.c loader/inflate.c
+
+$(USB_IMG): $(LOADER_EFI) $(KERNEL_BIN) $(RAMDISK_GZ) scripts/mkusbimg.sh
+	@mkdir -p $(dir $@)
+	sh scripts/mkusbimg.sh $@ $(LOADER_EFI) $(KERNEL_BIN) $(RAMDISK_GZ)
+
+usb: $(USB_IMG) ## Build dist/x86_64/terminalos.img (the USB stick)
+
 # ---- Size -----------------------------------------------------------------
 
 size: $(KERNEL_BIN) ## Print kernel size and remaining headroom below the heap
@@ -275,9 +299,19 @@ disk: ## Create a 32 MB FAT32 test disk (needs dosfstools + mtools)
 	sh scripts/mkdisk.sh $(DISK_IMG)
 
 
-run: ## Boot the ISO in QEMU with disk + NIC (host-side; build first)
+run: ## Boot the USB stick image in QEMU (UEFI, host-side; build first)
+	@test -f $(USB_IMG) || { \
+		echo "No $(USB_IMG): run 'make build-x86_64' (in Docker) first"; \
+		exit 1; \
+	}
+	$(QEMU) -cpu max -m 1G -drive if=pflash,format=raw,readonly=on,file="$(OVMF)" \
+	    -drive if=virtio,file=$(USB_IMG),format=raw,snapshot=on \
+	    -device rtl8139,netdev=n0 -netdev user,id=n0 -serial stdio
+
+
+run-iso: ## Legacy: boot the GRUB ISO with disk + NIC (host-side; `make iso` first)
 	@test -f $(KERNEL_ISO) || { \
-		echo "No $(KERNEL_ISO): run 'make build-x86_64' (in Docker) first"; \
+		echo "No $(KERNEL_ISO): run 'make iso' (in Docker) first"; \
 		exit 1; \
 	}
 	$(QEMU) -cpu max -m 512M -cdrom $(KERNEL_ISO) \
@@ -285,9 +319,9 @@ run: ## Boot the ISO in QEMU with disk + NIC (host-side; build first)
 	    -device rtl8139,netdev=n0 -netdev user,id=n0 -serial stdio
 
 
-run-nodisk: ## Boot the ISO in QEMU without a disk (host-side)
+run-nodisk: ## Legacy: boot the GRUB ISO without a disk (host-side)
 	@test -f $(KERNEL_ISO) || { \
-		echo "No $(KERNEL_ISO): run 'make build-x86_64' (in Docker) first"; \
+		echo "No $(KERNEL_ISO): run 'make iso' (in Docker) first"; \
 		exit 1; \
 	}
 	$(QEMU) -cpu max -m 512M -cdrom $(KERNEL_ISO) -boot d -serial stdio
@@ -295,7 +329,7 @@ run-nodisk: ## Boot the ISO in QEMU without a disk (host-side)
 
 debug: ## Boot paused with a gdb server on :1234
 	@test -f $(KERNEL_ISO) || { \
-		echo "No $(KERNEL_ISO): run 'make DEBUG=1 build-x86_64' (in Docker) first"; \
+		echo "No $(KERNEL_ISO): run 'make DEBUG=1 iso' (in Docker) first"; \
 		exit 1; \
 	}
 	$(QEMU) -cpu max -m 512M -cdrom $(KERNEL_ISO) \

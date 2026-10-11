@@ -85,3 +85,10 @@ void* alloc_frame() {
 void free_frame(void* frame) {
     if (frame) kfree(((void**)frame)[-1]);
 }
+
+int memory_get_regions(mb2_region_t *out, int max) {
+    int n = 0;
+    for (int i = 0; i < region_count && n < max; i++)
+        if (regions[i].length) out[n++] = regions[i];
+    return n;
+}

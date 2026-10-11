@@ -1,7 +1,7 @@
 # Terminal OS
 
 A tiny hobby operating system for x86_64, written from scratch in C and NASM.
-It boots with GRUB, drops into 64-bit long mode and gives you a text-mode shell
+It boots with its own UEFI loader, runs in 64-bit long mode and gives you a text-mode shell
 with a FAT32 filesystem, a line editor, a simple script runner and an
 RTL8139 network-card driver.
 
@@ -27,24 +27,24 @@ test disk and launching QEMU:
 .\build.ps1
 ```
 
-The ISO ends up at `dist/x86_64/kernel.iso`.
+The USB stick image ends up at `dist/x86_64/terminalos.img` (`make iso` still builds the old GRUB ISO, for virtual machines without UEFI).
 
 ## What works
 
 | Area           | Status                                                                           |
 | -------------- | -------------------------------------------------------------------------------- |
-| Boot           | GRUB (Multiboot2) -> 32-bit stub -> long mode -> `kernel_main`                   |
+| Boot           | Its own UEFI loader (`loader/`, TERMOS.EFI): reads the kernel and the gzipped RAM disk, keeps the firmware's screen mode, leaves the firmware and starts the kernel in long mode with Multiboot2-style boot information. `install` puts it on the SSD and adds "Terminal OS" to the firmware's boot menu (F12) through UEFI runtime services; press S at boot for one CPU core |
 | Display        | Framebuffer console (BIOS and UEFI) or VGA text, boot screen, status bar, 8 themes, scrollback; output mirrored to COM1; `resolution`/`font`, follows the VirtualBox window |
 | Mouse          | PS/2 mouse with wheel (and VirtualBox mouse integration): pointer, wheel scrolls the output, drag to select, Ctrl+C copies the selection, Ctrl+V pastes; programs read it with `getmouse` (try `paint`) |
 | Exceptions     | Handlers for CPU vectors 0-31, panic screen with register dump, stack guard page  |
 | Input          | PS/2 keyboard and mouse; USB keyboards and mice (xHCI driver); I2C laptop touchpads (HID over I2C, Precision Touchpad gestures: tap to click, two-finger scroll, press-and-drag to select); command history, arrow keys |
 | Real hardware  | Boots from a USB stick on UEFI laptops: falls back to the local APIC timer when the PIT gives no interrupts, reads the hardware clock as local time (as Windows keeps it), assigns PCI addresses the firmware left out, reads ACPI tables |
-| Memory         | Paging, heap sized from the bootloader memory map (`kmalloc`/`kfree`)            |
-| CPU cores      | SMP: the other cores are started from the ACPI MADT (INIT-SIPI-SIPI, a real-mode trampoline at 0x8000) and run user programs in parallel; the kernel runs under one big lock, released while it waits. `cpus` shows them; the GRUB entry "one CPU core" (`nosmp`) keeps one |
+| Memory         | Paging; a kernel heap (`kmalloc`, up to 1 GiB, identity mapped for device DMA) and every other page of RAM for programs, reached through a direct map at 2 TiB, so all of the RAM is used |
+| CPU cores      | SMP: the other cores are started from the ACPI MADT (INIT-SIPI-SIPI, a real-mode trampoline at 0x8000) and run user programs in parallel; the kernel runs under one big lock, released while it waits. `cpus` shows them; safe mode (S at boot, `nosmp`) keeps one |
 | Power          | ACPI through [uACPI](https://github.com/uACPI/uACPI) (MIT, vendored in `third_party/uacpi`), which runs the firmware's AML: `shutdown` and the power button switch off (S5); the battery (charge, health, time left) and charger are read through the embedded controller, shown in the status bar and by `battery`. ACPI events are polled from the idle loop |
 | Interrupts     | 8259 PIC for legacy devices, plus PCI MSI / MSI-X through the local APIC for USB (xHCI), NVMe and Intel Wi-Fi (`interrupts` counts them); the timer polls stay as a backstop |
 | User space     | Programs run in ring 3, each with its own address space; preemptive multitasking with background jobs (`&`, `jobs`, `ps`, `fg`, `kill`); system calls (`int 0x80`) including `spawn`/`wait`, a small C library; the shell itself is a user program started at login; faults, Ctrl+C and `kill` end only the program. See [docs/USERSPACE.md](docs/USERSPACE.md) |
-| Storage        | NVMe SSDs (polled or MSI-X, GPT/MBR partitions), ATA PIO, and the RAM disk loaded by GRUB. A VFS with mounts and real paths (`/A/B/C.TXT`, `..`, across mounts); FAT32 read/write with long file names (VFAT, up to 255 characters, case kept, Windows-compatible `~1` aliases). On a laptop, a FAT32 partition labelled TERMINALOS (made in Windows) becomes `/` and keeps files, accounts and Wi-Fi settings across reboots; every other partition is read-only |
+| Storage        | NVMe SSDs (polled or MSI-X, GPT/MBR partitions), ATA PIO, and the RAM disk loaded at boot. A VFS with mounts and real paths (`/A/B/C.TXT`, `..`, across mounts); FAT32 read/write with long file names (VFAT, up to 255 characters, case kept, Windows-compatible `~1` aliases). On a laptop, a FAT32 partition labelled TERMINALOS (made in Windows) becomes `/` and keeps files, accounts and Wi-Fi settings across reboots; every other partition is read-only |
 | Users          | Login prompt, root and normal accounts (`useradd`, `passwd`, `su`), salted password hashes, users may only change files in their home folder |
 | Shell          | ~30 commands (files, memory, disk, themes), see [docs/SHELL.md](docs/SHELL.md)   |
 | Editor         | Line-based text editor (`edit <file>`)                                           |
@@ -72,7 +72,7 @@ See [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) for the honest list of rough ed
 
 ```text
 make help            list every target
-make build-x86_64    build the ISO            (inside Docker)
+make build-x86_64    build the USB image      (inside Docker)
 make DEBUG=1 ...     build with debug symbols
 make disk            create disk.img          (host: needs dosfstools + mtools)
 make run             boot in QEMU             (host)
@@ -100,9 +100,14 @@ size (what Guest Additions do) and switches the screen mode, so a bigger window 
 columns (View > Auto-resize Guest Display must be on; give the VM 64 MB of video memory). Under QEMU
 or anywhere else, `resolution 1280x800` changes the mode by hand and `font 1`..`font 4` the text size.
 
-To try a real UEFI PC: write `dist\x86_64\kernel.iso` to a USB stick in DD/raw mode (e.g. Rufus
-"DD Image"), turn off Secure Boot (GRUB here is unsigned) and boot from USB. Laptops
-with NVMe/SATA-AHCI storage have no IDE disk, so the files are on the RAM disk.
+To try a real UEFI PC: write `dist\x86_64\terminalos.img` to a USB stick in DD/raw mode (e.g. Rufus
+"DD Image"), turn off Secure Boot (the loader is unsigned) and boot from USB (F12 on Acer
+laptops). To keep it: run `install` (as root). It lists the SSD's partitions and installs on
+one you pick: a FAT32 partition labelled TERMINALOS (your files on it are kept) or an empty,
+never-formatted one (it formats it). Windows' partitions are never offered. It then adds
+"Terminal OS" to the end of the PC's boot menu, so Windows stays the default; `bootmenu`
+lists the entries. Make the partition in Windows' Disk Management first (Shrink C:, New
+Simple Volume).
 
 ---
 
