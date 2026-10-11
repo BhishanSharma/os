@@ -4,6 +4,7 @@
 #include "drivers/paging.h"
 #include "drivers/heap.h"
 #include "drivers/igfx.h"
+#include "sys/task.h"
 #include "lib/string.h"
 
 #define GLYPH_W 8
@@ -390,12 +391,26 @@ static void copy_rect(uint8_t *dst, const rect_t *r) {
     }
 }
 
-/* -> 0: shown at the next refresh (or nothing to do); -1: the last frame is
- * not on the screen yet, call again. */
+static volatile int flip_waiting;
+
+/* From the 1 kHz timer: the last flip reached the screen. */
+void fbcon_flip_poll(void) {
+    if (flip_waiting && igfx_flip_done()) {
+        flip_waiting = 0;
+        task_wakeup((const void *)&flip_waiting);
+    }
+}
+
+/* -> 1: queued for the next refresh, after waiting for the frame before to
+ * be shown (this paces the desktop at the screen's rate); 0: nothing to do
+ * (no page flipping). */
 int fbcon_present(void) {
     if (!flip_on) return 0;
     if (!now_n && !last_n) return 0;
-    if (!igfx_flip_done()) return -1;
+    for (int tries = 0; !igfx_flip_done() && tries < 5; tries++) {
+        flip_waiting = 1;
+        task_block((const void *)&flip_waiting, 20);
+    }
     int target = !front;
     uint8_t *dst = target ? (uint8_t *)igfx_back_buffer() : fb_base;
     for (int i = 0; i < now_n; i++) copy_rect(dst, &now_rects[i]);
@@ -405,5 +420,5 @@ int fbcon_present(void) {
     memcpy(last_rects, now_rects, sizeof(rect_t) * (size_t)now_n);
     last_n = now_n;
     now_n = 0;
-    return 0;
+    return 1;
 }

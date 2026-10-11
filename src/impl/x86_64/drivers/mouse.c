@@ -382,6 +382,7 @@ static void take_packets(void) {
 /* The timer's 1 kHz path, while the desktop shows the kernel's pointer: the
  * pointer moves the moment a report comes, not when a program next asks. */
 static void mouse_fast(void) {
+    fbcon_flip_poll();                                         /* a frame reached the screen */
     if (!fbcon_cursor_active() || moving) return;
     moving = 1;
     if (touchpad_fast()) touchpad_poll();

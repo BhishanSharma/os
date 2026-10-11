@@ -149,17 +149,31 @@ def check(cond, what, output=""):
         raise TestError(what + ("\n" + tail(output) if output else ""))
 
 
+def text_login_prompt(m, timeout=60):
+    """The graphical login comes up: ask for the text login (as on a Mac,
+    the user name >console), and wait for its prompt."""
+    seen = m.expect(r"loginwindow: ready|login: ", timeout)
+    if seen.group(0).startswith("loginwindow"):
+        time.sleep(0.5)
+        m.type(">console")
+        m.expect(r"login: ", 30)
+
+
 def login(m, timeout=120):
     """From power-on to the shell prompt as root (creating the accounts on a
     first start)."""
-    first = m.expect(r"New password: |login: ", timeout)
+    first = m.expect(r"New password: |login: |loginwindow: ready", timeout)
     if first.group(0).startswith("New"):
         m.type(PASSWORD)
         m.expect(r"Retype new password: ")
         m.type(PASSWORD)
         m.expect(r"User name: ")
         m.type("")                              # no everyday account
-        m.expect(r"login: ")
+        text_login_prompt(m)
+    elif first.group(0).startswith("loginwindow"):
+        time.sleep(0.5)
+        m.type(">console")
+        m.expect(r"login: ", 30)
     m.type("root")
     m.expect(r"Password: ")
     m.type(PASSWORD)
@@ -178,7 +192,7 @@ def login_user(m, name, password, timeout=120):
     m.type(password)
     m.expect(r"Retype new password: ")
     m.type(password)
-    m.expect(r"login: ", 60)
+    text_login_prompt(m)
     m.type(name)
     m.expect(r"Password: ")
     m.type(password)
@@ -475,8 +489,40 @@ def test_desktop():
         m.stop()
 
 
+def test_gui():
+    """The graphical login: an everyday user logs in, gets the desktop, logs out."""
+    m = Machine("gui", usb_stick())
+    try:
+        m.expect(r"New password: ", 120)
+        m.type(PASSWORD)
+        m.expect(r"Retype new password: ")
+        m.type(PASSWORD)
+        m.expect(r"User name: ")
+        m.type("anna")
+        m.expect(r"New password: ")
+        m.type("pw1")
+        m.expect(r"Retype new password: ")
+        m.type("pw1")
+        m.expect(r"loginwindow: ready", 60)
+        time.sleep(1)
+        m.type("anna")
+        m.type("wrong")
+        time.sleep(0.5)
+        check("anna logged in" not in m.text(), "a wrong password was accepted")
+        m.type("pw1")
+        m.expect(r"loginwindow: anna logged in", 20)
+        m.expect(r"windowserver: \d+x\d+", 30)
+        time.sleep(2)
+        m.screenshot("gui")
+        m.keys("ctrl-q")                             # Log Out: a fresh login screen
+        start = len(m.text())
+        m.expect(r"loginwindow: ready", 30, since=start)
+    finally:
+        m.stop()
+
+
 TESTS = [("boot", test_boot), ("files", test_files), ("fault", test_fault), ("panic", test_panic),
-         ("kernel", test_kernel), ("desktop", test_desktop), ("user", test_user), ("video", test_nvme_video), ("install", test_install), ("network", test_network),
+         ("kernel", test_kernel), ("desktop", test_desktop), ("gui", test_gui), ("user", test_user), ("video", test_nvme_video), ("install", test_install), ("network", test_network),
          ("bios", test_legacy_bios)]
 NEEDS_INTERNET = {"network"}
 

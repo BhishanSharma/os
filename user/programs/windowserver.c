@@ -27,16 +27,16 @@ typedef struct {
 } window_t;
 
 typedef struct {
-    const char *name, *program, *glyph;
+    const char *name, *program, *glyph, *icon;
     unsigned color;
     int pid;
     int size;                          /* now, in pixels (it grows under the pointer) */
 } dock_app_t;
 
 static dock_app_t apps[] = {
-    { "Terminal", "terminal", ">_", 0x30323A, 0, 0 },
-    { "Files", "finder", "F", 0x2F7BF5, 0, 0 },
-    { "About", "about", "i", 0x8E8E93, 0, 0 },
+    { "Terminal", "terminal", ">_", "terminal", 0x30323A, 0, 0 },
+    { "Files", "finder", "F", "folder", 0x2F7BF5, 0, 0 },
+    { "About", "about", "i", "computer", 0x8E8E93, 0, 0 },
 };
 #define DOCK_APPS ((int)(sizeof(apps) / sizeof(apps[0])))
 
@@ -57,7 +57,7 @@ static char clock_text[24];
 static int menu_open, menu_hot = -1;
 static int unpresented;                          /* blitted, not yet shown (page flipping) */
 
-static const char *menu_items[] = { "About Terminal OS", "New Terminal", "Files", "Quit desktop" };
+static const char *menu_items[] = { "About Terminal OS", "New Terminal", "Files", "Log Out" };
 #define MENU_ITEMS 4
 
 /* ---- Damage: a short list of rectangles, merged when they overlap -------- */
@@ -433,13 +433,15 @@ static void draw_dock(void) {
     int hot = dock_hit(mouse_x, mouse_y);
     for (int i = 0; i < DOCK_APPS; i++) {
         int size = apps[i].size, ix = icon_x(i), iy = dock_bottom() - pad() - size, r = size * 22 / 100;
-        ui_shadow(&scr, ix, iy + size / 30, size, size, r, size / 12 + 1, 70);
-        ui_round(&scr, ix, iy, size, size, r, apps[i].color);
-        int ts = size / 22;
-        if (ts < 1) ts = 1;
-        if (ts > 4) ts = 4;
-        int gw = ui_text_style_width(apps[i].glyph, ts, UI_BOLD);
-        ui_text_bold(&scr, ix + (size - gw) / 2, iy + (size - 16 * ts) / 2, apps[i].glyph, 0xFFFFFF, ts);
+        if (ui_icon(&scr, ix, iy, size, apps[i].icon, 255) != 0) {   /* no icon file: a drawn one */
+            ui_shadow(&scr, ix, iy + size / 30, size, size, r, size / 12 + 1, 70);
+            ui_round(&scr, ix, iy, size, size, r, apps[i].color);
+            int ts = size / 22;
+            if (ts < 1) ts = 1;
+            if (ts > 4) ts = 4;
+            int gw = ui_text_style_width(apps[i].glyph, ts, UI_BOLD);
+            ui_text_bold(&scr, ix + (size - gw) / 2, iy + (size - 16 * ts) / 2, apps[i].glyph, 0xFFFFFF, ts);
+        }
         if (apps[i].pid > 0) ui_circle(&scr, ix + size / 2, dock_bottom() - pad() / 2 + S, 2 * S, 0x3A3A3E);
         if (i == hot && !menu_open) {                          /* the name, above the icon */
             int lw = ui_text_width(apps[i].name, S) + 20 * S, lh = 24 * S;
@@ -462,7 +464,8 @@ static void draw_menu(void) {
     }
 }
 
-static void compose(void) {
+/* -> 1 if the frame was paced by the screen (page flipping): no sleep then. */
+static int compose(void) {
     window_t *f = front();
     for (int d = 0; d < ndmg; d++) {
         int x0 = dmg[d].x0, y0 = dmg[d].y0, x1 = dmg[d].x1, y1 = dmg[d].y1;
@@ -480,7 +483,12 @@ static void compose(void) {
     }
     if (ndmg) unpresented = 1;
     ndmg = 0;
-    if (unpresented && gfx_present() == 0) unpresented = 0;   /* tear-free on Intel graphics */
+    int paced = 0;
+    if (unpresented) {
+        paced = gfx_present() > 0;                    /* tear-free on Intel graphics */
+        unpresented = 0;
+    }
+    return paced;
 }
 
 /* ---- Input --------------------------------------------------------------- */
@@ -719,8 +727,8 @@ int main(int argc, char **argv) {
             last_tidy = uptime_ms();
             tidy();
         }
-        compose();
+        int paced = compose();
         mutex_unlock(&lock);
-        sleep_ms(5);
+        if (!paced) sleep_ms(5);                      /* else the screen's refresh set the pace */
     }
 }

@@ -10,10 +10,20 @@
 static ui_window win;
 static struct os_dirent entries[MAX_ENTRIES];
 static char names[MAX_ENTRIES][64];
-static const char *items[MAX_ENTRIES];
+static const char *items[MAX_ENTRIES], *kinds[MAX_ENTRIES];
 static int count, selected = -1, first;
 static char cwd[256];
 static int S, LIST_Y, BAR_H;
+
+static int has_ending(const char *name, const char *end);
+
+static const char *kind_of(const char *name) {
+    if (has_ending(name, ".PNG") || has_ending(name, ".BMP") || has_ending(name, ".PPM") || has_ending(name, ".JPG"))
+        return "picture";
+    if (has_ending(name, ".MPG") || has_ending(name, ".MPEG")) return "video";
+    if (has_ending(name, ".ELF")) return "terminal";
+    return "file";
+}
 
 static void load(void) {
     getcwd(cwd, sizeof(cwd));
@@ -23,6 +33,7 @@ static void load(void) {
         snprintf(names[k], sizeof(names[k]), "%s%s", entries[i].name, entries[i].is_dir ? "/" : "");
         if (k != i) entries[k] = entries[i];
         items[k] = names[k];
+        kinds[k] = entries[k].is_dir ? "folder" : kind_of(entries[k].name);
         k++;
     }
     count = k;
@@ -37,7 +48,7 @@ static void draw(void) {
     ui_button(c, 8 * S, 6 * S, 56 * S, BAR_H - 12 * S, "Up", S, 0);
     ui_text(c, 76 * S, (BAR_H - 16 * S) / 2, cwd, UI_DIM, S);
     ui_fill(c, 0, BAR_H - 1, c->w, 1, UI_BORDER);
-    ui_list(c, 0, LIST_Y, c->w, c->h - LIST_Y, items, count, selected, first, S);
+    ui_list_icons(c, 0, LIST_Y, c->w, c->h - LIST_Y, items, kinds, count, selected, first, S);
     if (!count) ui_text(c, 12 * S, LIST_Y + 8 * S, "(empty)", UI_DIM, S);
     ui_present(&win);
 }

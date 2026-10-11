@@ -3,7 +3,8 @@
 //
 // Services come from LAUNCHD.CFG in the system folder (/SYS, or / on the RAM
 // disk), one per line:   name  program [arguments]  [console|keepalive|once]
-//   console    owns the keyboard and screen (login); restarted when it ends
+//   console    owns the keyboard and screen (loginwindow, the graphical login,
+//              which is the text `login` without graphics); restarted when it ends
 //   keepalive  restarted whenever it ends (a crash too)
 //   once       started at boot, left alone
 #include <stdio.h>
@@ -24,7 +25,7 @@ static service_t services[MAX_SERVICES];
 static int count;
 
 static const char *defaults =
-    "login login console\n"
+    "loginwindow loginwindow console\n"
     "echod echod keepalive\n";
 
 static void parse(const char *text) {

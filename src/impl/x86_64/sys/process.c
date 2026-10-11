@@ -1551,7 +1551,7 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
         }
         case GFX_PRESENT:
             if (graphics_owner != me) return SYSERR_PERM;
-            return fbcon_present() == 0 ? 0 : SYSERR_AGAIN;
+            return fbcon_present();
         case GFX_END:
             if (graphics_owner != me) return SYSERR_PERM;
             graphics_owner = 0;

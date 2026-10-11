@@ -60,11 +60,18 @@ int ui_char(ui_canvas *c, int x, int y, unsigned char ch, unsigned color, int sc
 #define UI_CHAR_W(scale) (8 * (scale))
 #define UI_CHAR_H(scale) (16 * (scale))
 
+/* Icons from ICONS.BIN (folder, file, info, picture, video, gear, computer,
+ * user, terminal), smoothly scaled to `size`; alpha fades. -> -1 if none. */
+int ui_icon(ui_canvas *c, int x, int y, int size, const char *name, int alpha);
+int ui_has_icon(const char *name);
+
 /* Widgets: drawn on request, hit-tested with ui_inside. */
 void ui_button(ui_canvas *c, int x, int y, int w, int h, const char *label, int scale, int pressed);
 void ui_textfield(ui_canvas *c, int x, int y, int w, int h, const char *text, int scale, int focused);
 void ui_list(ui_canvas *c, int x, int y, int w, int h, const char *const *items, int count,
              int selected, int first, int scale);
+void ui_list_icons(ui_canvas *c, int x, int y, int w, int h, const char *const *items,
+                   const char *const *icon_names, int count, int selected, int first, int scale);
 int ui_list_rows(int h, int scale);          /* how many rows fit */
 int ui_list_hit(int y, int scale);           /* row (from the list's top) under y */
 static inline int ui_inside(int px, int py, int x, int y, int w, int h) {

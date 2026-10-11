@@ -19,8 +19,10 @@ int main(void) {
     printf("about: OK button at %d,%d\n", w.x + bx + bw / 2, w.y + by + bh / 2);
     for (;;) {
         ui_fill(&w.c, 0, 0, w.c.w, w.c.h, UI_WINDOW);
-        ui_circle(&w.c, 50 * S, 54 * S, 30 * S, UI_ACCENT);
-        ui_text(&w.c, 50 * S - 8 * S, 54 * S - 16 * S, "i", UI_WHITE, 2 * S);
+        if (ui_icon(&w.c, 14 * S, 18 * S, 72 * S, "computer", 255) != 0) {
+            ui_circle(&w.c, 50 * S, 54 * S, 30 * S, UI_ACCENT);
+            ui_text(&w.c, 50 * S - 8 * S, 54 * S - 16 * S, "i", UI_WHITE, 2 * S);
+        }
         ui_text(&w.c, 100 * S, 26 * S, u.sysname, UI_TEXT, S);
         snprintf(line, sizeof(line), "Version %s", u.release);
         ui_text(&w.c, 100 * S, 48 * S, line, UI_DIM, S);

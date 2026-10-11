@@ -31,6 +31,15 @@ anti-aliased pointer, the whole screen (no kernel status bar), damage as a
 list of rectangles, the framebuffer mapped write-combining (PAT), and apps
 woken by a futex in the shared surface instead of polling.
 
+Graphics and a graphical system (after that): the loader picks the screen's
+native mode (EDID); on Intel Gen12/13 graphics (`igfx.c`) the pointer is the
+hardware cursor and frames are page-flipped at the screen's refresh, which
+also paces the desktop; a 1 kHz timer path moves the pointer with
+acceleration; icons are Microsoft's Fluent UI Emoji (MIT, `ICONS.BIN` from
+`scripts/gen-icons.py`). The console service is `loginwindow`, a graphical
+login that starts the desktop as the user; Log Out returns to it, and the
+user name `>console` gives the text login (the tests use it).
+
 Each stage below is the *lean* version: the smallest design that gives the
 macOS-style structure, with the cuts written down. One stage per working
 session; it ends with `make test` + `make test-os` green, a USB stick, one

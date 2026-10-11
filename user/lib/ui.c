@@ -257,21 +257,27 @@ typedef struct __attribute__((packed)) {
 static const unsigned char *font;
 static int font_faces, font_tried;
 
-static void load_font(void) {
-    font_tried = 1;
-    const char *paths[] = { "/SYS/UIFONT.BIN", "/UIFONT.BIN" };
+/* A file of the system (RAM disk: /SYS when a disk is mounted at /), mapped
+ * read-only; 0 if missing or without the 4-byte `magic`. */
+static const unsigned char *system_file(const char *name, const char *magic) {
+    char path[64];
     for (int i = 0; i < 2; i++) {
+        snprintf(path, sizeof(path), "%s/%s", i ? "" : "/SYS", name);
         struct os_stat st;
-        if (stat(paths[i], &st) != 0 || st.size < 8) continue;
-        int fd = open(paths[i], OPEN_READ);
+        if (stat(path, &st) != 0 || st.size < 8) continue;
+        int fd = open(path, OPEN_READ);
         if (fd < 0) continue;
         const unsigned char *data = mmap(st.size, PROT_READ, fd);
         close(fd);
-        if (!data || memcmp(data, "UIF1", 4) != 0) continue;
-        font = data;
-        font_faces = *(const int *)(data + 4);
-        return;
+        if (data && memcmp(data, magic, 4) == 0) return data;
     }
+    return 0;
+}
+
+static void load_font(void) {
+    font_tried = 1;
+    font = system_file("UIFONT.BIN", "UIF1");
+    if (font) font_faces = *(const int *)(font + 4);
 }
 
 /* The face for `style` at `scale`, or the largest smaller one; 0: none. */
@@ -369,6 +375,87 @@ int ui_char(ui_canvas *c, int x, int y, unsigned char ch, unsigned color, int sc
     return 8 * scale;
 }
 
+/* ---- Icons (ICONS.BIN: scripts/gen-icons.py) ------------------------------ */
+
+typedef struct __attribute__((packed)) {
+    char name[16];
+    struct { unsigned int size, offset; } m[3];      /* 48, 96, 192 pixels */
+} icon_t;
+
+static const unsigned char *icons;
+static int icon_count, icons_tried;
+
+static const icon_t *find_icon(const char *name) {
+    if (!icons_tried) {
+        icons_tried = 1;
+        icons = system_file("ICONS.BIN", "ICN1");
+        if (icons) icon_count = *(const int *)(icons + 4);
+    }
+    for (int i = 0; icons && i < icon_count; i++) {
+        const icon_t *ic = (const icon_t *)(icons + 8 + i * sizeof(icon_t));
+        if (!strncmp(ic->name, name, 16)) return ic;
+    }
+    return 0;
+}
+
+int ui_has_icon(const char *name) { return find_icon(name) != 0; }
+
+/* Premultiplied 0xAARRGGBB of texel (x, y). */
+static inline unsigned texel(const unsigned *px, int s, int x, int y) {
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x >= s) x = s - 1;
+    if (y >= s) y = s - 1;
+    unsigned p = px[y * s + x], a = p >> 24;
+    return a << 24 | div255(((p >> 16) & 255) * a) << 16 | div255(((p >> 8) & 255) * a) << 8 | div255((p & 255) * a);
+}
+
+static inline unsigned lerp4(unsigned a, unsigned b, unsigned f) {   /* each byte, f of 256 */
+    unsigned r = 0;
+    for (int k = 0; k < 32; k += 8) {
+        unsigned x = (a >> k) & 255, y = (b >> k) & 255;
+        r |= ((x * (256 - f) + y * f) >> 8) << k;
+    }
+    return r;
+}
+
+/* The icon `name` in a size x size square at (x, y), smoothly scaled from
+ * the nearest stored size; alpha 0-255 fades it. -> 0, -1 if there is none. */
+int ui_icon(ui_canvas *c, int x, int y, int size, const char *name, int alpha) {
+    const icon_t *ic = find_icon(name);
+    if (!ic || size <= 0) return -1;
+    int k = 0;
+    while (k < 2 && (int)ic->m[k].size < size) k++;
+    int s = (int)ic->m[k].size;
+    const unsigned *px = (const unsigned *)(icons + ic->m[k].offset);
+    int y0 = y < c->cy0 ? c->cy0 : y, y1 = y + size > c->cy1 ? c->cy1 : y + size;
+    int x0 = x < c->cx0 ? c->cx0 : x, x1 = x + size > c->cx1 ? c->cx1 : x + size;
+    for (int py = y0; py < y1; py++) {
+        int v = ((2 * (py - y) + 1) * s * 128) / size - 128;  /* 1/256 texels */
+        int ty = v >> 8;
+        unsigned fy = (unsigned)(v & 255);
+        unsigned *row = c->px + (long)py * c->stride;
+        for (int ppx = x0; ppx < x1; ppx++) {
+            int u = ((2 * (ppx - x) + 1) * s * 128) / size - 128, tx = u >> 8;
+            unsigned fx = (unsigned)(u & 255);
+            unsigned top = lerp4(texel(px, s, tx, ty), texel(px, s, tx + 1, ty), fx);
+            unsigned bot = lerp4(texel(px, s, tx, ty + 1), texel(px, s, tx + 1, ty + 1), fx);
+            unsigned p = lerp4(top, bot, fy), a = p >> 24;
+            if (alpha < 255) {
+                p = lerp4(0, p, (unsigned)alpha);
+                a = p >> 24;
+            }
+            if (!a) continue;
+            unsigned d = row[ppx], na = 255 - a;           /* premultiplied over */
+            unsigned r = ((p >> 16) & 255) + div255(((d >> 16) & 255) * na);
+            unsigned g = ((p >> 8) & 255) + div255(((d >> 8) & 255) * na);
+            unsigned b = (p & 255) + div255((d & 255) * na);
+            row[ppx] = (r > 255 ? 255 : r) << 16 | (g > 255 ? 255 : g) << 8 | (b > 255 ? 255 : b);
+        }
+    }
+    return 0;
+}
+
 /* ---- Widgets ------------------------------------------------------------- */
 
 void ui_button(ui_canvas *c, int x, int y, int w, int h, const char *label, int scale, int pressed) {
@@ -396,16 +483,23 @@ static int row_height(int scale) { return 24 * scale; }
 int ui_list_rows(int h, int scale) { return h / row_height(scale); }
 int ui_list_hit(int y, int scale) { return y < 0 ? -1 : y / row_height(scale); }
 
-void ui_list(ui_canvas *c, int x, int y, int w, int h, const char *const *items, int count,
-             int selected, int first, int scale) {
+void ui_list_icons(ui_canvas *c, int x, int y, int w, int h, const char *const *items,
+                   const char *const *icon_names, int count, int selected, int first, int scale) {
     ui_fill(c, x, y, w, h, UI_WHITE);
-    int rows = ui_list_rows(h, scale), rh = row_height(scale);
+    int rows = ui_list_rows(h, scale), rh = row_height(scale), is = 18 * scale;
     for (int i = 0; i < rows && first + i < count; i++) {
-        int k = first + i, ry = y + i * rh;
+        int k = first + i, ry = y + i * rh, tx = x + 12 * scale;
         if (k == selected) ui_round(c, x + 4 * scale, ry + scale, w - 8 * scale, rh - 2 * scale, 5 * scale, UI_ACCENT);
         else if (k % 2) ui_fill(c, x, ry, w, rh, 0xF6F6F8);
-        ui_text(c, x + 12 * scale, ry + (rh - 16 * scale) / 2, items[k], k == selected ? UI_WHITE : UI_TEXT, scale);
+        if (icon_names && icon_names[k] && ui_icon(c, tx, ry + (rh - is) / 2, is, icon_names[k], 255) == 0)
+            tx += is + 8 * scale;
+        ui_text(c, tx, ry + (rh - 16 * scale) / 2, items[k], k == selected ? UI_WHITE : UI_TEXT, scale);
     }
+}
+
+void ui_list(ui_canvas *c, int x, int y, int w, int h, const char *const *items, int count,
+             int selected, int first, int scale) {
+    ui_list_icons(c, x, y, w, h, items, 0, count, selected, first, scale);
 }
 
 /* ---- Windows ------------------------------------------------------------- */

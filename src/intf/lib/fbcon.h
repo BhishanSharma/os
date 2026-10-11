@@ -43,8 +43,10 @@ int fbcon_cursor_set(const uint32_t *argb, int w, int h, int hx, int hy, int x, 
 void fbcon_cursor_move(int x, int y);
 int fbcon_cursor_active(void);
 /* Show what was blitted since the last call (page flipping on Intel
- * graphics): 0, or -1 while the last frame is not on the screen yet. */
+ * graphics), waiting for the frame before to be shown: 1, or 0 when there is
+ * no page flipping. */
 int fbcon_present(void);
+void fbcon_flip_poll(void);              /* from the 1 kHz timer */
 
 /* Draw one cell; `cursor` draws an underline cursor in it. */
 void fbcon_draw_cell(int col, int row, uint8_t ch, uint8_t attr, int cursor);
