@@ -34,9 +34,12 @@ typedef struct {
 } dock_app_t;
 
 static dock_app_t apps[] = {
-    { "Terminal", "terminal", ">_", "terminal", 0x30323A, 0, 0 },
     { "Files", "finder", "F", "folder", 0x2F7BF5, 0, 0 },
-    { "About", "about", "i", "computer", 0x8E8E93, 0, 0 },
+    { "Terminal", "terminal", ">_", "terminal", 0x30323A, 0, 0 },
+    { "TextEdit", "textedit", "T", "textedit", 0xF2F2F2, 0, 0 },
+    { "Paint", "paint", "P", "paint", 0xFF9500, 0, 0 },
+    { "Activity Monitor", "activity", "A", "activity", 0x34C759, 0, 0 },
+    { "System Settings", "settings", "S", "gear", 0x8E8E93, 0, 0 },
 };
 #define DOCK_APPS ((int)(sizeof(apps) / sizeof(apps[0])))
 
@@ -57,8 +60,13 @@ static char clock_text[24];
 static int menu_open, menu_hot = -1;
 static int unpresented;                          /* blitted, not yet shown (page flipping) */
 
-static const char *menu_items[] = { "About Terminal OS", "New Terminal", "Files", "Log Out" };
-#define MENU_ITEMS 4
+static const char *menu_items[] = { "About Terminal OS", "System Settings...", "Activity Monitor",
+                                     "New Terminal", "Restart", "Shut Down", "Log Out" };
+#define MENU_ITEMS 7
+
+/* The menu bar's right side: battery, Wi-Fi, sound (they open Settings). */
+static int bat = -1, wifi_on = -1, vol_level = -1;
+static int status_x[3];                           /* where each one starts */
 
 /* ---- Damage: a short list of rectangles, merged when they overlap -------- */
 
@@ -422,7 +430,33 @@ static void draw_menu_bar(void) {
     x += ui_text_bold(&scr, x, ty, "Terminal OS", UI_TEXT, S) + 24 * S;
     window_t *f = front();
     if (f) ui_text_bold(&scr, x, ty, f->title, UI_TEXT, S);
-    ui_text(&scr, W - 16 * S - ui_text_width(clock_text, S), ty, clock_text, UI_TEXT, S);
+    int rx = W - 16 * S - ui_text_width(clock_text, S);
+    ui_text(&scr, rx, ty, clock_text, UI_TEXT, S);
+    int is = 18 * S, iy = (MENU_H - is) / 2;
+    status_x[0] = status_x[1] = status_x[2] = 0;
+    rx -= 18 * S;
+    if (vol_level >= 0) {                              /* sound */
+        rx -= is;
+        status_x[2] = rx;
+        ui_icon(&scr, rx, iy, is, "sound", vol_level ? 255 : 90);
+        rx -= 12 * S;
+    }
+    if (wifi_on >= 0) {                                /* Wi-Fi: faded when not connected */
+        rx -= is;
+        status_x[1] = rx;
+        ui_icon(&scr, rx, iy, is, "wifi", wifi_on ? 255 : 80);
+        rx -= 12 * S;
+    }
+    if (bat >= 0) {                                    /* battery and percent */
+        char pct[8];
+        snprintf(pct, sizeof(pct), "%d%%", bat & 0xFF);
+        int pw = ui_text_width(pct, S);
+        rx -= pw;
+        ui_text(&scr, rx, ty, pct, UI_TEXT, S);
+        rx -= is + 4 * S;
+        status_x[0] = rx;
+        ui_icon(&scr, rx, iy, is, "battery", 255);
+    }
 }
 
 static void draw_dock(void) {
@@ -521,13 +555,22 @@ static void launch(int i) {
 
 static void quit(void);
 
+static void run(const char *program, const char *arg) {
+    char *argv[] = { (char *)program, (char *)arg, 0 };
+    spawn(program, argv, 0);
+}
+
 static void menu_choose(int i) {
-    if (i == 0) launch(2);
-    else if (i == 1) {
-        char *argv[] = { "terminal", 0 };
-        spawn("terminal", argv, 0);
-    } else if (i == 2) launch(1);
-    else if (i == 3) quit();
+    if (i == 0) run("about", 0);
+    else if (i == 1) run("settings", 0);
+    else if (i == 2) run("activity", 0);
+    else if (i == 3) run("terminal", 0);
+    else if (i == 4 || i == 5) {
+        for (int k = 0; k < MAX_WINDOWS; k++)         /* the programs end first (files saved) */
+            if (wins[k].used) sigsend(wins[k].pid, SIGTERM);
+        sleep_ms(300);
+        power(i == 4);
+    } else if (i == 6) quit();
 }
 
 static void press(void) {
@@ -539,6 +582,14 @@ static void press(void) {
         damage_menu();
         if (i >= 0) menu_choose(i);
         return;
+    }
+    if (mouse_y < MENU_H) {                            /* the status icons */
+        static const char *panes[] = { "battery", "wifi", "sound" };
+        for (int k = 0; k < 3; k++)
+            if (status_x[k] && mouse_x >= status_x[k] && mouse_x < status_x[k] + (k ? 26 : 70) * S) {
+                run("settings", panes[k]);
+                return;
+            }
     }
     if (ui_inside(mouse_x, mouse_y, 0, 0, menu_title_w(), MENU_H)) {
         menu_open = 1;
@@ -634,6 +685,19 @@ static void tidy(void) {
         if (wins[k].used && sigsend(wins[k].pid, 0) < 0) remove_window(k);
     static const char *months[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    static unsigned long last_status;
+    if (!last_status || uptime_ms() - last_status > 5000) {   /* battery, Wi-Fi, sound */
+        last_status = uptime_ms();
+        struct os_wifi w;
+        int b = battery(), wf = wifi_status(&w), v = volume(-1);
+        int nb = b < 0 ? -1 : b, nw = wf < 0 ? -1 : wf, nv = v < 0 ? -1 : v;
+        if (nb != bat || nw != wifi_on || nv != vol_level) {
+            bat = nb;
+            wifi_on = nw;
+            vol_level = nv;
+            damage_menu_bar();
+        }
+    }
     struct os_time t;
     char now[24];
     gettime(&t);
@@ -695,9 +759,12 @@ int main(int argc, char **argv) {
     mouse_x = W / 2;
     mouse_y = H / 2;
     thread_create(serve, &port);
-    for (int i = 1; i < argc; i++)
-        for (int k = 0; k < DOCK_APPS; k++)
-            if (!strcmp(argv[i], apps[k].program)) launch(k);
+    for (int i = 1; i < argc; i++) {                   /* apps to open: from the Dock, or any program */
+        int k = 0;
+        while (k < DOCK_APPS && strcmp(argv[i], apps[k].program)) k++;
+        if (k < DOCK_APPS) launch(k);
+        else run(argv[i], 0);
+    }
 
     unsigned long last_tidy = 0;
     damage(0, 0, W, H);

@@ -57,6 +57,9 @@ static plm_frame_t *latest;               /* the newest decoded frame, not shown
 static long frames_shown;
 static ui_window win;                     /* on the desktop: the picture goes in here */
 static int windowed;
+static int ctrl_h, vs = 1, paused, seek_permille = -1;   /* the window's control bar */
+#define KEY_SEEK 0x200
+static void fmt_time(char *buf, double t);
 
 static void on_video(plm_t *plm, plm_frame_t *frame, void *user) {
     latest = frame;                       /* shown after plm_decode: only the newest one */
@@ -85,12 +88,33 @@ static void clear_screen_area(void) {
 /* A thin bar under the picture (when there is room): how far it has played. */
 static void show_progress(double t, double duration) {
     int y = dy + dh + 4, w = gi.width - 40;
-    if (windowed) {                       /* along the window's bottom edge */
-        y = dh + 2;
-        w = dw;
-        int done = (int)(w * (t / duration));
-        ui_fill(&win.c, 0, y, w, 3, 0x303040);
-        ui_fill(&win.c, 0, y, done, 3, 0xE040C0);
+    if (windowed) {                       /* the control bar under the picture */
+        ui_canvas *c = &win.c;
+        int top = dh, mid = top + ctrl_h / 2, S = vs;
+        ui_fill(c, 0, top, dw, ctrl_h, 0x1C1C22);
+        ui_circle(c, 22 * S, mid, 14 * S, 0x3A3A44);   /* play / pause */
+        if (paused) {
+            for (int j = -7 * S; j <= 7 * S; j++) {   /* a triangle */
+                int len = (7 * S - (j < 0 ? -j : j)) * 12 / 7;
+                ui_fill(c, 18 * S, mid + j, len, 1, UI_WHITE);
+            }
+        } else {
+            ui_fill(c, 16 * S, mid - 7 * S, 4 * S, 14 * S, UI_WHITE);
+            ui_fill(c, 24 * S, mid - 7 * S, 4 * S, 14 * S, UI_WHITE);
+        }
+        char a[16], b[16], times[40];
+        fmt_time(a, t);
+        fmt_time(b, duration);
+        snprintf(times, sizeof(times), "%s / %s", a, b);
+        int tw = ui_text_width(times, S), tx = 46 * S, track = dw - tx - tw - 28 * S;
+        if (track > 20 * S) {
+            int done = duration > 0 ? (int)(track * (t / duration)) : 0;
+            if (done > track) done = track;
+            ui_round(c, tx, mid - 2 * S, track, 4 * S, 2 * S, 0x4A4A56);
+            ui_round(c, tx, mid - 2 * S, done, 4 * S, 2 * S, UI_ACCENT);
+            ui_circle(c, tx + done, mid, 6 * S, UI_WHITE);
+        }
+        ui_text(c, dw - tw - 12 * S, mid - 8 * S, times, 0xD8D8E0, S);
         ui_present(&win);
         return;
     }
@@ -134,13 +158,23 @@ static void on_audio(plm_t *plm, plm_samples_t *samples, void *user) {
     if (n) sound_write(out, n);           /* waits while the stream's buffer is full */
 }
 
-/* The next key, 0 if none; closing the window is 'q'. */
+/* The next key, 0 if none; closing the window is 'q'. In the window, the
+ * play button is Space and a click on the bar is KEY_SEEK (seek_permille). */
 static int next_key(void) {
     if (!windowed) return getkey();
     struct ws_event e;
     while (ui_poll(&win, &e)) {
         if (e.type == WS_EV_CLOSE) return 'q';
         if (e.type == WS_EV_KEY) return e.key;
+        if (e.type == WS_EV_DOWN && e.y >= dh) {
+            if (e.x < 40 * vs) return ' ';
+            int tx = 46 * vs, track = dw - tx - 120 * vs;
+            if (track > 0 && e.x >= tx && e.x < tx + track) {
+                seek_permille = (e.x - tx) * 1000 / track;
+                return KEY_SEEK;
+            }
+        }
+        if (e.type == WS_EV_DOWN && e.y < dh) return ' ';   /* a click on the picture */
     }
     return 0;
 }
@@ -222,8 +256,10 @@ int main(int argc, char **argv) {
     frame_rgb = malloc((size_t)vw * vh * 4);
     if (windowed) {
         const char *name = strrchr(argv[1], '/') ? strrchr(argv[1], '/') + 1 : argv[1];
-        if (ui_open(&win, name, dw, dh + 6) == 0) {
-            ui_fill(&win.c, 0, 0, dw, dh + 6, 0);
+        vs = ui_scale();
+        ctrl_h = 44 * vs;
+        if (ui_open(&win, name, dw, dh + ctrl_h) == 0) {
+            ui_fill(&win.c, 0, 0, dw, dh + ctrl_h, 0);
             scaled = win.c.px;
         } else {
             windowed = 0;                 /* full screen after all */
@@ -241,13 +277,19 @@ int main(int argc, char **argv) {
         gfx_begin();
         clear_screen_area();
     }
-    int paused = 0, quit = 0;
+    int quit = 0;
     unsigned long last = uptime_ms(), last_bar = 0;
     while (!quit && !plm_has_ended(plm)) {
         int key;
         while ((key = next_key()) != 0) {
             if (key == 'q' || key == 'Q' || key == 27) quit = 1;
-            else if (key == ' ') paused = !paused;
+            else if (key == ' ') {
+                paused = !paused;
+                last_bar = 0;
+            } else if (key == KEY_SEEK && duration > 0) {
+                plm_seek(plm, duration * seek_permille / 1000.0, FALSE);
+                last_bar = 0;
+            }
             else if (key == KEYCODE_LEFT || key == KEYCODE_RIGHT) {
                 double t = plm_get_time(plm) + (key == KEYCODE_RIGHT ? SEEK_STEP : -SEEK_STEP);
                 if (t < 0) t = 0;

@@ -74,9 +74,9 @@ static void open_entry(int k) {
     snprintf(path, sizeof(path), "%s%s%s", cwd, cwd[strlen(cwd) - 1] == '/' ? "" : "/", entries[k].name);
     int picture = has_ending(path, ".BMP") || has_ending(path, ".PNG") || has_ending(path, ".PPM");
     int movie = has_ending(path, ".MPG") || has_ending(path, ".MPEG");
-    char *argv[] = { picture ? "view" : movie ? "video" : "terminal", path, 0 };
-    char *text[] = { "terminal", "cat", path, 0 };
-    spawn(argv[0], picture || movie ? argv : text, 0);
+    int program = has_ending(path, ".ELF");
+    char *argv[] = { picture ? "view" : movie ? "video" : program ? "terminal" : "textedit", path, 0 };
+    spawn(argv[0], argv, 0);
 }
 
 int main(void) {
