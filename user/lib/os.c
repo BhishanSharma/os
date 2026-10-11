@@ -11,6 +11,11 @@ long read(int fd, void *buf, size_t len)        { return os_syscall(SYS_READ, fd
 int open(const char *path, int mode)            { return (int)os_syscall(SYS_OPEN, (long)path, mode, 0); }
 int close(int fd)                               { return (int)os_syscall(SYS_CLOSE, fd, 0, 0); }
 int unlink(const char *path)                    { return (int)os_syscall(SYS_UNLINK, (long)path, 0, 0); }
+long lseek(int fd, long offset, int whence)     { return os_syscall(SYS_SEEK, fd, offset, whence); }
+int sound_open(void)                            { return (int)os_syscall(SYS_SOUND, SOUND_OPEN, 0, 0); }
+long sound_write(const short *frames, long count) { return os_syscall(SYS_SOUND, SOUND_WRITE, (long)frames, count); }
+long sound_queued(void)                         { return os_syscall(SYS_SOUND, SOUND_QUEUED, 0, 0); }
+void sound_close(void)                          { os_syscall(SYS_SOUND, SOUND_CLOSE, 0, 0); }
 
 void *sbrk(long increment) {
     long r = os_syscall(SYS_SBRK, increment, 0, 0);

@@ -244,6 +244,11 @@ $(USER_BUILD)/programs/%.o: user/programs/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS) -MMD -MP $< -o $@
 
+# The video player decodes with pl_mpeg (third_party/pl_mpeg, MIT), whose
+# sound decoder uses floating point: SSE is allowed here (the kernel saves
+# every task's SSE registers).
+$(USER_BUILD)/programs/video.o: USER_CFLAGS := $(filter-out -mgeneral-regs-only,$(USER_CFLAGS)) -I third_party/pl_mpeg -Wno-sign-compare -Wno-unused-function
+
 $(USER_BUILD)/crt0.o: user/crt0.asm
 	@mkdir -p $(dir $@)
 	$(NASM) -f elf64 $< -o $@

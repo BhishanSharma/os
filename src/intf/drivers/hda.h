@@ -32,4 +32,14 @@ int sound_beep(uint32_t hz, uint32_t ms);
  * memory. Same return values; *error says why it cannot be played. */
 int sound_play_wav(const uint8_t *data, uint32_t size, const char **error);
 
+/* A stream that keeps playing while it is fed (for programs: `video`):
+ * 48 kHz, 16-bit stereo. Open starts it (silent); write queues what fits
+ * now and returns how many frames it took (0 when the buffer is full);
+ * queued says how many frames wait to be heard (about a third of a second
+ * at most). While a stream is open, beep and WAV playback are refused. */
+int sound_stream_open(void);                       /* 0, -1 no device, -2 in use */
+int sound_stream_write(const int16_t *frames, int count);
+int sound_stream_queued(void);
+void sound_stream_close(void);
+
 #endif

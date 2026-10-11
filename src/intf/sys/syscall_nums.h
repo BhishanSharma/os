@@ -44,6 +44,19 @@
 #define SYS_SEND      31 /* send(socket, buf, len): all of it, waiting    -> len        */
 #define SYS_RECV      32 /* recv(socket, buf, len, timeout ms; 0 = none)  -> bytes, 0 = closed by the peer */
 #define SYS_SOCKCLOSE 33 /* closesocket(socket)                           -> 0          */
+#define SYS_SEEK      34 /* seek(fd, offset, whence) a file opened for reading -> new position */
+#define SYS_SOUND     35 /* sound(op, a, b), op = SOUND_*: a 48 kHz 16-bit stereo stream -> see below */
+
+/* seek() whence */
+#define SEEK_SET  0
+#define SEEK_CUR  1
+#define SEEK_END  2
+
+/* sound() operations. One program at a time has the sound. */
+#define SOUND_OPEN    0  /* start it                                      -> 0, SYSERR_NOENT (no sound), SYSERR_INUSE */
+#define SOUND_WRITE   1  /* (frames, count): queue them, waiting for room  -> frames queued (fewer after Ctrl+C) */
+#define SOUND_QUEUED  2  /* frames written but not heard yet               -> count */
+#define SOUND_CLOSE   3  /* stop                                           -> 0 */
 
 /* open() modes */
 #define OPEN_READ    0

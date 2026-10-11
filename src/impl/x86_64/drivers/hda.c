@@ -556,8 +556,10 @@ static int stream_reset(void) {
     return (rd32(sd + SD_CTL) & 1) ? -1 : 0;
 }
 
+static int streaming;                                       /* a program's stream is open */
+
 static int play(source_fn src, void *ctx) {
-    if (!ready) return -1;
+    if (!ready || streaming) return -1;
     if (stream_reset() != 0) return -1;
     for (int i = 0; i < n_outs; i++) {                      /* (again: a codec may forget on idle) */
         cmd(outs[i].dac, V_SET_FORMAT, FORMAT_48K16);
@@ -721,4 +723,86 @@ int sound_play_wav(const uint8_t *data, uint32_t size, const char **error) {
     wav_t v = { pcm, dlen / (channels * bits / 8), channels, bits, 0, ((uint64_t)rate << 32) / RATE };
     if (!v.frames) return 0;
     return play(wav_source, &v);
+}
+
+/* ---- A stream fed by a program ---------------------------------------------------- */
+
+#define STREAM_FRAMES (RING_BYTES / 4)
+#define STREAM_MARGIN 1024                                  /* frames kept clear ahead of the DMA */
+
+static uint64_t s_played, s_written;                        /* frames since the start */
+static uint32_t s_last;                                     /* the last DMA position, in frames */
+
+/* Follow the DMA. Called at least every tick (timer hook), so the position
+ * cannot wrap around the ring unseen. */
+static void stream_update(void) {
+    uint32_t lpib = rd32(sd + SD_LPIB) / 4 % STREAM_FRAMES;
+    s_played += (lpib + STREAM_FRAMES - s_last) % STREAM_FRAMES;
+    s_last = lpib;
+    if (s_written < s_played) {                             /* fell behind: what follows is old sound */
+        memset(ring, 0, RING_BYTES);
+        s_written = s_played;
+    }
+}
+
+static void stream_tick(void) {
+    if (streaming) stream_update();
+}
+
+int sound_stream_open(void) {
+    if (!ready) return -1;
+    if (streaming) return -2;
+    static int hooked;
+    if (!hooked) {
+        timer_add_poll_hook(stream_tick);
+        hooked = 1;
+    }
+    if (stream_reset() != 0) return -1;
+    for (int i = 0; i < n_outs; i++) {
+        cmd(outs[i].dac, V_SET_FORMAT, FORMAT_48K16);
+        cmd(outs[i].dac, V_SET_STREAM, STREAM_TAG << 4);
+    }
+    memset(ring, 0, RING_BYTES);
+    wr32(sd + SD_BDPL, (uint32_t)(uint64_t)bdl);
+    wr32(sd + SD_BDPU, (uint32_t)((uint64_t)bdl >> 32));
+    wr32(sd + SD_CBL, RING_BYTES);
+    wr16(sd + SD_LVI, BDL_ENTRIES - 1);
+    wr16(sd + SD_FMT, FORMAT_48K16);
+    wr32(sd + SD_CTL, (rd32(sd + SD_CTL) & ~0xF00000u) | (uint32_t)STREAM_TAG << 20);
+    wr8(sd + SD_STS, 0x1C);
+    s_played = 0;
+    s_last = 0;
+    s_written = RATE / 50;                                  /* start 20 ms ahead of the DMA */
+    __asm__ volatile("mfence" ::: "memory");
+    wr32(sd + SD_CTL, rd32(sd + SD_CTL) | 2);
+    streaming = 1;
+    return 0;
+}
+
+int sound_stream_write(const int16_t *frames, int count) {
+    if (!streaming || count <= 0) return 0;
+    stream_update();
+    uint64_t room = s_played + STREAM_FRAMES - STREAM_MARGIN;
+    int n = s_written >= room ? 0 : (int)(room - s_written < (uint64_t)count ? room - s_written : (uint64_t)count);
+    int16_t *buf = (int16_t *)ring;
+    for (int i = 0; i < n; i++) {
+        uint32_t at = (uint32_t)((s_written + (uint64_t)i) % STREAM_FRAMES);
+        buf[2 * at] = (int16_t)scale(frames[2 * i]);
+        buf[2 * at + 1] = (int16_t)scale(frames[2 * i + 1]);
+    }
+    __asm__ volatile("mfence" ::: "memory");
+    s_written += (uint64_t)n;
+    return n;
+}
+
+int sound_stream_queued(void) {
+    if (!streaming) return 0;
+    stream_update();
+    return (int)(s_written - s_played);
+}
+
+void sound_stream_close(void) {
+    if (!streaming) return;
+    streaming = 0;
+    stream_stop();
 }

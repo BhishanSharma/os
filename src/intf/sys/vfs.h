@@ -14,6 +14,7 @@
 
 #include <stdint.h>
 #include "drivers/disk.h"
+#include "drivers/fatvol.h"
 
 #define VFS_MAX_MOUNTS 6
 
@@ -42,6 +43,18 @@ int vfs_read_sectors(uint64_t lba, uint32_t count, void *buf);
 
 /* "no such file", "names are 8.3", ... for a negative result. */
 const char *vfs_error(int code);
+
+/* A file opened for reading in parts (big files: programs read them as they
+ * go instead of all at once). */
+typedef struct {
+    void *mount;
+    fatent_t ent;
+    fatpos_t pos;
+} vfs_file_t;
+
+int vfs_open_file(const char *path, vfs_file_t *out);     /* 0, or < 0 (FAT32_ERR_PERMISSION, ...) */
+int vfs_read_at(vfs_file_t *f, uint32_t offset, void *buf, uint32_t len);
+uint32_t vfs_file_size(const vfs_file_t *f);
 
 /* Where the NVMe partition starting at `start` is mounted, or 0. */
 const char *vfs_partition_mount(uint64_t start);

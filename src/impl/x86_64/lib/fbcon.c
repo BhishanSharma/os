@@ -118,6 +118,20 @@ void fbcon_fill(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t rgb) {
  * (x, y), clipped to the screen. */
 void fbcon_blit(int x, int y, int w, int h, const uint32_t *src, int stride) {
     if (!active) return;
+    if (fb.bpp == 32 && fb.red_pos == 16 && fb.green_pos == 8 && fb.blue_pos == 0) {
+        /* The screen holds 0x00RRGGBB too: copy whole rows (video needs the speed). */
+        int x0 = x < 0 ? 0 : x, x1 = x + w > (int)fb.width ? (int)fb.width : x + w;
+        if (x1 <= x0) return;
+        for (int j = 0; j < h; j++) {
+            int sy = y + j;
+            if (sy < 0 || (uint32_t)sy >= fb.height) continue;
+            const uint32_t *from = src + (int64_t)j * stride + (x0 - x);
+            uint32_t *to = (uint32_t *)((uintptr_t)fb.addr + (uint64_t)sy * fb.pitch) + x0;
+            uint64_t n = (uint64_t)(x1 - x0);
+            __asm__ volatile("rep movsl" : "+D"(to), "+S"(from), "+c"(n) : : "memory");
+        }
+        return;
+    }
     for (int j = 0; j < h; j++) {
         int sy = y + j;
         if (sy < 0 || (uint32_t)sy >= fb.height) continue;

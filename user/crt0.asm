@@ -9,6 +9,7 @@ global _start
 _start:
     mov rdi, [rsp]          ; argc
     lea rsi, [rsp + 8]      ; argv
+    and rsp, -16            ; the ABI's alignment for the call (SSE code relies on it)
     call main
     mov edi, eax
     call exit               ; never returns

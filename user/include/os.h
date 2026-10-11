@@ -64,6 +64,16 @@ int gfx_begin(void);                         /* take the screen below the status
 int gfx_blit(int x, int y, int w, int h, const unsigned int *pixels, int stride);   /* 0x00RRGGBB */
 int gfx_end(void);                           /* the console redraws itself */
 
+/* Files opened for reading: move the read position (SEEK_SET/CUR/END). */
+long lseek(int fd, long offset, int whence); /* -> the new position */
+
+/* Sound: a 48 kHz, 16-bit stereo stream (left, right, left, ...). One
+ * program at a time; it ends with the program. */
+int sound_open(void);                        /* 0, or SYSERR_NOENT / SYSERR_INUSE */
+long sound_write(const short *frames, long count);   /* waits for room -> frames queued */
+long sound_queued(void);                     /* frames not heard yet (about 1/3 s at most) */
+void sound_close(void);
+
 /* TCP sockets. Results < 0 are SYSERR_* codes (SYSERR_TIMEOUT, SYSERR_REFUSED...). */
 int resolve(const char *host, unsigned char ip[4]);        /* DNS (or "a.b.c.d") */
 int net_connect(const unsigned char ip[4], int port);      /* -> socket */

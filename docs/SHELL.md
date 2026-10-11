@@ -183,6 +183,17 @@ pointer, shown as an inverted cell, over the console:
 | Ctrl+C                     | With text selected: copies it. Without: interrupts, as always |
 | Ctrl+V                     | Types the copied text                                    |
 
+## Videos
+
+`video <file.mpg>` plays MPEG-1 video with MP2 sound, full screen (scaled, shape kept).
+Space pauses, Left/Right go 10 s back or forward, Q or Esc stops. Other videos (MP4,
+MKV, ...) convert on a PC with ffmpeg:
+
+    ffmpeg -i in.mp4 -c:v mpeg1video -q:v 4 -c:a mp2 -b:a 192k -f mpeg out.mpg
+
+Add `-vf scale=1280:-2` for videos bigger than 720p. Copy the file onto the TERMINALOS
+partition from Windows, or fetch it with `download <url>`.
+
 A program that reads the mouse (`getmouse`, e.g. `paint`) takes it over while it is
 in the foreground. Under VirtualBox the pointer follows the host's pointer directly
 (mouse integration), so the VM does not capture the mouse. The pointer needs the

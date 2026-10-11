@@ -762,3 +762,43 @@ int fatvol_format(const blockdev_t *dev, uint64_t hidden, const char *label) {
     kfree(buf);
     return r ? FATV_IO : 0;
 }
+
+/* ---- Reading part of a file ------------------------------------------------------- */
+
+int fatvol_read_at(fatvol_t *v, const fatent_t *f, uint32_t offset, uint8_t *dst, uint32_t len, fatpos_t *pos) {
+    uint32_t size = f->e.file_size;
+    if (offset >= size || !len) return 0;
+    if (len > size - offset) len = size - offset;
+    uint32_t want = offset / v->bpc, index = 0, c = fatent_cluster(f);
+    if (pos->cluster && pos->index <= want) {               /* go on from the last read */
+        index = pos->index;
+        c = pos->cluster;
+    }
+    while (index < want) {
+        c = fat_get(v, c);
+        index++;
+        if (!valid_cluster(v, c)) return FATV_IO;
+    }
+    uint8_t *buf = kmalloc(v->bpc);
+    if (!buf) return FATV_IO;
+    uint32_t done = 0, in = offset % v->bpc;
+    while (done < len) {
+        if (!valid_cluster(v, c) || read_cluster(v, c, buf) != 0) {
+            kfree(buf);
+            return done ? (int)done : FATV_IO;
+        }
+        uint32_t n = v->bpc - in;
+        if (n > len - done) n = len - done;
+        memcpy(dst + done, buf + in, n);
+        done += n;
+        in = 0;
+        pos->index = index;
+        pos->cluster = c;
+        if (done < len) {
+            c = fat_get(v, c);
+            index++;
+        }
+    }
+    kfree(buf);
+    return (int)done;
+}

@@ -60,6 +60,13 @@ uint32_t fatent_cluster(const fatent_t *f);
 int fatvol_lookup(fatvol_t *v, uint32_t dir, const char *name, fatent_t *out);
 int fatvol_list(fatvol_t *v, uint32_t dir, fat32_file_info_t *out, int max);
 int fatvol_read(fatvol_t *v, const fatent_t *f, uint8_t *buf, uint32_t max);
+
+/* Part of a file: up to `len` bytes from `offset`. `pos` remembers where in
+ * the cluster chain the last read was (zero it first), so reading a file
+ * front to back does not walk the chain from its start every time.
+ * Returns the bytes read (0 at the end), or < 0. */
+typedef struct { uint32_t index, cluster; } fatpos_t;
+int fatvol_read_at(fatvol_t *v, const fatent_t *f, uint32_t offset, uint8_t *buf, uint32_t len, fatpos_t *pos);
 /* Create a file (or folder) in `dir`; FATV_EXISTS if the name is taken. */
 int fatvol_create(fatvol_t *v, uint32_t dir, const char *name, int is_dir, fatent_t *out);
 /* Replace the file's contents. */

@@ -18,6 +18,7 @@
 #include "drivers/memory.h"
 #include "drivers/heap.h"
 #include "drivers/physmem.h"
+#include "drivers/hda.h"
 #include "drivers/fat32.h"
 #include "net/tcp.h"
 #include "net/net.h"
@@ -48,7 +49,11 @@ typedef struct {
     char path[MAX_PATH];
     uint8_t *data;
     uint32_t size, capacity, pos;
+    vfs_file_t *stream;               // a big file opened for reading: read from disk as it goes
 } file_t;
+
+/* Files bigger than this are not read into memory at open() (a video). */
+#define STREAM_MIN       (1024 * 1024)
 
 typedef struct {
     uint64_t brk_start, brk, brk_mapped;
@@ -61,6 +66,7 @@ typedef struct {
 } process_t;
 
 static int graphics_owner;            // pid drawing pixels (gfx), 0: the console
+static int sound_owner;               // pid streaming sound (sys_sound), 0: none
 static int foreground_pid;            // 0: the kernel (login, kernel shell) has the keyboard
 
 /* ---- ELF ---------------------------------------------------------------- */
@@ -270,6 +276,11 @@ static int64_t sys_open(uint64_t path_ptr, uint64_t mode) {
             uint32_t size = exists ? fat32_get_file_size(path) : 0xFFFFFFFF;
             if (size == 0xFFFFFFFF) {
                 result = SYSERR_NOENT;
+            } else if (mode == OPEN_READ && size > STREAM_MIN) {
+                f->stream = kmalloc(sizeof(vfs_file_t));
+                int r = f->stream ? vfs_open_file(path, f->stream) : SYSERR_NOMEM;
+                if (r != 0) result = r == SYSERR_NOMEM ? SYSERR_NOMEM : r == FAT32_ERR_PERMISSION ? SYSERR_PERM : SYSERR_IO;
+                f->size = size;
             } else if (file_grow(f, size + 1) != 0) {
                 result = SYSERR_NOMEM;
             } else {
@@ -282,6 +293,7 @@ static int64_t sys_open(uint64_t path_ptr, uint64_t mode) {
     leave_cwd(saved);
     if (result < 0) {
         kfree(f->data);
+        if (f->stream) kfree(f->stream);
         memset(f, 0, sizeof(*f));
     } else {
         f->used = 1;
@@ -300,6 +312,7 @@ static int64_t close_file(file_t *f) {
         leave_cwd(saved);
     }
     kfree(f->data);
+    if (f->stream) kfree(f->stream);
     memset(f, 0, sizeof(*f));
     return result;
 }
@@ -317,6 +330,10 @@ static void __attribute__((noreturn)) process_exit(int code) {
     task_t *t = task_current();
     process_t *p = t->process;
     tcp_close_owned_by(t->pid);                         /* its connections end with it */
+    if (sound_owner == t->pid) {                        /* and its sound */
+        sound_stream_close();
+        sound_owner = 0;
+    }
     if (p) {
         for (int i = 3; i < MAX_FDS; i++)
             if (p->files[i].used) close_file(&p->files[i]);
@@ -491,9 +508,66 @@ static int64_t sys_read(uint64_t fd, uint64_t buf, uint64_t len) {
     file_t *f = &p->files[fd];
     uint64_t n = f->size - f->pos;
     if (n > len) n = len;
-    memcpy(dst, f->data + f->pos, n);
+    if (f->stream) {                                        /* from the disk, as it goes */
+        int r = n ? vfs_read_at(f->stream, f->pos, dst, (uint32_t)n) : 0;
+        if (r < 0) return SYSERR_IO;
+        n = (uint64_t)r;
+    } else {
+        memcpy(dst, f->data + f->pos, n);
+    }
     f->pos += (uint32_t)n;
     return (int64_t)n;
+}
+
+static int64_t sys_seek(uint64_t fd, int64_t offset, uint64_t whence) {
+    process_t *p = P();
+    if (fd < 3 || fd >= MAX_FDS || !p->files[fd].used) return SYSERR_BADFD;
+    file_t *f = &p->files[fd];
+    int64_t base = whence == SEEK_SET ? 0 : whence == SEEK_CUR ? (int64_t)f->pos : whence == SEEK_END ? (int64_t)f->size : -1;
+    if (base < 0) return SYSERR_BADCALL;
+    int64_t at = base + offset;
+    if (at < 0) at = 0;
+    if (at > (int64_t)f->size) at = f->size;
+    f->pos = (uint32_t)at;
+    return at;
+}
+
+/* ---- Sound: one program at a time streams to the speakers ---------------------- */
+
+
+static int64_t sys_sound(uint64_t op, uint64_t a, uint64_t b) {
+    int pid = task_current()->pid;
+    if (op == SOUND_OPEN) {
+        if (sound_owner && sound_owner != pid) return SYSERR_INUSE;
+        if (sound_owner == pid) return 0;
+        int r = sound_stream_open();
+        if (r == -2) return SYSERR_INUSE;
+        if (r != 0) return SYSERR_NOENT;
+        sound_owner = pid;
+        return 0;
+    }
+    if (sound_owner != pid) return SYSERR_BADFD;
+    if (op == SOUND_WRITE) {
+        uint64_t count = b;
+        if (count > (1u << 20) || !user_range_ok(a, count * 4, 0)) return SYSERR_FAULT;
+        const int16_t *frames = (const int16_t *)a;
+        uint64_t done = 0;
+        while (done < count) {
+            done += (uint64_t)sound_stream_write(frames + 2 * done, (int)(count - done));
+            if (done < count) {
+                if (process_interrupted()) break;
+                cpu_wait();                                 /* room comes as it plays */
+            }
+        }
+        return (int64_t)done;
+    }
+    if (op == SOUND_QUEUED) return sound_stream_queued();
+    if (op == SOUND_CLOSE) {
+        sound_stream_close();
+        sound_owner = 0;
+        return 0;
+    }
+    return SYSERR_BADCALL;
 }
 
 static int64_t sys_sbrk(int64_t increment) {
@@ -678,6 +752,8 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
         case SYS_SEND:    r = sys_send(f->rdi, f->rsi, f->rdx); break;
         case SYS_RECV:    r = sys_recv(f->rdi, f->rsi, f->rdx, f->r10); break;
         case SYS_SOCKCLOSE: r = own_socket((int)f->rdi) ? (tcp_close((int)f->rdi), 0) : SYSERR_BADFD; break;
+        case SYS_SEEK:    r = sys_seek(f->rdi, (int64_t)f->rsi, f->rdx); break;
+        case SYS_SOUND:   r = sys_sound(f->rdi, f->rsi, f->rdx); break;
         default:          r = SYSERR_BADCALL; break;
     }
     f->rax = (uint64_t)r;

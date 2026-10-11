@@ -350,3 +350,27 @@ const char *vfs_partition_mount(uint64_t start) {
             return mounts[i].path;
     return 0;
 }
+
+int vfs_open_file(const char *path, vfs_file_t *out) {
+    target_t t;
+    int r = resolve(path, 1, &t);
+    if (r) return r;
+    if (read_guard && !read_guard(t.abs)) return FAT32_ERR_PERMISSION;
+    if (!t.base[0]) return FATV_NOT_FOUND;
+    r = fatvol_lookup(&t.m->vol, t.dir, t.base, &out->ent);
+    if (r) return r;
+    if (out->ent.e.attributes & FAT_ATTR_DIRECTORY) return FATV_NOT_FOUND;
+    out->mount = t.m;
+    out->pos.index = out->pos.cluster = 0;
+    return 0;
+}
+
+int vfs_read_at(vfs_file_t *f, uint32_t offset, void *buf, uint32_t len) {
+    mount_t *m = f->mount;
+    if (!m->used) return FATV_IO;                           /* unmounted meanwhile */
+    return fatvol_read_at(&m->vol, &f->ent, offset, buf, len, &f->pos);
+}
+
+uint32_t vfs_file_size(const vfs_file_t *f) {
+    return f->ent.e.file_size;
+}
