@@ -137,7 +137,7 @@ static void draw_about(int x, int y, int w) {
     char line[96];
     ui_icon(&win.c, x, y, 80 * S, "computer", 255);
     ui_text_style(&win.c, x + 100 * S, y + 6 * S, u.sysname, UI_TEXT, 2 * S, UI_BOLD);
-    snprintf(line, sizeof(line), "Version %s (%s)", u.release, u.machine);
+    snprintf(line, sizeof(line), "Version %s (x86_64)", u.release);
     ui_text(&win.c, x + 100 * S, y + 46 * S, line, UI_DIM, S);
     snprintf(line, sizeof(line), "Memory: %lu MiB", m.ram >> 20);
     ui_text(&win.c, x, y + 110 * S, line, UI_TEXT, S);
