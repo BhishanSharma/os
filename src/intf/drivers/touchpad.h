@@ -18,6 +18,8 @@ const char *touchpad_description(void);
 
 /* Read a report if one is waiting (called by mouse_poll). */
 void touchpad_poll(void);
+/* 1 if it can be polled from the pointer's 1 kHz timer (I2C at 400 kHz). */
+int touchpad_fast(void);
 
 /* `touchpad`: controllers, addresses that answer, the HID descriptor and
  * report layout, then the raw reports for a few seconds. */

@@ -318,7 +318,6 @@ static uint8_t *tp_report_desc;
 static uint8_t tp_buf[256], tp_last[256];
 static int tp_last_len;
 static int tp_ready;
-static uint32_t tp_last_tick;
 static char tp_text[96] = "not set up";
 
 static int read_reg(uint16_t reg, uint8_t *buf, int len) {
@@ -507,10 +506,11 @@ static struct {
 } pad = { .primary = -1 };
 
 static int pad_scale(int delta, int *rem) {
-    /* The width of the pad moves the pointer 1600 "mouse pixels" (two
-     * screen widths of 100 columns), keeping the remainder for precision. */
+    /* The width of the pad is 1100 counts, keeping the remainder for
+     * precision; the pointer's acceleration (mouse.c) makes fast swipes go
+     * further, like on a Mac. */
     int range = (int)(tp_layout.tp_x_max ? tp_layout.tp_x_max : 4096);
-    int v = delta * 1600 + *rem;
+    int v = delta * 1100 + *rem;
     *rem = v % range;
     return v / range;
 }
@@ -536,7 +536,7 @@ static void glide(int *dx, int *dy, uint32_t now, int range) {
     if (!pad.gliding) {
         pad.acc_x += *dx;
         pad.acc_y += *dy;
-        if ((pad.acc_x < 0 ? -pad.acc_x : pad.acc_x) + (pad.acc_y < 0 ? -pad.acc_y : pad.acc_y) > range / 80) {
+        if ((pad.acc_x < 0 ? -pad.acc_x : pad.acc_x) + (pad.acc_y < 0 ? -pad.acc_y : pad.acc_y) > range / 300) {
             pad.gliding = 1;
             pad.last_glide = now;
             *dx = pad.acc_x;
@@ -715,9 +715,27 @@ static void handle_report(const uint8_t *buf, int n) {
     mouse_report("I2C touchpad", buttons, dx, dy, wheel);
 }
 
+/* At 400 kHz a report takes under a millisecond: the pointer's 1 kHz timer
+ * polls every 4 ms (touchpads report 100-150 times a second). */
+static int tp_fast;
+static uint32_t tp_last_ms;
+static volatile int tp_busy;
+
+int touchpad_fast(void) { return tp_ready && tp_fast; }
+
+static void touchpad_poll_locked(void);
+
 void touchpad_poll(void) {
-    if (!tp_ready || get_tick() == tp_last_tick) return;    /* at most once per tick */
-    tp_last_tick = get_tick();
+    if (!tp_ready || tp_busy) return;
+    uint32_t now = timer_ms();
+    if (now - tp_last_ms < (tp_fast ? 4u : 8u)) return;
+    tp_last_ms = now;
+    tp_busy = 1;
+    touchpad_poll_locked();
+    tp_busy = 0;
+}
+
+static void touchpad_poll_locked(void) {
     for (int i = 0; i < 4; i++) {                           /* drain a few */
         int n = read_input(tp_buf, sizeof(tp_buf));
         if (n == 0 && pad.touching && (uint32_t)(get_tick() - pad.last_report) > TIMER_FREQ * 3 / 10) {
@@ -826,6 +844,28 @@ static int try_device(i2c_ctrl_t *c, uint8_t addr) {
     return -1;
 }
 
+static void i2c_set_speed(i2c_ctrl_t *c, int fast) {
+    i2c_disable(c);
+    wr(c, IC_CON, 0x01 | ((fast ? 2u : 1u) << 1) | (1u << 5) | (1u << 6));
+    if (fast) {
+        wr(c, 0x1C, c->fw_fs_h);                            /* IC_FS_SCL_HCNT / LCNT */
+        wr(c, 0x20, c->fw_fs_l);
+    }
+}
+
+static void try_fast_mode(void) {
+    i2c_ctrl_t *c = tp_ctrl;
+    if (!c->fw_fs_h || !c->fw_fs_l || c->fw_fs_h > 0xFFFF || c->fw_fs_l > 0xFFFF) return;
+    i2c_set_speed(c, 1);
+    hid_desc_t check;
+    if (try_hid_descriptor(c, tp_addr, tp_desc_reg, &check) == 0 && check.vendor == tp_desc.vendor &&
+        check.product == tp_desc.product) {
+        tp_fast = 1;
+        return;
+    }
+    i2c_set_speed(c, 0);
+}
+
 int touchpad_init(void) {
     if (acpi_count < 0) acpi_count = acpi_find_i2c_devices(acpi_devs, 16);
     find_controllers();
@@ -871,10 +911,12 @@ int touchpad_init(void) {
                    vendor_name(tp_desc.vendor), tp_desc.vendor, tp_desc.product);
         return -1;
     }
+    try_fast_mode();
     tp_ready = 1;
-    k_snprintf(tp_text, sizeof(tp_text), "%s %04x:%04x, I2C address 0x%02x (%s, polled)",
+    k_snprintf(tp_text, sizeof(tp_text), "%s %04x:%04x, I2C address 0x%02x (%s, polled at %s)",
                vendor_name(tp_desc.vendor), tp_desc.vendor, tp_desc.product, tp_addr,
-               tp_layout.tp_x_off >= 0 ? "precision touchpad" : "mouse mode");
+               tp_layout.tp_x_off >= 0 ? "precision touchpad" : "mouse mode",
+               tp_fast ? "400 kHz" : "100 kHz");
     return 0;
 }
 

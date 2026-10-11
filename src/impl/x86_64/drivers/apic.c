@@ -177,7 +177,7 @@ static int apic_timer_start(uint32_t *per_second) {
     outb(0x21, inb(0x21) | 0x01);                       /* PIC IRQ 0 off: one tick source */
     apic_timer_on = 1;
     lapic_write(LAPIC_LVT_TIMER, LVT_PERIODIC | TIMER_VECTOR);
-    lapic_write(LAPIC_TIMER_INIT, counted / TIMER_FREQ);
+    lapic_write(LAPIC_TIMER_INIT, counted / TIMER_HW_FREQ);
     return 0;
 }
 
@@ -187,14 +187,14 @@ void apic_timer_ack(void) {
 
 int timer_check(char *how, int size) {
     if (ticks_arrive()) {
-        k_snprintf(how, size, "PIT at %u Hz via 8259 PIC", TIMER_FREQ);
+        k_snprintf(how, size, "PIT at %u Hz via 8259 PIC", TIMER_HW_FREQ);
         return 0;
     }
     int counting = pit_counting();
     kprintf("No timer ticks through the 8259 PIC; PIT %s\n", counting ? "is counting" : "is not counting");
 
     if (counting && virtual_wire() == 0 && ticks_arrive()) {
-        k_snprintf(how, size, "PIT at %u Hz via local APIC (%s, virtual wire)", TIMER_FREQ,
+        k_snprintf(how, size, "PIT at %u Hz via local APIC (%s, virtual wire)", TIMER_HW_FREQ,
                    x2apic ? "x2APIC" : "xAPIC");
         return 0;
     }
@@ -202,7 +202,7 @@ int timer_check(char *how, int size) {
 
     uint32_t per_second;
     if (apic_timer_start(&per_second) == 0 && ticks_arrive()) {
-        k_snprintf(how, size, "local APIC timer at %u Hz (%u MHz bus; PIT %s)", TIMER_FREQ,
+        k_snprintf(how, size, "local APIC timer at %u Hz (%u MHz bus; PIT %s)", TIMER_HW_FREQ,
                    per_second * 16 / 1000000, counting ? "gives no interrupts" : "is switched off");
         return 0;
     }

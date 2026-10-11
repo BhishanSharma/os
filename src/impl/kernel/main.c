@@ -256,7 +256,7 @@ void kernel_main() {
         if (have_fb) display_init();
         mouse_init_vbox();
     }
-    print_boot_status(BOOT_OK, "Interrupts", "IDT, 8259 PIC, PIT timer at 100 Hz");
+    print_boot_status(BOOT_OK, "Interrupts", "IDT, 8259 PIC, PIT timer at 1000 Hz (100 Hz ticks)");
     print_boot_status(BOOT_OK, "Keyboard", "PS/2, US layout");
     if (have_mouse)
         print_boot_status(BOOT_OK, "Mouse", "%s", mouse_description());

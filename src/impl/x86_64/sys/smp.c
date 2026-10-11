@@ -70,6 +70,14 @@ void bkl_enter(void) {
     bkl_depth = 1;
 }
 
+int bkl_try_enter(void) {
+    if (!smp_on) return 1;
+    int me = cpu_index();
+    if (bkl_owner == me || __sync_val_compare_and_swap(&bkl_owner, -1, me) != -1) return 0;
+    bkl_depth = 1;
+    return 1;
+}
+
 void bkl_leave(void) {
     if (!smp_on || bkl_owner != cpu_index()) return;
     if (--bkl_depth <= 0) {

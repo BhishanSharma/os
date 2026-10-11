@@ -37,6 +37,12 @@ void fbcon_geometry(uint32_t *width, uint32_t *height, uint32_t *cell_w, uint32_
 void fbcon_fill(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t rgb);   /* 0x00RRGGBB */
 void fbcon_blit(int x, int y, int w, int h, const uint32_t *src, int stride);
 
+/* The pointer drawn by the kernel over the pixels (the desktop): 0xAARRGGBB,
+ * at most 64x64, hot spot (hx, hy), at (x, y); w = 0 takes it away. */
+int fbcon_cursor_set(const uint32_t *argb, int w, int h, int hx, int hy, int x, int y);
+void fbcon_cursor_move(int x, int y);
+int fbcon_cursor_active(void);
+
 /* Draw one cell; `cursor` draws an underline cursor in it. */
 void fbcon_draw_cell(int col, int row, uint8_t ch, uint8_t attr, int cursor);
 

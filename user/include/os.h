@@ -68,7 +68,10 @@ int gfx_info(struct os_gfx_info *info);      /* 0, or SYSERR_NOENT in VGA text m
 int gfx_begin(void);                         /* take the screen below the status bar */
 int gfx_begin_full(void);                    /* the whole screen, status bar too (the desktop) */
 int gfx_blit(int x, int y, int w, int h, const unsigned int *pixels, int stride);   /* 0x00RRGGBB */
-int gfx_end(void);                           /* the console redraws itself */
+int gfx_end(void);
+/* The kernel draws the pointer (0xAARRGGBB picture), moving it as the mouse
+ * moves: smooth whatever the program is doing. -> 0 */
+int gfx_cursor(int w, int h, int hot_x, int hot_y, const unsigned int *argb);                           /* the console redraws itself */
 
 /* Files opened for reading: move the read position (SEEK_SET/CUR/END). */
 long lseek(int fd, long offset, int whence); /* -> the new position */

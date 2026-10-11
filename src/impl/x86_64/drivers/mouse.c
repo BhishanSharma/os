@@ -9,6 +9,7 @@
 #include "sys/process.h"
 #include "lib/print.h"
 #include "lib/string.h"
+#include "lib/fbcon.h"
 #include "../lib/ports.h"
 
 /* ---- 8042 controller and PS/2 mouse commands ------------------------------ */
@@ -66,6 +67,7 @@ typedef struct {
     int16_t dx, dy;
     int8_t wheel;
     uint8_t buttons;
+    uint32_t ms;                      /* when it came (timer_ms), for the speed */
 } packet_t;
 
 #define QUEUE_SIZE 64
@@ -77,8 +79,10 @@ static const char *other_source;      /* "USB", "I2C touchpad": a mouse that is 
 static uint8_t packet[4];
 static int packet_len;
 
-/* Position in "mouse pixels": 8 per column and 16 per row of the text grid. */
-static int px, py, seen;
+/* The pointer on the screen in 1/256 pixels (without a framebuffer: a text
+ * grid of 8 x 16 "pixels" per cell). */
+static int64_t sx, sy;
+static int seen;
 static int buttons_held;
 static int wheel_for_program;
 static int owner_pid;
@@ -141,7 +145,7 @@ int mouse_init(void) {
             packet_size = 4;
         }
     }
-    set_sample_rate(100);
+    set_sample_rate(200);                                     // smoother: 200 reports a second
     if (mouse_command(0xF4) != 0) return -1;                  // start reporting
     while (inb(PS2_STATUS) & STATUS_OUT) inb(PS2_DATA);
 
@@ -173,6 +177,7 @@ void mouse_handle_byte(uint8_t byte) {
     p.dx = (b0 & 0xC0) ? 0 : (int16_t)(packet[1] - ((b0 << 4) & 0x100));   // overflow: drop
     p.dy = (b0 & 0xC0) ? 0 : (int16_t)(packet[2] - ((b0 << 3) & 0x100));
     p.wheel = 0;
+    p.ms = timer_ms();
     if (packet_size == 4) {
         int8_t z = (int8_t)(packet[3] << 4) >> 4;              // low 4 bits, signed
         p.wheel = z;
@@ -194,6 +199,7 @@ void mouse_report(const char *source, int buttons, int dx, int dy, int wheel) {
     p.dx = (int16_t)dx;
     p.dy = (int16_t)-dy;                                       // queue holds PS/2 sense: up positive
     p.wheel = (int8_t)-wheel;                                  // and PS/2 wheel: negative = up
+    p.ms = timer_ms();
     uint32_t next = (queue_head + 1) % QUEUE_SIZE;
     if (next == queue_tail) return;
     queue[queue_head] = p;
@@ -221,9 +227,25 @@ static void mouse_irq_locked(void) {
 static int grid_cols(void) { return (int)print_get_cols(); }
 static int grid_rows(void) { return (int)print_grid_rows(); }
 
+/* The screen the pointer moves on, and where the text grid sits on it. */
+static void geometry(int *w, int *h, int *gx, int *gy, int *cw, int *ch) {
+    uint32_t W, H, CW, CH, GX, GY;
+    fbcon_geometry(&W, &H, &CW, &CH, &GX, &GY);
+    if (W && fbcon_active()) {
+        *w = (int)W; *h = (int)H; *gx = (int)GX; *gy = (int)GY; *cw = (int)CW; *ch = (int)CH;
+    } else {
+        *w = grid_cols() * 8; *h = grid_rows() * 16; *gx = *gy = 0; *cw = 8; *ch = 16;
+    }
+}
+
 static void cell_of_pointer(int *c, int *r) {
-    *c = px / 8;
-    *r = py / 16;
+    int w, h, gx, gy, cw, ch;
+    geometry(&w, &h, &gx, &gy, &cw, &ch);
+    int x = (int)(sx >> 8) - gx, y = (int)(sy >> 8) - gy;
+    *c = x < 0 ? 0 : x / cw;
+    *r = y < 0 ? 0 : y / ch;
+    if (*c > grid_cols() - 1) *c = grid_cols() - 1;
+    if (*r > grid_rows() - 1) *r = grid_rows() - 1;
 }
 
 static void paste(void) {
@@ -271,19 +293,70 @@ static void clipboard_requests(void) {
     }
 }
 
-void mouse_poll(void) {
-    touchpad_poll();                                           // I2C touchpads are polled
-    clipboard_requests();
-    if (!present) return;
-    int cols = grid_cols(), rows = grid_rows();
-    int moved = 0;
+/* ---- Moving the pointer ----------------------------------------------------
+ * Ballistics like Windows' "enhance pointer precision" and libinput: a slow
+ * hand gets one point per count (precise), a fast one up to three, smoothly
+ * in between, from the speed over the last reports. Counts are in points:
+ * on a screen drawn at 2x, a point is 2 pixels. Fractions are kept. */
 
+static int isqrt32(uint32_t v) {
+    uint32_t r = 0, bit = 1u << 30;
+    while (bit > v) bit >>= 2;
+    while (bit) {
+        if (v >= r + bit) {
+            v -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+        bit >>= 2;
+    }
+    return (int)r;
+}
+
+static uint32_t last_ms;
+static int speed16;                    /* counts per ms, times 16, smoothed */
+
+static int gain256(int v16) {          /* 256 = 1.0 */
+    if (v16 <= 8) return 256;          /* up to 0.5 counts/ms: one to one */
+    if (v16 >= 56) return 768;         /* from 3.5 counts/ms: three times */
+    return 256 + (v16 - 8) * 512 / 48;
+}
+
+static void clamp_pointer(void) {
+    int w, h, gx, gy, cw, ch;
+    geometry(&w, &h, &gx, &gy, &cw, &ch);
+    if (sx < 0) sx = 0;
+    if (sy < 0) sy = 0;
+    if (sx > (int64_t)(w - 1) << 8) sx = (int64_t)(w - 1) << 8;
+    if (sy > (int64_t)(h - 1) << 8) sy = (int64_t)(h - 1) << 8;
+}
+
+static void move_by(const packet_t *p) {
+    if (!p->dx && !p->dy) return;
+    uint32_t dt = p->ms - last_ms;
+    last_ms = p->ms;
+    if (dt < 1) dt = 1;
+    int dist16 = isqrt32((uint32_t)(p->dx * p->dx + p->dy * p->dy) * 256u);
+    int v16 = dist16 / (int)(dt > 100 ? 100 : dt);
+    speed16 = dt > 60 ? v16 : (speed16 + v16 + 1) / 2;   /* after a pause: start afresh */
+    int w, h, gx, gy, cw, ch;
+    geometry(&w, &h, &gx, &gy, &cw, &ch);
+    int64_t k = (int64_t)gain256(speed16) * cw / 8;      /* points to pixels */
+    sx += p->dx * k;
+    sy -= p->dy * k;                                     /* PS/2 sense: up is positive */
+}
+
+static volatile int moving;            /* the queue is being worked through */
+static int moved;
+
+/* Packets to pointer moves, buttons and the wheel. */
+static void take_packets(void) {
     while (queue_tail != queue_head) {
         packet_t p = queue[queue_tail];
         queue_tail = (queue_tail + 1) % QUEUE_SIZE;
         if (!vbox_absolute) {
-            px += p.dx;
-            py -= p.dy;                                        // PS/2: up is positive
+            move_by(&p);
             moved |= p.dx || p.dy;
         }
         seen = 1;
@@ -296,41 +369,68 @@ void mouse_poll(void) {
             }
         }
         if (p.buttons != buttons_held) {
-            // Apply the movement so far before the click.
-            if (px < 0) px = 0;
-            if (py < 0) py = 0;
-            if (px > cols * 8 - 1) px = cols * 8 - 1;
-            if (py > rows * 16 - 1) py = rows * 16 - 1;
+            clamp_pointer();                                   /* the movement so far first */
             uint8_t old = (uint8_t)buttons_held;
             buttons_held = p.buttons;
             button_changes(old, p.buttons);
         }
     }
+    clamp_pointer();
+    if (fbcon_cursor_active()) fbcon_cursor_move((int)(sx >> 8), (int)(sy >> 8));
+}
+
+/* The timer's 1 kHz path, while the desktop shows the kernel's pointer: the
+ * pointer moves the moment a report comes, not when a program next asks. */
+static void mouse_fast(void) {
+    if (!fbcon_cursor_active() || moving) return;
+    moving = 1;
+    if (touchpad_fast()) touchpad_poll();
+    take_packets();
+    moving = 0;
+}
+
+void mouse_poll(void) {
+    static int hooked;
+    if (!hooked) {
+        hooked = 1;
+        timer_set_fast_hook(mouse_fast);
+    }
+    if (moving) return;
+    moving = 1;
+    touchpad_poll();                                           // I2C touchpads are polled
+    clipboard_requests();
+    if (!present) {
+        moving = 0;
+        return;
+    }
+    take_packets();
 
     if (vbox_absolute) {
         memset(&vbox_req, 0, sizeof(vbox_req));
         if (vmmdev_request(&vbox_req, VMMDEV_GET_MOUSE_STATUS, sizeof(vbox_req)) >= 0 &&
             (vbox_req.features & VMMDEV_MOUSE_HOST_WANTS_ABSOLUTE)) {
-            int nx = (int)((int64_t)vbox_req.x * cols * 8 / 0x10000);
-            int ny = (int)((int64_t)vbox_req.y * rows * 16 / 0x10000);
-            if (nx != px || ny != py) {
-                px = nx;
-                py = ny;
+            int w, h, gx, gy, cw, ch;
+            geometry(&w, &h, &gx, &gy, &cw, &ch);
+            int64_t nx = ((int64_t)vbox_req.x * w / 0x10000) << 8;
+            int64_t ny = ((int64_t)vbox_req.y * h / 0x10000) << 8;
+            if (nx != sx || ny != sy) {
+                sx = nx;
+                sy = ny;
                 moved = 1;
                 seen = 1;
+                clamp_pointer();
+                if (fbcon_cursor_active()) fbcon_cursor_move((int)(sx >> 8), (int)(sy >> 8));
             }
         }
     }
-
-    if (px < 0) px = 0;
-    if (py < 0) py = 0;
-    if (px > cols * 8 - 1) px = cols * 8 - 1;
-    if (py > rows * 16 - 1) py = rows * 16 - 1;
+    int was_moved = moved;
+    moved = 0;
+    moving = 0;
     if (!seen || !print_pointer_supported()) return;
 
     int c, r;
     cell_of_pointer(&c, &r);
-    if (moved && selecting && console_owns_mouse()) {
+    if (was_moved && selecting && console_owns_mouse()) {
         if (c != select_c || r != select_r) select_moved = 1;
         if (select_moved) {
             print_set_selection(select_c, select_r, c, r);
@@ -364,6 +464,6 @@ void mouse_set_owner(int pid) {
 int mouse_owner(void) { return owner_pid; }
 
 void mouse_pixel(int *x, int *y) {
-    *x = px;
-    *y = py;
+    *x = (int)(sx >> 8);
+    *y = (int)(sy >> 8);
 }

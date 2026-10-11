@@ -509,6 +509,7 @@ static void __attribute__((noreturn)) finish(int code, int whole) {
     if (mouse_owner() == t->pid) mouse_set_owner(0);  // the console gets the mouse back
     if (graphics_owner == t->pid) {                    // and the screen
         graphics_owner = 0;
+        fbcon_cursor_set(0, 0, 0, 0, 0, 0, 0);
         print_set_graphics(0);
     }
     // Its programs live on; pid 1 (login) collects them when they end.
@@ -1484,12 +1485,7 @@ static int64_t sys_mouse(uint64_t ptr) {
     }
     mouse_set_owner(task_current()->pid);
     mouse_read(&m->col, &m->row, &m->buttons, &m->wheel);
-    uint32_t width, height, cell_w, cell_h, grid_x, grid_y;
-    fbcon_geometry(&width, &height, &cell_w, &cell_h, &grid_x, &grid_y);
-    int x, y;
-    mouse_pixel(&x, &y);
-    m->x = (int)grid_x + x * (int)(cell_w ? cell_w : 8) / 8;
-    m->y = (int)grid_y + y * (int)(cell_h ? cell_h : 16) / 16;
+    mouse_pixel(&m->x, &m->y);
     return 1;
 }
 
@@ -1542,9 +1538,21 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
             fbcon_blit(b.x, b.y, b.w, b.h, (const uint32_t *)b.pixels, b.stride);
             return 0;
         }
+        case GFX_CURSOR: {                               /* the pointer, drawn by the kernel */
+            if (graphics_owner != me) return SYSERR_PERM;
+            if (!arg) return fbcon_cursor_set(0, 0, 0, 0, 0, 0, 0);
+            if (!user_range_ok(arg, sizeof(struct os_cursor), 0)) return SYSERR_FAULT;
+            struct os_cursor c = *(const struct os_cursor *)arg;
+            if (c.w < 1 || c.h < 1 || c.w > 64 || c.h > 64) return SYSERR_BADCALL;
+            if (!user_range_ok((uint64_t)(uintptr_t)c.pixels, (uint64_t)c.w * c.h * 4, 0)) return SYSERR_FAULT;
+            int x, y;
+            mouse_pixel(&x, &y);
+            return fbcon_cursor_set(c.pixels, c.w, c.h, c.hot_x, c.hot_y, x, y) == 0 ? 0 : SYSERR_NOMEM;
+        }
         case GFX_END:
             if (graphics_owner != me) return SYSERR_PERM;
             graphics_owner = 0;
+            fbcon_cursor_set(0, 0, 0, 0, 0, 0, 0);
             print_set_graphics(0);
             return 0;
         default:

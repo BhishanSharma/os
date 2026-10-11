@@ -28,6 +28,9 @@ int cpu_index(void);               /* 0 = the boot core */
 /* The big kernel lock (no-ops while one core runs). */
 void bkl_enter(void);
 void bkl_leave(void);
+/* 1: the lock is now this core's (free before, not held by the code this
+ * interrupt stopped); 0: skip, someone is busy. Pair with bkl_leave. */
+int bkl_try_enter(void);
 
 /* Wait for an interrupt, letting other cores into the kernel meanwhile.
  * Use instead of `hlt` in kernel code. Turns interrupts on. */

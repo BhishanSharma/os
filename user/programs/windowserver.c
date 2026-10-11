@@ -356,7 +356,39 @@ static void draw_cursor(void) {
         }
 }
 
-static void damage_cursor(void) { damage(mouse_x - S, mouse_y - S, (CURSOR_W + 2) * S, (CURSOR_H + 2) * S); }
+static int kernel_cursor;             /* the kernel draws the pointer (smooth, 1 kHz) */
+
+/* The pointer as one 0xAARRGGBB picture with a soft shadow, for the kernel:
+ * it then moves the pointer itself, the moment the mouse reports. */
+static void hand_over_cursor(void) {
+    static unsigned argb[64 * 64];
+    int cw = CURSOR_W * S, ch = CURSOR_H * S, pw = cw + 3 * S, ph = ch + 4 * S;
+    if (pw > 64 || ph > 64) return;
+    for (int j = 0; j < ph; j++)
+        for (int i = 0; i < pw; i++) {
+            /* the shadow: the arrow's coverage, blurred, 1 down and 2 right */
+            int sum = 0, n = 0;
+            for (int dj = -S; dj <= S; dj++)
+                for (int di = -S; di <= S; di++) {
+                    int si = i - S + di, sj = j - 2 * S + dj;
+                    if (si >= 0 && sj >= 0 && si < cw && sj < ch) sum += cursor_black[sj * cw + si];
+                    n++;
+                }
+            unsigned shadow = (unsigned)(sum / n) * 70 / 255;
+            unsigned b = i < cw && j < ch ? cursor_black[j * cw + i] : 0;
+            unsigned w = i < cw && j < ch ? cursor_white[j * cw + i] : 0;
+            /* black over the shadow, then white over that (grey levels) */
+            unsigned a = b + shadow * (255 - b) / 255;
+            unsigned grey = a ? 255 * w / (a > w ? a : w) : 0;
+            if (w > a) a = w;
+            argb[j * pw + i] = a << 24 | grey << 16 | grey << 8 | grey;
+        }
+    kernel_cursor = gfx_cursor(pw, ph, 0, 0, argb) == 0;
+}
+
+static void damage_cursor(void) {
+    if (!kernel_cursor) damage(mouse_x - S, mouse_y - S, (CURSOR_W + 2) * S, (CURSOR_H + 2) * S);
+}
 
 /* ---- Drawing ------------------------------------------------------------- */
 
@@ -442,7 +474,7 @@ static void compose(void) {
         draw_menu_bar();
         draw_dock();
         draw_menu();
-        draw_cursor();
+        if (!kernel_cursor) draw_cursor();
         gfx_blit(x0, y0, x1 - x0, y1 - y0, scr.px + (long)y0 * scr.stride + x0, scr.stride);
     }
     ndmg = 0;
@@ -646,7 +678,9 @@ int main(int argc, char **argv) {
         printf("windowserver: cannot take the screen\n");
         return 1;
     }
-    printf("windowserver: %dx%d, scale %d, cells %dx%d\n", W, H, S, g.cell_w, g.cell_h);
+    hand_over_cursor();
+    printf("windowserver: %dx%d, scale %d, cells %dx%d%s\n", W, H, S, g.cell_w, g.cell_h,
+           kernel_cursor ? ", pointer drawn by the kernel" : "");
     mouse_x = W / 2;
     mouse_y = H / 2;
     thread_create(serve, &port);

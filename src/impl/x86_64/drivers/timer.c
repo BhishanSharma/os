@@ -18,7 +18,12 @@ typedef struct registers {
 
 
 static volatile uint32_t tick = 0;
+static volatile uint32_t ms_count, sub;
 static void (*poll_hook)(void);
+static void (*fast_hook)(void);
+
+void timer_set_fast_hook(void (*hook)(void)) { fast_hook = hook; }
+uint32_t timer_ms(void) { return ms_count; }
 static void (*more_hooks[4])(void);
 
 void timer_set_poll_hook(void (*hook)(void)) {
@@ -36,6 +41,13 @@ void timer_add_poll_hook(void (*hook)(void)) {
 // Called on every timer interrupt (IRQ0)
 void isr_timer(registers_t regs) {
     apic_timer_ack();
+    ms_count++;
+    if (fast_hook && bkl_try_enter()) {             /* not inside kernel code: no waiting */
+        fast_hook();
+        bkl_leave();
+    }
+    if (++sub < TIMER_HW_FREQ / TIMER_FREQ) return;
+    sub = 0;
     tick++;                          /* outside the kernel lock: the clock never waits */
     bkl_enter();
     task_tick();
@@ -46,7 +58,7 @@ void isr_timer(registers_t regs) {
 
 // Initialize PIT (Programmable Interval Timer)
 void timer_init() {
-    uint32_t divisor = 1193182 / TIMER_FREQ;
+    uint32_t divisor = 1193182 / TIMER_HW_FREQ;
 
     outb(0x43, 0x36); // Command byte
     outb(0x40, (uint8_t)(divisor & 0xFF));      // Low byte

@@ -432,10 +432,11 @@ def test_kernel():
         m.stop()
 
 
-def move_mouse(m, dx, dy):
-    """In small steps: QEMU drops what does not fit in the PS/2 queue."""
+def move_mouse(m, dx, dy, step=50):
+    """In small steps: QEMU drops what does not fit in the PS/2 queue. Slowly
+    (step=4) the pointer moves one point per count: no acceleration."""
     while dx or dy:
-        sx, sy = max(-50, min(50, dx)), max(-50, min(50, dy))
+        sx, sy = max(-step, min(step, dx)), max(-step, min(step, dy))
         m.monitor("mouse_move %d %d" % (sx, sy))
         dx, dy = dx - sx, dy - sy
         time.sleep(0.02)
@@ -462,7 +463,7 @@ def test_desktop():
         cw, ch = int(ws.group(4)), int(ws.group(5))
         dx = (int(button.group(1)) - int(corner.group(1))) * 8 // cw
         dy = (int(button.group(2)) - int(corner.group(2))) * 16 // ch
-        move_mouse(m, dx, dy)
+        move_mouse(m, dx, dy, step=4)
         time.sleep(0.5)
         m.monitor("mouse_button 1")
         time.sleep(0.3)
