@@ -26,8 +26,8 @@ static void sample(void) {
     n_old = n_rows;
     n_rows = 0;
     struct os_task t;
-    for (int i = 0; taskinfo(i, &t) >= 0 && n_rows < MAX_ROWS; i++) {
-        if (t.state == TASKSTATE_DONE || t.pid <= 0) continue;
+    for (int i = 0, used; (used = taskinfo(i, &t)) >= 0 && n_rows < MAX_ROWS; i++) {
+        if (!used || t.state == TASKSTATE_DONE || t.pid <= 0) continue;   /* 0: a free slot */
         row_t *r = &rows[n_rows++];
         memset(r, 0, sizeof(*r));
         r->pid = t.pid;

@@ -77,8 +77,8 @@ static void send_line(const char *text) {
 static int interrupt(void) {
     struct os_task t;
     int n = 0;
-    for (int i = 0; taskinfo(i, &t) >= 0; i++)
-        if (t.pid > 0 && t.parent == shell_pid && t.pid != shell_pid && sigsend(t.pid, SIGINT) == 0) n++;
+    for (int i = 0, used; (used = taskinfo(i, &t)) >= 0; i++)
+        if (used && t.pid > 0 && t.parent == shell_pid && t.pid != shell_pid && sigsend(t.pid, SIGINT) == 0) n++;
     return n;
 }
 

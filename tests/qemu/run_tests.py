@@ -521,8 +521,30 @@ def test_gui():
         m.stop()
 
 
+def test_apps():
+    """The desktop's apps start and keep running: Settings, Activity Monitor,
+    Paint, TextEdit, Files, Terminal."""
+    m = Machine("apps", usb_stick())
+    try:
+        login(m)
+        start = len(m.text())
+        m.type("windowserver settings activity paint textedit finder terminal")
+        m.expect(r"windowserver: \d+x\d+", 30)
+        time.sleep(6)
+        m.screenshot("apps")
+        out = m.text()[start:]
+        check("[ERROR]" not in out and "KERNEL PANIC" not in out, "an app crashed", out)
+        m.keys("ctrl-q")
+        m.expect(PROMPT, 20)
+        out = m.run("ps")
+        for name in ("settings", "activity", "paint", "textedit"):
+            check(name not in out, name + " kept running after Log Out", out)
+    finally:
+        m.stop()
+
+
 TESTS = [("boot", test_boot), ("files", test_files), ("fault", test_fault), ("panic", test_panic),
-         ("kernel", test_kernel), ("desktop", test_desktop), ("gui", test_gui), ("user", test_user), ("video", test_nvme_video), ("install", test_install), ("network", test_network),
+         ("kernel", test_kernel), ("desktop", test_desktop), ("gui", test_gui), ("apps", test_apps), ("user", test_user), ("video", test_nvme_video), ("install", test_install), ("network", test_network),
          ("bios", test_legacy_bios)]
 NEEDS_INTERNET = {"network"}
 
