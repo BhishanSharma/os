@@ -36,6 +36,8 @@ int iwl_has_saved(const char *ssid);
 void iwl_disconnect(void);        /* `wifi disconnect`: leave, stop reconnecting */
 void iwl_forget(void);            /* `wifi forget`: delete the saved network */
 void iwl_print_status(void);      /* `wifi status` */
+int iwl_connected(char *ssid, int size, int *signal);   /* 1 and the network, or 0 */
+int iwl_scan_result(int i, char *ssid, int size, int *signal, int *secured);   /* after iwl_scan */
 
 /* While the shell is idle: reconnect after a drop, renew the DHCP lease. */
 void iwl_service(void);

@@ -614,6 +614,12 @@ int power_off(void) {
     return -1;
 }
 
+int power_battery(int *charging) {
+    if (!bat_count) return -1;
+    *charging = (bats[0].state & 2) || ac_online == 1;
+    return percent(&bats[0]);
+}
+
 void power_battery_text(char *out, int len) {
     out[0] = 0;
     if (!bat_count) return;

@@ -133,6 +133,15 @@ int sigsend(int pid, int sig);
 
 int registry(int index, struct os_regnode *node);   /* the device tree: 1, 0 past the end */
 int auth(const char *name, const char *password, struct os_user *u);   /* root only */
+
+/* The desktop's system menus (Wi-Fi, sound, battery, power) */
+int wifi_status(struct os_wifi *w);           /* 1 connected (w filled), 0 not, SYSERR_NOENT no card */
+int wifi_scan(struct os_wifi *list, int max); /* networks heard, strongest first -> count (takes seconds) */
+int wifi_connect(const char *name, const char *password);
+int wifi_disconnect(void);
+int volume(int set);                          /* 0-100 sets, -1 reads -> the volume */
+int battery(void);                            /* percent | 0x100 charging, SYSERR_NOENT none */
+int power(int restart);                       /* 0 shut down, 1 restart: returns only on failure */
 void console_echo(int on);                   /* off: read(0) does not show the typing */
 
 /* Console */

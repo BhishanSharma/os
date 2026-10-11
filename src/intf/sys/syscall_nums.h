@@ -85,6 +85,22 @@
 
 #define SYS_REGISTRY  60 /* registry(index, struct os_regnode *): the device tree -> 1, 0 past the end */
 #define SYS_AUTH      61 /* auth(name, password, struct os_user *): root only (login) -> 0 */
+#define SYS_SYSTEM    62 /* system(op, a, b): Wi-Fi, volume, battery, power, op = SYSTEM_* */
+
+#define SYSTEM_WIFI_STATUS  0  /* a = struct os_wifi * (the network joined)  -> 1 connected, 0 not, SYSERR_NOENT no card */
+#define SYSTEM_WIFI_SCAN    1  /* a = struct os_wifi *, b = max: networks heard, strongest first -> count */
+#define SYSTEM_WIFI_CONNECT 2  /* a = name, b = password ("" for open)   -> 0 */
+#define SYSTEM_WIFI_OFF     3  /* leave the network                         -> 0 */
+#define SYSTEM_VOLUME       4  /* a = 0-100 to set, -1 to read               -> volume, SYSERR_NOENT no sound */
+#define SYSTEM_BATTERY      5  /* -> percent | 0x100 charging, SYSERR_NOENT no battery */
+#define SYSTEM_POWER        6  /* a = 0 shut down, 1 restart                 -> only on failure */
+
+struct os_wifi {
+    char name[33];
+    int signal;            /* dBm: -50 strong, -80 weak */
+    int secured;
+    char address[16];      /* SYSTEM_WIFI_STATUS: our IP address */
+};
 
 #define PROT_READ   1
 #define PROT_WRITE  2

@@ -120,3 +120,15 @@ int auth(const char *name, const char *password, struct os_user *u) {
     return (int)os_syscall(SYS_AUTH, (long)name, (long)password, (long)u);
 }
 void console_echo(int on)                       { os_syscall(SYS_CONSOLE, CON_ECHO, on, 0); }
+
+/* ---- System menus ---- */
+
+int wifi_status(struct os_wifi *w)              { return (int)os_syscall(SYS_SYSTEM, SYSTEM_WIFI_STATUS, (long)w, 0); }
+int wifi_scan(struct os_wifi *list, int max)    { return (int)os_syscall(SYS_SYSTEM, SYSTEM_WIFI_SCAN, (long)list, max); }
+int wifi_connect(const char *name, const char *password) {
+    return (int)os_syscall(SYS_SYSTEM, SYSTEM_WIFI_CONNECT, (long)name, (long)(password ? password : ""));
+}
+int wifi_disconnect(void)                       { return (int)os_syscall(SYS_SYSTEM, SYSTEM_WIFI_OFF, 0, 0); }
+int volume(int set)                             { return (int)os_syscall(SYS_SYSTEM, SYSTEM_VOLUME, set, 0); }
+int battery(void)                               { return (int)os_syscall(SYS_SYSTEM, SYSTEM_BATTERY, 0, 0); }
+int power(int restart)                          { return (int)os_syscall(SYS_SYSTEM, SYSTEM_POWER, restart, 0); }

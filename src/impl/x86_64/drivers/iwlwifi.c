@@ -2125,3 +2125,27 @@ int iwl_autoconnect(char *how, int size) {
                cur.signal, ip);
     return 0;
 }
+
+/* ---- For programs (the desktop's Wi-Fi menu, Settings) ---------------------- */
+
+int iwl_connected(char *ssid, int size, int *signal) {
+    if (link_state != LINK_UP) return 0;
+    k_snprintf(ssid, (uint32_t)size, "%s", cur.ssid);
+    *signal = cur.signal;
+    return 1;
+}
+
+/* After iwl_scan: network `i` (by name, strongest first). -> 0, -1 past the end. */
+int iwl_scan_result(int i, char *ssid, int size, int *signal, int *secured) {
+    if (i < 0 || i >= scan_names_count) return -1;
+    k_snprintf(ssid, (uint32_t)size, "%s", scan_names[i]);
+    for (int k = 0; k < bss_count; k++)
+        if (!strcmp(bss_list[k].ssid, scan_names[i])) {
+            *signal = bss_list[k].signal;
+            *secured = bss_list[k].secured;
+            return 0;
+        }
+    *signal = -90;
+    *secured = 1;
+    return 0;
+}

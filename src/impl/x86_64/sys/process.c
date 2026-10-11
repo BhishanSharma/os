@@ -19,6 +19,11 @@
 #include "drivers/heap.h"
 #include "drivers/physmem.h"
 #include "drivers/hda.h"
+#include "drivers/iwlwifi.h"
+#include "drivers/wifi.h"
+#include "drivers/power.h"
+#include "drivers/efi.h"
+#include "sys/system.h"
 #include "drivers/fat32.h"
 #include "drivers/fatvol.h"
 #include "drivers/memory.h"
@@ -976,6 +981,7 @@ static void sys_sigreturn(struct exc_frame *f, uint64_t ptr);
 static void deliver_signals(struct exc_frame *f);
 static int64_t sys_registry(uint64_t index, uint64_t ptr);
 static int64_t sys_auth(uint64_t name_ptr, uint64_t pass_ptr, uint64_t out_ptr);
+static int64_t sys_system(uint64_t op, uint64_t a, uint64_t b);
 
 /* int 0x80 (usermode.asm). Runs with interrupts on, so a blocking call
  * (keyboard, sleep) still gets timer and keyboard interrupts. */
@@ -1052,6 +1058,7 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
         case SYS_SIGRETURN: sys_sigreturn(f, f->rdi); deliver_signals(f); return;
         case SYS_REGISTRY: r = sys_registry(f->rdi, f->rsi); break;
         case SYS_AUTH:    r = sys_auth(f->rdi, f->rsi, f->rdx); break;
+        case SYS_SYSTEM:  r = sys_system(f->rdi, f->rsi, f->rdx); break;
         default:          r = SYSERR_BADCALL; break;
     }
     f->rax = (uint64_t)r;
@@ -1876,4 +1883,62 @@ static int64_t sys_auth(uint64_t name_ptr, uint64_t pass_ptr, uint64_t out_ptr) 
     k_snprintf(out->name, sizeof(out->name), "%s", u.name);
     k_snprintf(out->home, sizeof(out->home), "%s", u.home);
     return 0;
+}
+
+/* ---- system(): the desktop's Wi-Fi, sound and power menus ----------------------- */
+
+static int64_t sys_system(uint64_t op, uint64_t a, uint64_t b) {
+    switch (op) {
+        case SYSTEM_WIFI_STATUS: {
+            if (!user_range_ok(a, sizeof(struct os_wifi), 1)) return SYSERR_FAULT;
+            if (wifi_count() == 0) return SYSERR_NOENT;
+            struct os_wifi *w = (struct os_wifi *)a;
+            memset(w, 0, sizeof(*w));
+            if (!iwl_connected(w->name, sizeof(w->name), &w->signal)) return 0;
+            w->secured = 1;
+            net_fmt_ip(w->address, net_get_config()->ip);
+            return 1;
+        }
+        case SYSTEM_WIFI_SCAN: {
+            int max = (int)b;
+            if (max < 1 || max > 64 || !user_range_ok(a, (uint64_t)max * sizeof(struct os_wifi), 1)) return SYSERR_FAULT;
+            if (wifi_count() == 0) return SYSERR_NOENT;
+            if (iwl_scan() != 0) return SYSERR_IO;
+            struct os_wifi *list = (struct os_wifi *)a;
+            int n = 0;
+            for (; n < max; n++) {
+                memset(&list[n], 0, sizeof(list[n]));
+                if (iwl_scan_result(n, list[n].name, sizeof(list[n].name), &list[n].signal, &list[n].secured) != 0) break;
+            }
+            return n;
+        }
+        case SYSTEM_WIFI_CONNECT: {
+            char name[33], password[64];
+            if (copy_user_string(name, a, sizeof(name)) != 0 || copy_user_string(password, b, sizeof(password)) != 0)
+                return SYSERR_FAULT;
+            int r = iwl_connect(name, password[0] ? password : 0);
+            memset(password, 0, sizeof(password));
+            if (r == 0) net_configure();                       /* DHCP on the new network */
+            return r == 0 ? 0 : SYSERR_IO;
+        }
+        case SYSTEM_WIFI_OFF:
+            iwl_disconnect();
+            return 0;
+        case SYSTEM_VOLUME:
+            if (!sound_ready()) return SYSERR_NOENT;
+            if ((int64_t)a >= 0) sound_set_volume((int)(a > 100 ? 100 : a));
+            return sound_get_volume();
+        case SYSTEM_BATTERY: {
+            int charging = 0, p = power_battery(&charging);
+            return p < 0 ? SYSERR_NOENT : p | (charging ? 0x100 : 0);
+        }
+        case SYSTEM_POWER:
+            print_set_graphics(0);
+            if (a == 1) reboot();
+            power_off();
+            efi_reset(1);
+            return SYSERR_IO;
+        default:
+            return SYSERR_BADCALL;
+    }
 }

@@ -19,6 +19,7 @@ int power_off(void);
 
 /* For the status bar: "BAT 87%", "BAT 87% charging"; empty without a battery. */
 void power_battery_text(char *out, int len);
+int power_battery(int *charging);      /* percent, -1 without a battery */
 
 /* `battery`: every battery and the AC adapter in detail. */
 void power_print(void);
