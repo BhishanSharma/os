@@ -11,6 +11,10 @@
 
 extern const unsigned char font8x16[256][16];
 
+/* Appearance settings from the window server (WS_PREF_*). */
+static unsigned prefs;
+int ui_pref(int bit) { return (prefs & (unsigned)bit) != 0; }
+
 /* ---- Pixels -------------------------------------------------------------- */
 
 static inline unsigned div255(unsigned v) { return (v + 1 + (v >> 8)) >> 8; }
@@ -330,6 +334,18 @@ static int bitmap_char(ui_canvas *c, int x, int y, unsigned char ch, unsigned co
     return 8 * scale;
 }
 
+/* Tracking in 1/64 pixel, from the macOS type spec: body text -0.43 px at 17
+ * (-0.025 em), large titles -1.05 px at 34 (-0.031 em). The monospaced face
+ * (terminal cells) is not tracked. */
+#ifndef UI_TRACKING
+#define UI_TRACKING 1
+#endif
+static int tracking64(const face_t *f) {
+    if (!UI_TRACKING || f->style == UI_MONO) return 0;
+    int em1000 = f->px < 20 ? 253 : 309;
+    return -(int)(((long)f->px * 64 * em1000 + 5000) / 10000);
+}
+
 int ui_text_style(ui_canvas *c, int x, int y, const char *s, unsigned color, int scale, int style) {
     const face_t *f = find_face(style, scale);
     if (!f) {
@@ -338,11 +354,12 @@ int ui_text_style(ui_canvas *c, int x, int y, const char *s, unsigned color, int
         return x - start;
     }
     y += (16 * scale - f->line_h) / 2;            /* a smaller face: centred */
+    int trk = tracking64(f);
     long x64 = (long)x * 64;
     for (; *s; s++) {
         const glyph_t *g = glyph(f, (unsigned char)*s);
         draw_glyph(c, f, g, x64, y, color);
-        x64 += g->advance;
+        x64 += g->advance + (s[1] ? trk : 0);      /* none after the last letter */
     }
     return (int)((x64 + 32) >> 6) - x;
 }
@@ -350,9 +367,48 @@ int ui_text_style(ui_canvas *c, int x, int y, const char *s, unsigned color, int
 int ui_text_style_width(const char *s, int scale, int style) {
     const face_t *f = find_face(style, scale);
     if (!f) return (int)strlen(s) * 8 * scale;
+    int trk = tracking64(f);
     long x64 = 0;
-    for (; *s; s++) x64 += glyph(f, (unsigned char)*s)->advance;
+    for (; *s; s++) x64 += glyph(f, (unsigned char)*s)->advance + (s[1] ? trk : 0);
     return (int)((x64 + 32) >> 6);
+}
+
+/* Leading: 129% of the font size. */
+int ui_leading(int scale) {
+    const face_t *f = find_face(UI_REGULAR, scale);
+    int px = f ? f->px : 16 * scale;
+    return (px * 129 + 50) / 100;
+}
+
+/* Word wrap into `width` pixels ('\n' breaks a line); one leading per line. */
+int ui_text_block(ui_canvas *c, int x, int y, int width, const char *s, unsigned color, int scale, int style) {
+    int lead = ui_leading(scale), lines = 0;
+    char line[128];
+    while (*s) {
+        int n = 0, last_space = -1;
+        const char *p = s;
+        while (*p && *p != '\n' && n < (int)sizeof(line) - 1) {
+            line[n++] = *p++;
+            line[n] = 0;
+            if (line[n - 1] == ' ') last_space = n - 1;
+            if (ui_text_style_width(line, scale, style) > width && n > 1) {   /* too long: back to a space */
+                if (last_space > 0) {
+                    p -= n - last_space;
+                    n = last_space;
+                } else {
+                    p--;
+                    n--;
+                }
+                break;
+            }
+        }
+        line[n] = 0;
+        if (c) ui_text_style(c, x, y + lines * lead + (lead - 16 * scale) / 2, line, color, scale, style);
+        lines++;
+        s = p;
+        if (*s == '\n' || *s == ' ') s++;
+    }
+    return lines * lead;
 }
 
 int ui_text(ui_canvas *c, int x, int y, const char *s, unsigned color, int scale) {
@@ -458,22 +514,43 @@ int ui_icon(ui_canvas *c, int x, int y, int size, const char *name, int alpha) {
 
 /* ---- Widgets ------------------------------------------------------------- */
 
+/* Increase Contrast: rims at full opacity, darker borders. */
+static unsigned border_color(unsigned normal) { return ui_pref(UI_PREF_CONTRAST) ? 0x6E6E73 : normal; }
+
+/* The ring sits 2 px outside the control: its radius is the control's + 2 px. */
+void ui_focus_ring(ui_canvas *c, int x, int y, int w, int h, int r, int scale) {
+    int g = 2 * scale;
+    ui_round_ex(c, x - g, y - g, w + 2 * g, h + 2 * g, r + g, UI_ACCENT, ui_pref(UI_PREF_CONTRAST) ? 255 : 150, UI_ALL);
+}
+
+void ui_button_ex(ui_canvas *c, int x, int y, int w, int h, const char *label, int scale, int flags) {
+    int r = (flags & UI_BTN_LARGE) ? UI_R_FULL : UI_R_MEDIUM * scale;      /* capsule, or radius.medium */
+    int off = flags & UI_BTN_DISABLED, down = (flags & UI_BTN_PRESSED) && !off;
+    int accent = (down || ((flags & UI_BTN_DEFAULT) && !off));
+    unsigned face = off ? 0xE8E8EC : accent ? (down ? 0x1F5FD0 : UI_ACCENT) : UI_WHITE;
+    unsigned ink = off ? UI_DIM : accent ? UI_WHITE : UI_TEXT;
+    if ((flags & UI_BTN_FOCUSED) && !off) ui_focus_ring(c, x, y, w, h, r > h / 2 ? h / 2 : r, scale);
+    if (!off) ui_shadow(c, x, y + scale, w, h, r > h / 2 ? h / 2 : r, 2 * scale, 40);
+    ui_round(c, x, y, w, h, r, accent ? face : border_color(0xD0D0D4));
+    ui_round(c, x + 1, y + 1, w - 2, h - 2, r > h / 2 ? (h - 2) / 2 : r - 1, face);
+    if ((flags & UI_BTN_HOVER) && !off)                                    /* hover: +10% */
+        ui_round_ex(c, x, y, w, h, r, accent ? 0xFFFFFF : 0x000000, 26, UI_ALL);
+    ui_text(c, x + (w - ui_text_width(label, scale)) / 2, y + (h - 16 * scale) / 2, label, ink, scale);
+}
+
 void ui_button(ui_canvas *c, int x, int y, int w, int h, const char *label, int scale, int pressed) {
-    ui_shadow(c, x, y + scale, w, h, 6 * scale, 2 * scale, 40);
-    ui_round(c, x, y, w, h, 6 * scale, pressed ? UI_ACCENT : 0xD0D0D4);
-    ui_round(c, x + 1, y + 1, w - 2, h - 2, 6 * scale - 1, pressed ? UI_ACCENT : UI_WHITE);
-    ui_text(c, x + (w - ui_text_width(label, scale)) / 2, y + (h - 16 * scale) / 2, label,
-            pressed ? UI_WHITE : UI_TEXT, scale);
+    ui_button_ex(c, x, y, w, h, label, scale, pressed ? UI_BTN_PRESSED : 0);
 }
 
 void ui_textfield(ui_canvas *c, int x, int y, int w, int h, const char *text, int scale, int focused) {
-    if (focused) ui_round(c, x - 2 * scale, y - 2 * scale, w + 4 * scale, h + 4 * scale, 7 * scale, 0x9CC2FA);
-    ui_round(c, x, y, w, h, 5 * scale, focused ? UI_ACCENT : UI_BORDER);
-    ui_round(c, x + 1, y + 1, w - 2, h - 2, 5 * scale - 1, UI_WHITE);
-    int room = w - 12 * scale;
+    int r = UI_R_MEDIUM * scale;                                           /* radius.medium: inputs */
+    if (focused) ui_focus_ring(c, x, y, w, h, r, scale);
+    ui_round(c, x, y, w, h, r, focused ? UI_ACCENT : border_color(UI_BORDER));
+    ui_round(c, x + 1, y + 1, w - 2, h - 2, r - 1, UI_WHITE);
+    int room = w - 16 * scale;
     const char *shown = text;                           /* the end stays in view */
     while (*shown && ui_text_width(shown, scale) > room) shown++;
-    int tx = x + 6 * scale, ty = y + (h - 16 * scale) / 2;
+    int tx = x + 8 * scale, ty = y + (h - 16 * scale) / 2;
     tx += ui_text(c, tx, ty, shown, UI_TEXT, scale);
     if (focused) ui_fill(c, tx + scale, ty + scale, scale, 14 * scale, UI_ACCENT);
 }
@@ -486,10 +563,10 @@ int ui_list_hit(int y, int scale) { return y < 0 ? -1 : y / row_height(scale); }
 void ui_list_icons(ui_canvas *c, int x, int y, int w, int h, const char *const *items,
                    const char *const *icon_names, int count, int selected, int first, int scale) {
     ui_fill(c, x, y, w, h, UI_WHITE);
-    int rows = ui_list_rows(h, scale), rh = row_height(scale), is = 18 * scale;
+    int rows = ui_list_rows(h, scale), rh = row_height(scale), is = 16 * scale;
     for (int i = 0; i < rows && first + i < count; i++) {
-        int k = first + i, ry = y + i * rh, tx = x + 12 * scale;
-        if (k == selected) ui_round(c, x + 4 * scale, ry + scale, w - 8 * scale, rh - 2 * scale, 5 * scale, UI_ACCENT);
+        int k = first + i, ry = y + i * rh, tx = x + 16 * scale;
+        if (k == selected) ui_round(c, x + 4 * scale, ry + 2 * scale, w - 8 * scale, rh - 4 * scale, UI_R_SMALL * scale, UI_ACCENT);
         else if (k % 2) ui_fill(c, x, ry, w, rh, 0xF6F6F8);
         if (icon_names && icon_names[k] && ui_icon(c, tx, ry + (rh - is) / 2, is, icon_names[k], 255) == 0)
             tx += is + 8 * scale;
@@ -539,6 +616,7 @@ int ui_open(ui_window *w, const char *title, int width, int height) {
     w->x = r.x;
     w->y = r.y;
     w->scale = ui_scale();
+    prefs = w->s->prefs;
     ui_canvas_init(&w->c, (unsigned *)((char *)w->s + WS_HEADER), width, height, width);
     return 0;
 }
@@ -556,10 +634,14 @@ void ui_set_title(ui_window *w, const char *title) {
     port_close(server);
 }
 
-void ui_present(ui_window *w) { w->s->damage++; }
+void ui_present(ui_window *w) {
+    prefs = w->s->prefs;
+    w->s->damage++;
+}
 
 int ui_poll(ui_window *w, struct ws_event *e) {
     struct ws_surface *s = w->s;
+    prefs = s->prefs;
     if (s->ev_tail == s->ev_head) return 0;
     *e = s->ev[s->ev_tail % WS_EVENTS];
     s->ev_tail++;

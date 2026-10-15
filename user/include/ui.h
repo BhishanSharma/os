@@ -49,7 +49,25 @@ void ui_shadow_ex(ui_canvas *c, int x, int y, int w, int h, int r, int size, int
 void ui_copy(ui_canvas *c, int x, int y, const unsigned *src, int w, int h, int stride);
 void ui_copy_round(ui_canvas *c, int x, int y, const unsigned *src, int w, int h, int stride, int r, int corners);
 
-/* Text: anti-aliased (UIFONT.BIN), in a line 16 * scale pixels high whose top is y. */
+/* Radius tokens (points; multiply by the window's scale): the macOS scale. */
+#define UI_R_XSMALL 2
+#define UI_R_SMALL  4
+#define UI_R_MEDIUM 6
+#define UI_R_LARGE  8
+#define UI_R_XXL    16
+#define UI_R_FULL   999       /* a capsule: the radius is clamped to half the height */
+
+/* Appearance settings last seen from the window server (WS_PREF_*), updated by
+ * ui_open, ui_present, ui_poll and ui_wait. */
+#define UI_PREF_DARK     WS_PREF_DARK
+#define UI_PREF_CONTRAST WS_PREF_CONTRAST
+#define UI_PREF_MOTION   WS_PREF_MOTION
+#define UI_PREF_TRANSP   WS_PREF_TRANSP
+int ui_pref(int bit);
+
+/* Text: anti-aliased (UIFONT.BIN), in a line 16 * scale pixels high whose top is y.
+ * Tracking follows the macOS type spec (about -0.025 em below 20 px, -0.031 em
+ * from 20 px up), applied to every face except the monospaced one. */
 enum { UI_REGULAR, UI_BOLD, UI_MONO };
 int ui_text(ui_canvas *c, int x, int y, const char *s, unsigned color, int scale);  /* -> width */
 int ui_text_bold(ui_canvas *c, int x, int y, const char *s, unsigned color, int scale);
@@ -57,6 +75,10 @@ int ui_text_style(ui_canvas *c, int x, int y, const char *s, unsigned color, int
 int ui_text_width(const char *s, int scale);
 int ui_text_style_width(const char *s, int scale, int style);
 int ui_char(ui_canvas *c, int x, int y, unsigned char ch, unsigned color, int scale);  /* a mono 8x16 cell */
+/* Leading: 129% of the font size (22 for 17). ui_text_block wraps `s` (words and
+ * '\n') into `width` pixels, one leading apart; -> its height. c = 0: measure only. */
+int ui_leading(int scale);
+int ui_text_block(ui_canvas *c, int x, int y, int width, const char *s, unsigned color, int scale, int style);
 #define UI_CHAR_W(scale) (8 * (scale))
 #define UI_CHAR_H(scale) (16 * (scale))
 
@@ -66,6 +88,21 @@ int ui_icon(ui_canvas *c, int x, int y, int size, const char *name, int alpha);
 int ui_has_icon(const char *name);
 
 /* Widgets: drawn on request, hit-tested with ui_inside. */
+
+/* The focus ring: draw it BEFORE the control. It sits 2 px outside the control
+ * and its radius is the control's radius + 2 px (the HIG rule), accent coloured,
+ * and fully opaque under Increase Contrast. */
+void ui_focus_ring(ui_canvas *c, int x, int y, int w, int h, int r, int scale);
+
+/* Button states (ui_button_ex flags). A default button is accent filled. Large
+ * buttons are capsules; the others are rounded rectangles (radius.medium). */
+#define UI_BTN_PRESSED  1
+#define UI_BTN_FOCUSED  2
+#define UI_BTN_DEFAULT  4
+#define UI_BTN_DISABLED 8
+#define UI_BTN_HOVER    16
+#define UI_BTN_LARGE    32
+void ui_button_ex(ui_canvas *c, int x, int y, int w, int h, const char *label, int scale, int flags);
 void ui_button(ui_canvas *c, int x, int y, int w, int h, const char *label, int scale, int pressed);
 void ui_textfield(ui_canvas *c, int x, int y, int w, int h, const char *text, int scale, int focused);
 void ui_list(ui_canvas *c, int x, int y, int w, int h, const char *const *items, int count,
