@@ -14,7 +14,12 @@
 //     saturation boost, tint) for the Dock and menus; Reduce Transparency
 //     replaces it with a solid colour,
 //   * traffic lights 12 pt wide, 8 pt apart, with glyphs on hover,
-//   * menus with separators, shortcuts, disabled items and key navigation.
+//   * menus with separators, shortcuts, disabled items and key navigation,
+//   * Increase Contrast (rims at full opacity, darker text and accent),
+//   * window motion: open (spring with a 6.8% overshoot, fade 150 ms), close
+//     (ease-in, 150 ms) and minimize (250 ms, shrinking towards the Dock);
+//     menus and Dock labels fade in over 120 ms. Reduce Motion keeps only
+//     the fades.
 //
 // Clicking a Dock icon starts that app (or brings its window back).
 // Ctrl+W closes the front window. Ctrl+Q leaves.
@@ -35,7 +40,7 @@
 #define R_SMALL  4
 #define R_MEDIUM 6
 #define R_LARGE  8
-#define R_WINDOW 10
+#define R_WINDOW 16                    /* radius.xxlarge: a window is a very large container */
 #define R_XXL    16
 
 typedef struct {
@@ -88,8 +93,35 @@ static const theme_t themes[2] = {
     },
 };
 
-static int dark, reduce_motion, reduce_transp;
-#define TH (themes[dark])
+static int dark, reduce_motion, reduce_transp, contrast;
+static theme_t cur;                                /* the theme in force */
+#define TH cur
+
+/* The theme for the current settings. Increase Contrast: rims at full opacity
+ * and 1 px, separators and the highlight stronger, secondary text and the
+ * accent darker (light) or lighter (dark), a solid menu bar. */
+static void apply_theme(void) {
+    cur = themes[dark];
+    if (!contrast) return;
+    cur.hair_alpha = 255;
+    cur.dock_rim_alpha = 255;
+    cur.sep_alpha = 150;
+    cur.hl_alpha += 30;
+    cur.bar_alpha = 255;
+    cur.secondary = dark ? 0xD1D1D6 : 0x48484A;
+    cur.accent = dark ? 0x409CFF : 0x0040DD;
+    cur.edge_on = dark ? 0xAEAEB2 : 0x3A3A3C;
+    cur.edge_off = dark ? 0x8E8E93 : 0x636366;
+    cur.title_text_off = dark ? 0xAEAEB2 : 0x636366;
+    cur.hair = dark ? 0xFFFFFF : 0x000000;
+    cur.dock_rim = dark ? 0xFFFFFF : 0x000000;
+}
+
+/* What apps see in their surface header (ws.h). */
+static unsigned prefs_bits(void) {
+    return (dark ? WS_PREF_DARK : 0) | (contrast ? WS_PREF_CONTRAST : 0) |
+           (reduce_motion ? WS_PREF_MOTION : 0) | (reduce_transp ? WS_PREF_TRANSP : 0);
+}
 
 /* ---- Springs ---------------------------------------------------------------
  * Fixed point (no floating point in programs): positions in 1/1024 pixel.
@@ -120,6 +152,14 @@ static int spring_step(spring_t *s, long target, int dt_ms, int k, int c) {
 
 /* ---- Types ------------------------------------------------------------------ */
 
+/* Window motion. A new window waits (invisible) for its first drawing, then
+ * OPENs; closing and minimizing keep the window drawn while it animates. */
+enum { ANIM_NONE, ANIM_WAIT, ANIM_OPEN, ANIM_CLOSE, ANIM_MIN, ANIM_RESTORE };
+#define OPEN_MS   150                  /* opacity: 150 ms ease-out (the spring runs on) */
+#define CLOSE_MS  150                  /* ease-in */
+#define MIN_MS    250                  /* standard transition: 200-350 ms */
+#define FADE_MS   120                  /* menus and Dock labels: micro-interaction */
+
 typedef struct {
     int used, id, pid;
     int x, y, w, h;                    /* the content on the screen */
@@ -127,6 +167,8 @@ typedef struct {
     unsigned seen;                     /* the damage count drawn last */
     char title[48];
     struct ws_surface *s;
+    int anim, anim_ms;                 /* ANIM_*, and how long it has run */
+    spring_t sc;                       /* ANIM_OPEN: the scale, in percent * FP */
 } window_t;
 
 typedef struct {
@@ -141,17 +183,26 @@ typedef struct {
 } dock_app_t;
 
 static dock_app_t apps[] = {
+<<<<<<< HEAD
     { "Files", "finder", "F", "folder", 0x2F7BF5, 0, 0, { 0, 0 }, 0, 0, 0, 0 },
     { "Terminal", "terminal", ">_", "terminal", 0x30323A, 0, 0, { 0, 0 }, 0, 0, 0, 0 },
     { "TextEdit", "textedit", "T", "textedit", 0xF2F2F2, 0, 0, { 0, 0 }, 0, 0, 0, 0 },
     { "Paint", "paint", "P", "paint", 0xFF9500, 0, 0, { 0, 0 }, 0, 0, 0, 0 },
     { "Activity Monitor", "activity", "A", "activity", 0x34C759, 0, 0, { 0, 0 }, 0, 0, 0, 0 },
     { "System Settings", "settings", "S", "gear", 0x8E8E93, 0, 0, { 0, 0 }, 0, 0, 0, 0 },
+=======
+    { .name = "Files", .program = "finder", .glyph = "F", .icon = "folder", .color = 0x2F7BF5 },
+    { .name = "Terminal", .program = "terminal", .glyph = ">_", .icon = "terminal", .color = 0x30323A },
+    { .name = "TextEdit", .program = "textedit", .glyph = "T", .icon = "textedit", .color = 0xF2F2F2 },
+    { .name = "Paint", .program = "paint", .glyph = "P", .icon = "paint", .color = 0xFF9500 },
+    { .name = "Activity Monitor", .program = "activity", .glyph = "A", .icon = "activity", .color = 0x34C759 },
+    { .name = "System Settings", .program = "settings", .glyph = "S", .icon = "gear", .color = 0x8E8E93 },
+>>>>>>> a93e441314f3ad33018607b8f615930be945a4dc
 };
 #define DOCK_APPS ((int)(sizeof(apps) / sizeof(apps[0])))
 
 enum { M_ABOUT = 1, M_SETTINGS, M_ACTIVITY, M_APPEARANCE, M_MOTION, M_TRANSP, M_TERMINAL,
-       M_RESTART, M_SHUTDOWN, M_LOGOUT, W_MINIMIZE, W_CLOSE, W_FRONT = 100 };
+       M_CONTRAST, M_RESTART, M_SHUTDOWN, M_LOGOUT, W_MINIMIZE, W_CLOSE, W_FRONT = 100 };
 #define MI_SEP 1
 #define MI_OFF 2
 #define MI_MAX 24
@@ -180,6 +231,17 @@ static int unpresented;                          /* blitted, not yet shown (page
 static int tl_hover = -1;                        /* window whose traffic lights show glyphs */
 static int last_title_win = -1;
 static unsigned long last_title_click;
+
+static int menu_fade_ms = FADE_MS;               /* how long the open menu has been fading in */
+static int tip_hot = -1, tip_ms;                 /* the Dock label: which icon, how long */
+static unsigned frame_no;                        /* compose calls so far */
+
+/* Off-screen buffers (anim_cap pixels each): a window drawn on its own, its
+ * shape, and what was behind a fading menu. Missing: no window motion. */
+static unsigned *anim_col, *anim_mask, *snap;
+static long anim_cap;
+static int cache_win = -1, cache_focus;
+static unsigned cache_frame;
 
 static mitem_t mitems[MI_MAX];
 static int n_mitems, menu_open, menu_hot = -1, menu_wpx;   /* menu_open: 0 none, 1 Terminal OS, 2 Window */
@@ -237,10 +299,28 @@ static void damage_window(window_t *w) {
 static void damage_title(window_t *w) { damage(w->x, w->y - TITLE_H, w->w, TITLE_H); }
 static void damage_menu_bar(void) { damage(0, 0, W, MENU_H); }
 
+/* ---- Easing: t in 0..1024 (0..1) -> 0..1024 ------------------------------- */
+
+static long ease_out(long t) { t = t < 0 ? 0 : t > 1024 ? 1024 : t; return 1024 - (1024 - t) * (1024 - t) / 1024; }
+static long ease_in(long t) { t = t < 0 ? 0 : t > 1024 ? 1024 : t; return t * t / 1024; }
+static long ease_inout(long t) {
+    t = t < 0 ? 0 : t > 1024 ? 1024 : t;
+    return t * t * (3 * 1024 - 2 * t) / (1024 * 1024);          /* smoothstep */
+}
+
+/* A window that takes clicks, keys and the title in the menu bar. */
+static int live(const window_t *w) {
+    return w->used && !w->minimised && w->anim != ANIM_CLOSE && w->anim != ANIM_MIN;
+}
+
+static int anim_ok(const window_t *w) {
+    return anim_cap > 0 && (long)(w->w + 2) * (w->h + TITLE_H + 2) <= anim_cap;
+}
+
 /* ---- The Dock ------------------------------------------------------------ */
 
-static int icon(void) { return 50 * S; }
-static int pad(void) { return 10 * S; }
+static int icon(void) { return 48 * S; }
+static int pad(void) { return 8 * S; }
 static int dock_h(void) { return icon() + 2 * pad(); }
 static int dock_bottom(void) { return H - 8 * S; }
 
@@ -327,17 +407,17 @@ static int animate_dock(int dt) {
 
 /* ---- Menus (the Terminal OS menu and the Window menu) ----------------------- */
 
-static int mi_h(int i) { return (mitems[i].flags & MI_SEP) ? 9 * S : 22 * S; }
+static int mi_h(int i) { return (mitems[i].flags & MI_SEP) ? 8 * S : 24 * S; }
 static int menu_x(void) { return bar_x0[menu_open ? menu_open : 1]; }
 static int menu_y(void) { return MENU_H; }
 static int menu_w(void) { return menu_wpx; }
 static int menu_h(void) {
-    int h = 10 * S;
+    int h = 8 * S;
     for (int i = 0; i < n_mitems; i++) h += mi_h(i);
     return h;
 }
 static int menu_item_y(int i) {
-    int y = menu_y() + 5 * S;
+    int y = menu_y() + 4 * S;
     for (int k = 0; k < i; k++) y += mi_h(k);
     return y;
 }
@@ -354,7 +434,7 @@ static void add_sep(void) { add_item("", 0, 0, MI_SEP); }
 
 static window_t *front(void) {
     for (int i = norder - 1; i >= 0; i--)
-        if (!wins[order[i]].minimised) return &wins[order[i]];
+        if (live(&wins[order[i]])) return &wins[order[i]];
     return 0;
 }
 
@@ -373,6 +453,8 @@ static void build_menu(int kind) {
         add_item(text, 0, M_MOTION, 0);
         snprintf(text, sizeof(text), "Reduce Transparency: %s", reduce_transp ? "On" : "Off");
         add_item(text, 0, M_TRANSP, 0);
+        snprintf(text, sizeof(text), "Increase Contrast: %s", contrast ? "On" : "Off");
+        add_item(text, 0, M_CONTRAST, 0);
         add_sep();
         add_item("New Terminal", 0, M_TERMINAL, 0);
         add_sep();
@@ -386,7 +468,7 @@ static void build_menu(int kind) {
         add_item("Close Window", "Ctrl+W", W_CLOSE, has ? 0 : MI_OFF);
         int listed = 0;
         for (int k = 0; k < MAX_WINDOWS; k++) {
-            if (!wins[k].used) continue;
+            if (!wins[k].used || wins[k].anim == ANIM_CLOSE) continue;
             if (!listed++) add_sep();
             add_item(wins[k].title, 0, W_FRONT + k, 0);
         }
@@ -399,7 +481,7 @@ static void build_menu(int kind) {
         if (kw > maxk) maxk = kw;
     }
     menu_wpx = 16 * S + maxl + (maxk ? 24 * S + maxk : 0) + 16 * S;
-    if (menu_wpx < 190 * S) menu_wpx = 190 * S;
+    if (menu_wpx < 192 * S) menu_wpx = 192 * S;
 }
 
 static void damage_menu(void) {
@@ -411,6 +493,7 @@ static void open_menu(int kind) {
     build_menu(kind);
     menu_open = kind;
     menu_hot = -1;
+    menu_fade_ms = 0;                                  /* fades in over 120 ms */
     damage_menu();
 }
 
@@ -419,6 +502,13 @@ static void close_menu(void) {
     damage_menu();
     menu_open = 0;
     menu_hot = -1;
+}
+
+/* Moving from one menu to the next: no fade (as on macOS). */
+static void switch_menu(int kind) {
+    close_menu();
+    open_menu(kind);
+    menu_fade_ms = FADE_MS;
 }
 
 static int menu_hit(int x, int y) {
@@ -467,20 +557,66 @@ static void send_event(window_t *w, int type, int x, int y, int key) {
     futex(FUTEX_WAKE, (volatile int *)&s->ev_head, 0);   /* the program wakes at once */
 }
 
-static void remove_window(int k) {
+/* Where a minimising window goes: its Dock icon (or the middle of the Dock). */
+static void dock_target(const window_t *w, int *tx, int *ty) {
+    for (int i = 0; i < DOCK_APPS; i++)
+        if (apps[i].pid > 0 && apps[i].pid == w->pid) {
+            *tx = icon_x(i) + apps[i].size / 2;
+            *ty = dock_bottom() - pad() - apps[i].size / 2;
+            return;
+        }
+    *tx = W / 2;
+    *ty = dock_bottom() - dock_h() / 2;
+}
+
+/* The screen rectangle a window's animation can reach (with its shadow). */
+static void damage_anim(window_t *w) {
+    int x, y, ww, hh;
+    outer(w, &x, &y, &ww, &hh);
+    int x0 = x - SHADOW, y0 = y - SHADOW, x1 = x + ww + SHADOW, y1 = y + hh + SHADOW + SHADOW / 3;
+    if (w->anim == ANIM_MIN || w->anim == ANIM_RESTORE) {        /* and the way to the Dock */
+        int tx, ty;
+        dock_target(w, &tx, &ty);
+        if (tx - 2 * icon() < x0) x0 = tx - 2 * icon();
+        if (tx + 2 * icon() > x1) x1 = tx + 2 * icon();
+        if (ty - 2 * icon() < y0) y0 = ty - 2 * icon();
+        if (ty + 2 * icon() > y1) y1 = ty + 2 * icon();
+    }
+    damage(x0, y0, x1 - x0, y1 - y0);
+}
+
+/* The window's surface goes away. */
+static void finish_remove(int k) {
     window_t *w = &wins[k];
-    if (menu_open == 2) close_menu();
     damage_window(w);
     munmap(w->s);
     w->used = 0;
+    w->anim = ANIM_NONE;
     int j = 0;
     for (int i = 0; i < norder; i++)
         if (order[i] != k) order[j++] = order[i];
     norder = j;
+    if (cache_win == k) cache_win = -1;
+    damage_menu_bar();
+}
+
+/* A window ends: it fades and shrinks a little (ease-in, 150 ms), then goes. */
+static void remove_window(int k) {
+    window_t *w = &wins[k];
+    if (w->anim == ANIM_CLOSE) return;
+    if (menu_open == 2) close_menu();
     if (drag == k) drag = -1;
     if (capture == k) capture = -1;
     if (tl_hover == k) tl_hover = -1;
     if (last_title_win == k) last_title_win = -1;
+    if (w->minimised || w->anim == ANIM_WAIT || !anim_ok(w)) {      /* nothing to see: at once */
+        finish_remove(k);
+    } else {
+        w->anim = ANIM_CLOSE;
+        w->anim_ms = 0;
+        w->s->focused = 0;
+        damage_anim(w);
+    }
     window_t *f = front();
     if (f) raise((int)(f - wins));
     damage_menu_bar();
@@ -494,12 +630,49 @@ static void close_window_request(int k) {
 
 static void minimise_window(int k) {
     window_t *w = &wins[k];
-    w->minimised = 1;
+    if (w->anim == ANIM_CLOSE || w->anim == ANIM_MIN) return;
     if (tl_hover == k) tl_hover = -1;
-    damage_window(w);
+    w->s->focused = 0;
+    if (anim_ok(w)) {
+        w->anim = ANIM_MIN;                           /* shrinks towards the Dock, then hides */
+        w->anim_ms = 0;
+        damage_anim(w);
+    } else {
+        w->minimised = 1;
+        damage_window(w);
+    }
     window_t *f = front();
     if (f) raise((int)(f - wins));
     damage_menu_bar();
+}
+
+/* A minimised window comes back out of the Dock. */
+static void restore_window(int k) {
+    window_t *w = &wins[k];
+    if (!w->minimised) return;
+    w->minimised = 0;
+    if (anim_ok(w)) {
+        w->anim = ANIM_RESTORE;
+        w->anim_ms = 0;
+        damage_anim(w);
+    } else {
+        damage_window(w);
+    }
+}
+
+/* The first drawing is in: the window opens with a spring that overshoots by
+ * about 7% of its travel (damping 0.65) while its opacity eases out. */
+static void start_open(window_t *w) {
+    if (!anim_ok(w)) {
+        w->anim = ANIM_NONE;
+        damage_window(w);
+        return;
+    }
+    w->anim = ANIM_OPEN;
+    w->anim_ms = 0;
+    w->sc.pos = 92L * FP;
+    w->sc.vel = 0;
+    damage_anim(w);
 }
 
 static int create_window(const struct ws_request *q, struct ws_reply *r) {
@@ -517,12 +690,14 @@ static int create_window(const struct ws_request *q, struct ws_reply *r) {
     memset(w->s, 0, sizeof(*w->s));
     w->s->w = q->w;
     w->s->h = q->h;
+    w->s->prefs = prefs_bits();
     w->used = 1;
+    w->anim = anim_cap > 0 ? ANIM_WAIT : ANIM_NONE;
     w->pid = q->pid;
     w->w = q->w;
     w->h = q->h;
     snprintf(w->title, sizeof(w->title), "%s", q->title);
-    int step = 28 * S;                             /* cascade from the top left */
+    int step = 24 * S;                             /* cascade from the top left */
     w->x = 80 * S + (placed % 8) * step;
     w->y = MENU_H + TITLE_H + 24 * S + (placed % 8) * step;
     placed++;
@@ -779,55 +954,200 @@ static void material(int x, int y, int w, int h, int r, int corners, unsigned ti
 
 /* ---- Drawing ------------------------------------------------------------- */
 
-/* Traffic lights: 12 pt wide, 8 pt apart. Glyphs show while the pointer is
- * over the group (macOS), and the lights are grey when the window is not
- * the front one (unless hovered). */
-static void traffic_lights(window_t *w, int focused, int hover) {
+/* Traffic lights: 12 pt wide, 8 pt apart (centres 22, 42, 62 pt from the left,
+ * 16 pt in). Glyphs show while the pointer is over the group (macOS), and the
+ * lights are grey when the window is not the front one (unless hovered). The
+ * content of the window starts at (cx, cy) on `cv`. */
+#define LIGHT_X(i) ((22 + 20 * (i)) * S)
+static void traffic_lights(ui_canvas *cv, int cx0, int cy0, int focused, int hover) {
     static const unsigned fill[3] = { 0xFF5F57, 0xFEBC2E, 0x28C840 };
     static const unsigned ring[3] = { 0xE0443E, 0xDEA123, 0x1AAB29 };
     static const unsigned ink[3] = { 0x4D0000, 0x995700, 0x006500 };
-    int cy = w->y - TITLE_H / 2, r = 6 * S, lit = focused || hover;
+    int cy = cy0 - TITLE_H / 2, r = 6 * S, lit = focused || hover;
     for (int i = 0; i < 3; i++) {
-        int cx = w->x + (20 + 20 * i) * S;
-        ui_circle(&scr, cx, cy, r, lit ? ring[i] : TH.edge_off);
-        ui_circle(&scr, cx, cy, r - 1, lit ? fill[i] : TH.light_off);
+        int cx = cx0 + LIGHT_X(i);
+        ui_circle(cv, cx, cy, r, lit ? ring[i] : TH.edge_off);
+        ui_circle(cv, cx, cy, r - 1, lit ? fill[i] : TH.light_off);
         if (!hover) continue;
         if (i == 0) {
             for (int t = -2 * S; t <= 2 * S; t++) {
-                ui_fill(&scr, cx + t, cy + t, S, S, ink[0]);
-                ui_fill(&scr, cx + t, cy - t, S, S, ink[0]);
+                ui_fill(cv, cx + t, cy + t, S, S, ink[0]);
+                ui_fill(cv, cx + t, cy - t, S, S, ink[0]);
             }
         } else if (i == 1) {
-            ui_fill(&scr, cx - 3 * S, cy, 6 * S, S, ink[1]);
+            ui_fill(cv, cx - 3 * S, cy, 6 * S, S, ink[1]);
         } else {
-            ui_fill(&scr, cx - 3 * S, cy, 6 * S, S, ink[2]);
-            ui_fill(&scr, cx, cy - 3 * S, S, 6 * S, ink[2]);
+            ui_fill(cv, cx - 3 * S, cy, 6 * S, S, ink[2]);
+            ui_fill(cv, cx, cy - 3 * S, S, 6 * S, ink[2]);
         }
     }
 }
 
-static void draw_window(window_t *w, int focused) {
+/* The shadow round an outer rectangle; a255 fades it with the window. */
+static void window_shadow(int x, int y, int ww, int hh, int focused, int a255) {
+    ui_shadow(&scr, x + 2 * S, y + SHADOW / 3, ww - 4 * S, hh - 2 * S, RADIUS, SHADOW,
+              (focused ? TH.shadow_on : TH.shadow_off) * a255 / 255);
+    ui_shadow(&scr, x, y, ww, hh, RADIUS, 2 * S, 50 * a255 / 255);        /* a tight edge */
+}
+
+/* The window itself (outline, title bar, content), no shadow, onto `cv` with
+ * its content at (cx, cy). */
+static void window_body(ui_canvas *cv, window_t *w, int cx, int cy, int focused, int hover) {
+    ui_round(cv, cx - 1, cy - TITLE_H - 1, w->w + 2, w->h + TITLE_H + 2, RADIUS,
+             focused ? TH.edge_on : TH.edge_off);                                  /* the 1 px rim */
+    ui_round_ex(cv, cx, cy - TITLE_H, w->w, TITLE_H, RADIUS - 1, focused ? TH.title_on : TH.title_off,
+                255, UI_TL | UI_TR);
+    ui_fill_a(cv, cx, cy - 1, w->w, 1, TH.sep, TH.sep_alpha);
+    traffic_lights(cv, cx, cy, focused, hover);
+    int tw = ui_text_style_width(w->title, S, UI_BOLD), tx = cx + (w->w - tw) / 2;
+    if (tx < cx + 80 * S) tx = cx + 80 * S;
+    ui_text_bold(cv, tx, cy - TITLE_H + (TITLE_H - 16 * S) / 2, w->title,
+                 focused ? TH.title_text_on : TH.title_text_off, S);
+    ui_copy_round(cv, cx, cy, (const unsigned *)((char *)w->s + WS_HEADER), w->w, w->h, w->w,
+                  RADIUS - 1, UI_BL | UI_BR);
+}
+
+/* ---- Window motion ----------------------------------------------------------
+ * The animated window is drawn on its own (with its rim colour round it, so the
+ * anti-aliased corners are right), its shape goes into a second buffer, and
+ * both are scaled onto the screen with bilinear sampling and an opacity. Each
+ * property has its own curve: the scale (spring or ease), the opacity (ease). */
+
+/* Scale in 1/1000, opacity 0-255, and the centre, for the animation as it is now. */
+static void anim_params(const window_t *w, int *scale, int *alpha, int *cx, int *cy) {
+    int ox, oy, ow, oh;
+    outer((window_t *)w, &ox, &oy, &ow, &oh);
+    *cx = ox + ow / 2;
+    *cy = oy + oh / 2;
+    *scale = 1000;
+    *alpha = 255;
+    if (w->anim == ANIM_OPEN) {
+        if (!reduce_motion) *scale = (int)(w->sc.pos * 10 / FP);
+        *alpha = (int)(255 * ease_out((long)w->anim_ms * 1024 / OPEN_MS) / 1024);
+    } else if (w->anim == ANIM_CLOSE) {
+        long e = ease_in((long)w->anim_ms * 1024 / CLOSE_MS);
+        if (!reduce_motion) *scale = (int)(1000 - 40 * e / 1024);
+        *alpha = (int)(255 - 255 * e / 1024);
+    } else if (w->anim == ANIM_MIN || w->anim == ANIM_RESTORE) {
+        int dur = reduce_motion ? CLOSE_MS : MIN_MS;
+        long p = (long)w->anim_ms * 1024 / dur;
+        long q = w->anim == ANIM_RESTORE ? 1024 - ease_out(p) : ease_inout(p);     /* 0: window, 1024: Dock */
+        if (!reduce_motion) {
+            int tx, ty;
+            dock_target(w, &tx, &ty);
+            *scale = (int)(1000 - 880 * q / 1024);                                   /* down to 12% */
+            *cx += (int)((long)(tx - *cx) * q / 1024);
+            *cy += (int)((long)(ty - *cy) * q / 1024);
+            *alpha = q < 600 ? 255 : (int)(255 * (1024 - q) / (1024 - 600));       /* fades at the end */
+        } else {
+            *alpha = (int)(255 * (1024 - q) / 1024);
+        }
+    }
+    if (*scale < 1) *scale = 1;
+    if (*alpha < 0) *alpha = 0;
+    if (*alpha > 255) *alpha = 255;
+}
+
+/* The ow x oh picture (and its shape) scaled into dw x dh at (dx, dy), with
+ * opacity alpha: bilinear, clipped to the damage rectangle in force. `under`
+ * (or 0) is what was on the screen before the shadow was drawn, from (ux, uy),
+ * uw wide: a see-through window shows that, not its own shadow, through its body. */
+static void blit_scaled(int dx, int dy, int dw, int dh, int ow, int oh, int alpha,
+                        const unsigned *under, int ux, int uy, int uw) {
+    int x0 = dx < scr.cx0 ? scr.cx0 : dx, y0 = dy < scr.cy0 ? scr.cy0 : dy;
+    int x1 = dx + dw > scr.cx1 ? scr.cx1 : dx + dw, y1 = dy + dh > scr.cy1 ? scr.cy1 : dy + dh;
+    if (dw <= 0 || dh <= 0) return;
+    for (int py = y0; py < y1; py++) {
+        int v = ((2 * (py - dy) + 1) * oh * 128) / dh - 128;                         /* 1/256 texels */
+        int ty = v >> 8;
+        unsigned fy = (unsigned)(v & 255);
+        if (ty < 0) { ty = 0; fy = 0; }
+        if (ty >= oh - 1) { ty = oh - 1; fy = 0; }
+        const unsigned *c0 = anim_col + (long)ty * ow, *c1 = fy ? c0 + ow : c0;
+        const unsigned *m0 = anim_mask + (long)ty * ow, *m1 = fy ? m0 + ow : m0;
+        unsigned *row = scr.px + (long)py * scr.stride;
+        for (int px = x0; px < x1; px++) {
+            int u = ((2 * (px - dx) + 1) * ow * 128) / dw - 128, tx = u >> 8;
+            unsigned fx = (unsigned)(u & 255);
+            if (tx < 0) { tx = 0; fx = 0; }
+            if (tx >= ow - 1) { tx = ow - 1; fx = 0; }
+            unsigned col, msk;
+            if (!fx && !fy) {
+                col = c0[tx];
+                msk = m0[tx] & 255;
+            } else {
+                unsigned a = fx ? lerp_rgb(c0[tx], c0[tx + 1], fx) : c0[tx];
+                unsigned b = fx ? lerp_rgb(c1[tx], c1[tx + 1], fx) : c1[tx];
+                col = fy ? lerp_rgb(a, b, fy) : a;
+                a = fx ? lerp_rgb(m0[tx], m0[tx + 1], fx) : m0[tx];
+                b = fx ? lerp_rgb(m1[tx], m1[tx + 1], fx) : m1[tx];
+                msk = (fy ? lerp_rgb(a, b, fy) : a) & 255;
+            }
+            unsigned a = msk * (unsigned)alpha / 255;
+            if (a >= 255) {
+                row[px] = col;
+            } else if (a) {
+                unsigned base = (under && msk >= 255) ? under[(long)(py - uy) * uw + (px - ux)] : row[px];
+                row[px] = lerp_rgb(base, col, a + (a >> 7));
+            }
+        }
+    }
+}
+
+static void draw_window_anim(int k, int focused, int hover) {
+    window_t *w = &wins[k];
+    int ox, oy, ow, oh;
+    outer(w, &ox, &oy, &ow, &oh);
+    if (cache_win != k || cache_frame != frame_no || cache_focus != focused) {   /* once per frame */
+        ui_canvas ac, mc;
+        ui_canvas_init(&ac, anim_col, ow, oh, ow);
+        ui_canvas_init(&mc, anim_mask, ow, oh, ow);
+        ui_fill(&ac, 0, 0, ow, oh, focused ? TH.edge_on : TH.edge_off);
+        window_body(&ac, w, 1, TITLE_H + 1, focused, hover);
+        ui_fill(&mc, 0, 0, ow, oh, 0x000000);
+        ui_round(&mc, 0, 0, ow, oh, RADIUS, 0xFFFFFF);
+        cache_win = k;
+        cache_frame = frame_no;
+        cache_focus = focused;
+    }
+    int scale, alpha, cx, cy;
+    anim_params(w, &scale, &alpha, &cx, &cy);
+    int dw = ow * scale / 1000, dh = oh * scale / 1000;
+    if (dw < 1 || dh < 1) return;
+    int dx = cx - dw / 2, dy = cy - dh / 2;
+    int ux = dx < scr.cx0 ? scr.cx0 : dx, uy = dy < scr.cy0 ? scr.cy0 : dy;
+    int ux1 = dx + dw > scr.cx1 ? scr.cx1 : dx + dw, uy1 = dy + dh > scr.cy1 ? scr.cy1 : dy + dh;
+    int uw = ux1 - ux;
+    const unsigned *under = 0;
+    if (alpha < 255 && snap && uw > 0 && uy1 > uy && (long)uw * (uy1 - uy) <= anim_cap) {
+        for (int y = uy; y < uy1; y++)
+            memcpy(snap + (long)(y - uy) * uw, scr.px + (long)y * scr.stride + ux, (size_t)uw * 4);
+        under = snap;
+    }
+    window_shadow(dx, dy, dw, dh, focused, alpha);
+    blit_scaled(dx, dy, dw, dh, ow, oh, alpha, under, ux, uy, uw);
+}
+
+static void draw_window(int k, int front_win) {
+    window_t *w = &wins[k];
+    if (w->minimised || w->anim == ANIM_WAIT) return;
+    int exiting = w->anim == ANIM_CLOSE || w->anim == ANIM_MIN;
+    int focused = front_win || exiting;                                          /* keeps its look while leaving */
+    int hover = tl_hover >= 0 && &wins[tl_hover] == w;
+    if (w->anim != ANIM_NONE && anim_ok(w)) {
+        draw_window_anim(k, focused, hover);
+        return;
+    }
     int x, y, ww, hh;
     outer(w, &x, &y, &ww, &hh);
-    ui_shadow(&scr, x + 2 * S, y + SHADOW / 3, ww - 4 * S, hh - 2 * S, RADIUS, SHADOW, focused ? TH.shadow_on : TH.shadow_off);
-    ui_shadow(&scr, x, y, ww, hh, RADIUS, 2 * S, 50);                              /* a tight edge */
-    ui_round(&scr, x, y, ww, hh, RADIUS, focused ? TH.edge_on : TH.edge_off);       /* the outline */
-    ui_round_ex(&scr, w->x, w->y - TITLE_H, w->w, TITLE_H, RADIUS - 1, focused ? TH.title_on : TH.title_off,
-                255, UI_TL | UI_TR);
-    ui_fill_a(&scr, w->x, w->y - 1, w->w, 1, TH.sep, TH.sep_alpha);
-    traffic_lights(w, focused, tl_hover >= 0 && &wins[tl_hover] == w);
-    int tw = ui_text_style_width(w->title, S, UI_BOLD), tx = w->x + (w->w - tw) / 2;
-    if (tx < w->x + 76 * S) tx = w->x + 76 * S;
-    ui_text_bold(&scr, tx, w->y - TITLE_H + (TITLE_H - 16 * S) / 2, w->title,
-                 focused ? TH.title_text_on : TH.title_text_off, S);
-    ui_copy_round(&scr, w->x, w->y, (const unsigned *)((char *)w->s + WS_HEADER), w->w, w->h, w->w,
-                  RADIUS - 1, UI_BL | UI_BR);
+    window_shadow(x, y, ww, hh, focused, 255);
+    window_body(&scr, w, w->x, w->y, focused, hover);
 }
 
 static void draw_menu_bar(void) {
     ui_fill_a(&scr, 0, 0, W, MENU_H, TH.bar_tint, TH.bar_alpha);           /* translucent */
     ui_fill_a(&scr, 0, MENU_H - 1, W, 1, TH.sep, TH.sep_alpha);
-    int ty = (MENU_H - 16 * S) / 2, x = 14 * S;
+    int ty = (MENU_H - 16 * S) / 2, x = 16 * S;
     int tw = ui_text_style_width("Terminal OS", S, UI_BOLD);
     bar_x0[1] = x - 8 * S;
     bar_x1[1] = x + tw + 8 * S;
@@ -846,9 +1166,9 @@ static void draw_menu_bar(void) {
 
     int rx = W - 16 * S - ui_text_width(clock_text, S);
     ui_text(&scr, rx, ty, clock_text, TH.label, S);
-    int is = 18 * S, iy = (MENU_H - is) / 2;
+    int is = 16 * S, iy = (MENU_H - is) / 2;
     status_x[0] = status_x[1] = status_x[2] = 0;
-    rx -= 18 * S;
+    rx -= 16 * S;
     if (vol_level >= 0) {                              /* sound */
         rx -= is;
         status_x[2] = rx;
@@ -894,10 +1214,12 @@ static void draw_dock(void) {
         if (a->pid > 0)                                          /* the running dot */
             ui_circle(&scr, ix + size / 2, dock_bottom() - pad() / 2 + S, 2 * S, dark ? 0xE5E5E7 : 0x3A3A3E);
         if (i == hot && !menu_open) {                          /* the name, above the icon */
-            int lw = ui_text_width(a->name, S) + 20 * S, lh = 24 * S;
-            int lx = ix + size / 2 - lw / 2, ly = dock_bottom() - dock_h() - lh - 10 * S - (size - icon());
-            ui_round_ex(&scr, lx, ly, lw, lh, R_MEDIUM * S, TH.tooltip, 225, UI_ALL);
-            ui_text(&scr, lx + 10 * S, ly + (lh - 16 * S) / 2, a->name, 0xFFFFFF, S);
+            int ta = (int)(255 * ease_out((long)tip_ms * 1024 / FADE_MS) / 1024);      /* fades in over 120 ms */
+            int lw = ui_text_width(a->name, S) + 16 * S, lh = 24 * S;
+            int lx = ix + size / 2 - lw / 2, ly = dock_bottom() - dock_h() - lh - 8 * S - (size - icon());
+            ui_round_ex(&scr, lx, ly, lw, lh, R_MEDIUM * S, TH.tooltip, 225 * ta / 255, UI_ALL);
+            ui_text(&scr, lx + 8 * S, ly + (lh - 16 * S) / 2, a->name,
+                    lerp_rgb(TH.tooltip, 0xFFFFFF, (unsigned)(ta + (ta >> 7))), S);
         }
     }
 }
@@ -911,35 +1233,57 @@ static void draw_menu(void) {
     for (int i = 0; i < n_mitems; i++) {
         int iy = menu_item_y(i), ih = mi_h(i);
         if (mitems[i].flags & MI_SEP) {
-            ui_fill_a(&scr, x + 10 * S, iy + ih / 2, w - 20 * S, 1, TH.sep, TH.sep_alpha);
+            ui_fill_a(&scr, x + 8 * S, iy + ih / 2, w - 16 * S, 1, TH.sep, TH.sep_alpha);
             continue;
         }
         int off = mitems[i].flags & MI_OFF, hot = i == menu_hot && !off;
-        if (hot) ui_round(&scr, x + 5 * S, iy, w - 10 * S, ih, R_SMALL * S, TH.accent);
+        if (hot) ui_round(&scr, x + 4 * S, iy, w - 8 * S, ih, R_SMALL * S, TH.accent);   /* 8 - 4 padding */
         unsigned fg = hot ? 0xFFFFFF : off ? TH.secondary : TH.label;
         int ty = iy + (ih - 16 * S) / 2;
         ui_text(&scr, x + 16 * S, ty, mitems[i].label, fg, S);
         if (mitems[i].key[0]) {
             int kw = ui_text_width(mitems[i].key, S);
-            ui_text(&scr, x + w - 14 * S - kw, ty, mitems[i].key, hot ? 0xFFFFFF : TH.secondary, S);
+            ui_text(&scr, x + w - 16 * S - kw, ty, mitems[i].key, hot ? 0xFFFFFF : TH.secondary, S);
         }
+    }
+}
+
+/* The menu, fading in over 120 ms (ease-out): what is behind it is saved, the
+ * menu drawn, then the two mixed. A micro-interaction, so Reduce Motion keeps it. */
+static void draw_menu_faded(void) {
+    if (!menu_open) return;
+    int a = (int)(255 * ease_out((long)menu_fade_ms * 1024 / FADE_MS) / 1024);
+    int x0 = menu_x() - SHADOW, y0 = menu_y() - SHADOW, x1 = menu_x() + menu_w() + SHADOW, y1 = menu_y() + menu_h() + SHADOW;
+    if (x0 < scr.cx0) x0 = scr.cx0;
+    if (y0 < scr.cy0) y0 = scr.cy0;
+    if (x1 > scr.cx1) x1 = scr.cx1;
+    if (y1 > scr.cy1) y1 = scr.cy1;
+    if (a >= 255 || !snap || x1 <= x0 || y1 <= y0 || (long)(x1 - x0) * (y1 - y0) > anim_cap) {
+        draw_menu();
+        return;
+    }
+    for (int y = y0; y < y1; y++)
+        memcpy(snap + (long)(y - y0) * (x1 - x0), scr.px + (long)y * scr.stride + x0, (size_t)(x1 - x0) * 4);
+    draw_menu();
+    for (int y = y0; y < y1; y++) {
+        unsigned *row = scr.px + (long)y * scr.stride + x0;
+        const unsigned *old = snap + (long)(y - y0) * (x1 - x0);
+        for (int x = 0; x < x1 - x0; x++) row[x] = lerp_rgb(old[x], row[x], (unsigned)(a + (a >> 7)));
     }
 }
 
 /* -> 1 if the frame was paced by the screen (page flipping): no sleep then. */
 static int compose(void) {
     window_t *f = front();
+    frame_no++;
     for (int d = 0; d < ndmg; d++) {
         int x0 = dmg[d].x0, y0 = dmg[d].y0, x1 = dmg[d].x1, y1 = dmg[d].y1;
         ui_clip(&scr, x0, y0, x1 - x0, y1 - y0);
         for (int y = y0; y < y1; y++) ui_fill(&scr, x0, y, x1 - x0, 1, wallpaper[y]);
-        for (int i = 0; i < norder; i++) {
-            window_t *w = &wins[order[i]];
-            if (!w->minimised) draw_window(w, w == f);
-        }
+        for (int i = 0; i < norder; i++) draw_window(order[i], &wins[order[i]] == f);
         draw_menu_bar();
         draw_dock();
-        draw_menu();
+        draw_menu_faded();
         if (!kernel_cursor) draw_cursor();
         gfx_blit(x0, y0, x1 - x0, y1 - y0, scr.px + (long)y0 * scr.stride + x0, scr.stride);
     }
@@ -960,7 +1304,7 @@ static int window_at(int x, int y) {
         window_t *w = &wins[order[i]];
         int ox, oy, ow, oh;
         outer(w, &ox, &oy, &ow, &oh);
-        if (!w->minimised && ui_inside(x, y, ox, oy, ow, oh)) return order[i];
+        if (live(w) && ui_inside(x, y, ox, oy, ow, oh)) return order[i];
     }
     return -1;
 }
@@ -970,16 +1314,13 @@ static int traffic_hover(void) {
     int k = window_at(mouse_x, mouse_y);
     if (k < 0) return -1;
     window_t *w = &wins[k];
-    return ui_inside(mouse_x, mouse_y, w->x + 8 * S, w->y - TITLE_H, 64 * S, TITLE_H) ? k : -1;
+    return ui_inside(mouse_x, mouse_y, w->x + 12 * S, w->y - TITLE_H, 60 * S, TITLE_H) ? k : -1;
 }
 
 static void launch(int i) {
     for (int k = 0; k < MAX_WINDOWS; k++)            /* running: bring its window back */
-        if (wins[k].used && apps[i].pid > 0 && wins[k].pid == apps[i].pid) {
-            if (wins[k].minimised) {
-                wins[k].minimised = 0;
-                damage_window(&wins[k]);
-            }
+        if (wins[k].used && wins[k].anim != ANIM_CLOSE && apps[i].pid > 0 && wins[k].pid == apps[i].pid) {
+            restore_window(k);
             raise(k);
             return;
         }
@@ -1002,6 +1343,12 @@ static void run(const char *program, const char *arg) {
     spawn(program, argv, 0);
 }
 
+/* Tell every window (ws.h `prefs`) when a setting changes. */
+static void push_prefs(void) {
+    for (int k = 0; k < MAX_WINDOWS; k++)
+        if (wins[k].used) wins[k].s->prefs = prefs_bits();
+}
+
 static void menu_choose(int id) {
     if (id == M_ABOUT) run("about", 0);
     else if (id == M_SETTINGS) run("settings", 0);
@@ -1009,12 +1356,21 @@ static void menu_choose(int id) {
     else if (id == M_TERMINAL) run("terminal", 0);
     else if (id == M_APPEARANCE) {
         dark = !dark;
+        apply_theme();
         make_wallpaper();
+        push_prefs();
         damage(0, 0, W, H);
     } else if (id == M_MOTION) {
         reduce_motion = !reduce_motion;
+        push_prefs();
     } else if (id == M_TRANSP) {
         reduce_transp = !reduce_transp;
+        push_prefs();
+        damage(0, 0, W, H);
+    } else if (id == M_CONTRAST) {
+        contrast = !contrast;
+        apply_theme();
+        push_prefs();
         damage(0, 0, W, H);
     } else if (id == M_RESTART || id == M_SHUTDOWN) {
         for (int k = 0; k < MAX_WINDOWS; k++)         /* the programs end first (files saved) */
@@ -1030,10 +1386,7 @@ static void menu_choose(int id) {
     } else if (id >= W_FRONT) {
         int k = id - W_FRONT;
         if (k >= 0 && k < MAX_WINDOWS && wins[k].used) {
-            if (wins[k].minimised) {
-                wins[k].minimised = 0;
-                damage_window(&wins[k]);
-            }
+            restore_window(k);
             raise(k);
         }
     }
@@ -1044,9 +1397,7 @@ static void menu_key(int key) {
     if (key == 27) {
         close_menu();
     } else if (key == KEYCODE_LEFT || key == KEYCODE_RIGHT) {
-        int other = menu_open == 1 ? 2 : 1;
-        close_menu();
-        open_menu(other);
+        switch_menu(menu_open == 1 ? 2 : 1);
     } else if (key == KEYCODE_UP || key == KEYCODE_DOWN) {
         int step = key == KEYCODE_DOWN ? 1 : -1, i = menu_hot;
         for (int tries = 0; tries <= n_mitems; tries++) {
@@ -1074,13 +1425,16 @@ static void press(void) {
         int id = i >= 0 && !(mitems[i].flags & MI_OFF) ? mitems[i].id : 0;
         close_menu();
         if (id) menu_choose(id);
-        else if (t && t != was) open_menu(t);
+        else if (t && t != was) {
+            open_menu(t);
+            menu_fade_ms = FADE_MS;                    /* from one menu to the next: no fade */
+        }
         return;
     }
     if (mouse_y < MENU_H) {                            /* the status icons */
         static const char *panes[] = { "battery", "wifi", "sound" };
         for (int k = 0; k < 3; k++)
-            if (status_x[k] && mouse_x >= status_x[k] && mouse_x < status_x[k] + (k ? 26 : 70) * S) {
+            if (status_x[k] && mouse_x >= status_x[k] && mouse_x < status_x[k] + (k ? 24 : 72) * S) {
                 run("settings", panes[k]);
                 return;
             }
@@ -1101,15 +1455,15 @@ static void press(void) {
     raise(k);
     if (mouse_y < w->y) {                              /* the title bar */
         int cy = w->y - TITLE_H / 2, r = 8 * S;
-        if (ui_inside(mouse_x, mouse_y, w->x + 20 * S - r, cy - r, 2 * r, 2 * r)) {
+        if (ui_inside(mouse_x, mouse_y, w->x + LIGHT_X(0) - r, cy - r, 2 * r, 2 * r)) {
             close_window_request(k);
             return;
         }
-        if (ui_inside(mouse_x, mouse_y, w->x + 40 * S - r, cy - r, 2 * r, 2 * r)) {
+        if (ui_inside(mouse_x, mouse_y, w->x + LIGHT_X(1) - r, cy - r, 2 * r, 2 * r)) {
             minimise_window(k);
             return;
         }
-        if (ui_inside(mouse_x, mouse_y, w->x + 60 * S - r, cy - r, 2 * r, 2 * r))
+        if (ui_inside(mouse_x, mouse_y, w->x + LIGHT_X(2) - r, cy - r, 2 * r, 2 * r))
             return;                                    /* zoom: windows cannot be resized yet */
         unsigned long now = uptime_ms();
         if (last_title_win == k && now - last_title_click < 400) {   /* double-click: minimise */
@@ -1148,10 +1502,7 @@ static void handle_mouse(void) {
             }
             if (mouse_y < MENU_H) {                    /* sliding along the bar switches menus */
                 int t = bar_title_at(mouse_x);
-                if (t && t != menu_open) {
-                    close_menu();
-                    open_menu(t);
-                }
+                if (t && t != menu_open) switch_menu(t);
             }
         }
         int th = menu_open ? -1 : traffic_hover();
@@ -1191,6 +1542,47 @@ static int weekday(int y, int m, int d) {
     static const int t[12] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
     if (m < 3) y--;
     return (y + y / 4 - y / 100 + y / 400 + t[(m + 11) % 12] + d) % 7;
+}
+
+/* Moves every animation on by dt ms: windows (opening, closing, minimizing,
+ * restoring), the menu's fade and the Dock label's fade. */
+static void animate_windows(int dt) {
+    for (int k = 0; k < MAX_WINDOWS; k++) {
+        window_t *w = &wins[k];
+        if (!w->used || w->anim == ANIM_NONE) continue;
+        w->anim_ms += dt;
+        if (w->anim == ANIM_WAIT) {                      /* the program never drew: show it anyway */
+            if (w->anim_ms > 400) start_open(w);
+            continue;
+        }
+        int done = 0;
+        if (w->anim == ANIM_OPEN) {
+            int moving = spring_step(&w->sc, 100L * FP, dt, 130, 15);   /* response 0.55, damping 0.65 */
+            done = w->anim_ms >= OPEN_MS && (reduce_motion || !moving);
+        } else if (w->anim == ANIM_CLOSE) {
+            done = w->anim_ms >= CLOSE_MS;
+        } else {
+            done = w->anim_ms >= (reduce_motion ? CLOSE_MS : MIN_MS);
+        }
+        damage_anim(w);
+        if (!done) continue;
+        int anim = w->anim;
+        w->anim = ANIM_NONE;
+        if (anim == ANIM_CLOSE) finish_remove(k);
+        else if (anim == ANIM_MIN) w->minimised = 1;
+    }
+    if (menu_open && menu_fade_ms < FADE_MS) {
+        menu_fade_ms += dt;
+        damage_menu();
+    }
+    int hot = menu_open ? -1 : dock_hit(mouse_x, mouse_y);
+    if (hot != tip_hot) {
+        tip_hot = hot;
+        tip_ms = 0;
+    } else if (hot >= 0 && tip_ms < FADE_MS) {
+        tip_ms += dt;
+        damage_dock();
+    }
 }
 
 static void tidy(void) {
@@ -1256,7 +1648,7 @@ int main(int argc, char **argv) {
     H = g.height;
     S = g.cell_w >= 16 ? 2 : 1;
     MENU_H = 24 * S;                                   /* the macOS menu bar is 24 pt */
-    TITLE_H = 28 * S;
+    TITLE_H = 32 * S;                                  /* 8-point grid */
     RADIUS = R_WINDOW * S;
     SHADOW = 24 * S;                                   /* design blur 48 / 2 */
     unsigned *px = mmap((size_t)W * H * 4, PROT_READ | PROT_WRITE, -1);
@@ -1266,6 +1658,12 @@ int main(int argc, char **argv) {
         return 1;
     }
     ui_canvas_init(&scr, px, W, H, W);
+    apply_theme();
+    long cap = (long)W * H < (1L << 20) ? (long)W * H : (1L << 20);       /* 4 MB each */
+    anim_col = mmap((size_t)cap * 4, PROT_READ | PROT_WRITE, -1);
+    anim_mask = mmap((size_t)cap * 4, PROT_READ | PROT_WRITE, -1);
+    snap = mmap((size_t)cap * 4, PROT_READ | PROT_WRITE, -1);
+    anim_cap = anim_col && anim_mask && snap ? cap : 0;                  /* else: no window motion, no menu fade */
     make_wallpaper();
     make_cursor();
     for (int i = 0; i < DOCK_APPS; i++) {
@@ -1317,10 +1715,12 @@ int main(int argc, char **argv) {
             window_t *w = &wins[k];
             if (w->used && w->s->damage != w->seen) {
                 w->seen = w->s->damage;
-                if (!w->minimised) damage(w->x, w->y, w->w, w->h);
+                if (w->anim == ANIM_WAIT) start_open(w);       /* the first drawing: open it */
+                else if (!w->minimised && w->anim == ANIM_NONE) damage(w->x, w->y, w->w, w->h);
             }
         }
         animate_dock(dt);
+        animate_windows(dt);
         if (uptime_ms() - last_tidy >= 500) {
             last_tidy = uptime_ms();
             tidy();

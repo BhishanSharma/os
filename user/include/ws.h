@@ -35,6 +35,14 @@ struct ws_event {
     int buttons;
 };
 
+/* Appearance settings the window server keeps in every surface (`prefs`), so a
+ * program can follow them: Dark, Increase Contrast, Reduce Motion, Reduce
+ * Transparency. */
+#define WS_PREF_DARK     1
+#define WS_PREF_CONTRAST 2
+#define WS_PREF_MOTION   4
+#define WS_PREF_TRANSP   8
+
 #define WS_EVENTS 64
 #define WS_HEADER 4096     /* the pixels start here */
 
@@ -44,6 +52,7 @@ struct ws_surface {
     volatile unsigned ev_head;         /* the server writes events here */
     volatile unsigned ev_tail;         /* the program reads from here */
     volatile int focused;
+    volatile unsigned prefs;           /* WS_PREF_*, written by the server */
     struct ws_event ev[WS_EVENTS];
 };
 
