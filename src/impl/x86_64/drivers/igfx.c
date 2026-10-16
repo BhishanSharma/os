@@ -15,6 +15,7 @@
 #include "drivers/paging.h"
 #include "drivers/physmem.h"
 #include "drivers/heap.h"
+#include "drivers/addr.h"
 #include "drivers/timer.h"
 #include "lib/print.h"
 #include "lib/string.h"
@@ -46,6 +47,7 @@
  * above the firmware's framebuffer. Linear surfaces want 256 KiB alignment. */
 #define GGTT_CURSOR      0xC0000000u
 #define GGTT_BACK        0xC0100000u
+#define GGTT_BACK2       0xC0A00000u
 
 static volatile uint8_t *regs;          /* the register BAR, uncached */
 static uint64_t gsm_phys;               /* the GGTT's page table: BAR 0 + 8 MiB */
@@ -54,7 +56,7 @@ static uint32_t surf0;                  /* the firmware framebuffer's GGTT addre
 static uint32_t surf_low;               /* low bits of PLANE_SURF to keep */
 static uint32_t width, height, pitch;
 static int ok, cursor_on, cursor_hx, cursor_hy;
-static uint32_t *cursor_va, *back_va;
+static uint32_t *cursor_va, *back_va, *back2_va;
 static uint32_t flipped_to;
 static char status[160] = "no Intel graphics";
 
@@ -87,6 +89,41 @@ static uint32_t *gpu_buffer(uint32_t ggtt, uint32_t n) {
     uint32_t *va = paging_map_pages_wc(pages, n);
     kfree(pages);
     return va;
+}
+
+/* ---- The engines (step 1: look, do not touch) -------------------------------
+ * The blitter (BCS) copies and fills memory for the CPU; the render engine
+ * runs shaders. Before driving them: what state the firmware left them in,
+ * into the system log. Only reads, and a forcewake (keeps the GT powered while
+ * we read, as i915 does). */
+static uint32_t mm(uint32_t r) { return *(volatile uint32_t *)(regs + r); }
+static void mm_wr(uint32_t r, uint32_t v) { *(volatile uint32_t *)(regs + r) = v; }
+
+#define FORCEWAKE_GT     0xA188
+#define FORCEWAKE_GT_ACK 0x130044
+#define GUC_STATUS       0xC000
+
+static void engine_log(const char *name, uint32_t base) {
+    char line[200];
+    k_snprintf(line, sizeof(line),
+               "igfx: %s: head %x tail %x start %x ctl %x acthd %x mi_mode %x ring_mode %x execlist %x:%x hws %x\n",
+               name, mm(base + 0x34), mm(base + 0x30), mm(base + 0x38), mm(base + 0x3C), mm(base + 0x74),
+               mm(base + 0x9C), mm(base + 0x29C), mm(base + 0x234), mm(base + 0x238), mm(base + 0x80));
+    print_log(line);
+}
+
+void igfx_engines_probe(void) {
+    if (!regs) return;
+    char line[160];
+    mm_wr(FORCEWAKE_GT, 0x00010001);                    /* (mask << 16) | wake */
+    uint64_t end = timer_ms() + 50;
+    while (!(mm(FORCEWAKE_GT_ACK) & 1) && timer_ms() < end) { }
+    k_snprintf(line, sizeof(line), "igfx: forcewake %s, GuC status %x, GGTT at %x (BAR 0 + 8 MiB)\n",
+               (mm(FORCEWAKE_GT_ACK) & 1) ? "acked" : "NOT acked", mm(GUC_STATUS), (uint32_t)gsm_phys);
+    print_log(line);
+    engine_log("render (RCS)", 0x2000);
+    engine_log("blitter (BCS)", 0x22000);
+    mm_wr(FORCEWAKE_GT, 0x00010000);                    /* let it sleep again */
 }
 
 int igfx_init(const fb_info_t *fb) {
@@ -213,19 +250,331 @@ void igfx_cursor_off(void) {
     cursor_on = 0;
 }
 
-uint32_t *igfx_back_buffer(void) {
-    if (!ok) return 0;
-    if (!back_va) back_va = gpu_buffer(GGTT_BACK, (pitch * height + 4095) / 4096);
-    return back_va;
+uint32_t *igfx_buffer(int i) {
+    if (!ok || i < 1 || i > 2) return 0;
+    uint32_t **va = i == 1 ? &back_va : &back2_va;
+    if (!*va) *va = gpu_buffer(i == 1 ? GGTT_BACK : GGTT_BACK2, (pitch * height + 4095) / 4096);
+    return *va;
 }
+
+uint32_t *igfx_back_buffer(void) { return igfx_buffer(1); }
 
 void igfx_flip(int buffer) {
     if (!ok) return;
-    flipped_to = buffer ? GGTT_BACK : surf0;
+    flipped_to = buffer == 2 ? GGTT_BACK2 : buffer ? GGTT_BACK : surf0;
     __asm__ volatile("sfence" ::: "memory");
     wr(PLANE_SURF, flipped_to | surf_low);              /* taken at the next refresh */
 }
 
 int igfx_flip_done(void) {
     return !ok || (rd(PLANE_SURFLIVE) & ~0xFFFu) == flipped_to;
+}
+
+/* ---- The blitter (step 2: one command) -------------------------------------
+ * Gen11+ engines take work only through execlists: a context (a page for the
+ * engine's status, then its registers as MI_LOAD_REGISTER_IMM lists) whose
+ * ring buffer holds the commands, submitted by writing its descriptor to the
+ * engine's submit queue. The first command: store 0x600DF00D into memory the
+ * CPU watches. Layout of the context's first registers (ring head, tail,
+ * start, control) as in i915's gen12_xcs_offsets. Everything here only
+ * reports: if the engine does not answer, the desktop does not use it. */
+#define BCS              0x22000
+#define RING_TAIL        0x30
+#define RING_HEAD        0x34
+#define RING_START       0x38
+#define RING_CTL         0x3C
+#define RING_HWS_PGA     0x80
+#define RING_MI_MODE     0x9C
+#define RING_CTX_CONTROL 0x244
+#define RING_MODE        0x29C
+#define EXECLIST_STATUS  0x234
+#define EXECLIST_SQ_LO   0x510
+#define EXECLIST_SQ_HI   0x514
+#define EXECLIST_CONTROL 0x550
+#define MASKED_ON(b)     (((b) << 16) | (b))
+#define MASKED_OFF(b)    ((b) << 16)
+
+#define MI_NOOP          0
+#define MI_LRI(n)        ((0x22u << 23) | (1u << 12) | (2u * (n) - 1))   /* force posted */
+#define MI_STORE_GGTT    ((0x20u << 23) | (1u << 22) | 2)                 /* 64-bit address, GGTT */
+
+#define GGTT_ENGINE      0xC2000000u            /* the status page, the context, the ring */
+#define CTX_PAGES        22                     /* PPHWSP + registers (i915: 22 for Gen12 xcs) */
+#define RING_PAGES       4
+
+static int blitter_ok;
+static char blitter_status[120] = "not tried";
+static uint32_t *ctx_regs, *ctx_ring, *ctx_data;  /* the context's registers, ring, the number it writes */
+static uint32_t ctx_data_g, ctx_desc_lo, ctx_desc_hi;
+static uint32_t ring_tail;
+
+const char *igfx_blitter_status(void) { return blitter_status; }
+
+int igfx_blitter_test(void) {
+    if (!ok) return -1;
+    uint32_t hws_g = GGTT_ENGINE, ctx_g = hws_g + 4096, ring_g = ctx_g + CTX_PAGES * 4096,
+             data_g = ring_g + RING_PAGES * 4096;
+    uint32_t *hws = gpu_buffer(hws_g, 1), *ctx = gpu_buffer(ctx_g, CTX_PAGES),
+             *ring = gpu_buffer(ring_g, RING_PAGES), *data = gpu_buffer(data_g, 1);
+    ctx_regs = ctx + 1024;
+    ctx_ring = ring;
+    ctx_data = data;
+    ctx_data_g = data_g;
+    if (!hws || !ctx || !ring || !data) {
+        k_snprintf(blitter_status, sizeof(blitter_status), "out of memory");
+        return -1;
+    }
+    memset(hws, 0, 4096);
+    memset(ctx, 0, CTX_PAGES * 4096);
+    memset(ring, 0, RING_PAGES * 4096);
+    data[0] = 0;
+
+    /* The ring: one store, then padding to an even number of dwords. */
+    int n = 0;
+    ring[n++] = MI_STORE_GGTT;
+    ring[n++] = data_g;
+    ring[n++] = 0;
+    ring[n++] = 0x600DF00D;
+    ring[n++] = MI_NOOP;
+    ring[n++] = MI_NOOP;
+    uint32_t tail = (uint32_t)n * 4;
+
+    /* The context's registers (page 1; page 0 is the per-process status page). */
+    uint32_t *r = ctx + 1024;
+    r[0] = MI_NOOP;
+    r[1] = MI_LRI(13);
+    r[2] = BCS + RING_CTX_CONTROL;
+    r[3] = MASKED_ON(1u << 0) |                       /* engine context restore inhibit (first run) */
+           MASKED_ON(1u << 3);                        /* (inhibit synchronous context switch) */
+    r[4] = BCS + RING_HEAD;  r[5] = 0;
+    r[6] = BCS + RING_TAIL;  r[7] = tail;
+    r[8] = BCS + RING_START; r[9] = ring_g;
+    r[10] = BCS + RING_CTL;  r[11] = ((RING_PAGES - 1) * 4096u) | 1;   /* size - 4 KiB, valid */
+    for (int i = 0; i < 9; i++) {                     /* batch buffer state etc: zero */
+        static const uint16_t more[9] = { 0x168, 0x140, 0x110, 0x1C0, 0x1C4, 0x1C8, 0x180, 0x2B4, 0 };
+        if (!more[i]) break;
+        r[12 + 2 * i] = BCS + more[i];
+        r[13 + 2 * i] = 0;
+    }
+    r[33] = MI_LRI(9);                                /* the timestamp, the page directory pointers */
+    static const uint16_t pdp[9] = { 0x3A8, 0x28C, 0x288, 0x284, 0x280, 0x27C, 0x278, 0x274, 0x270 };
+    for (int i = 0; i < 9; i++) {
+        r[34 + 2 * i] = BCS + pdp[i];
+        r[35 + 2 * i] = 0;                            /* PDP0 (49 high, 51 low): igfx_copy */
+    }
+    r[52] = (0x0Au << 23);                            /* MI_BATCH_BUFFER_END: the list ends */
+    __asm__ volatile("sfence" ::: "memory");
+
+    mm_wr(FORCEWAKE_GT, 0x00010001);
+    uint64_t end = timer_ms() + 50;
+    while (!(mm(FORCEWAKE_GT_ACK) & 1) && timer_ms() < end) { }
+
+    /* Execlists on, the engine's status page, the ring not stopped. */
+    mm_wr(BCS + RING_HWS_PGA, hws_g);
+    mm_wr(BCS + RING_MODE, MASKED_ON(1u << 3));       /* GEN11_GFX_DISABLE_LEGACY_MODE */
+    mm_wr(BCS + RING_MI_MODE, MASKED_OFF(1u << 8));   /* STOP_RING off */
+    (void)mm(BCS + RING_MODE);
+
+    /* The descriptor: valid, legacy 32-bit addressing, privileged, the context's GGTT address. */
+    uint32_t lo = ctx_g | (1u << 8) | (1u << 3) | (1u << 1) | (1u << 0);   /* (bit 1: reload the page tables) */
+    uint32_t hi = (1u << (37 - 32)) | (3u << (61 - 32));   /* software context id 1, class: copy */
+    mm_wr(BCS + EXECLIST_SQ_LO, lo);
+    mm_wr(BCS + EXECLIST_SQ_HI, hi);
+    mm_wr(BCS + EXECLIST_CONTROL, 1);                 /* load */
+    ctx_desc_lo = lo;
+    ctx_desc_hi = hi;
+    ring_tail = tail;
+
+    end = timer_ms() + 100;
+    while (*(volatile uint32_t *)data != 0x600DF00D && timer_ms() < end) __asm__ volatile("pause");
+    uint32_t got = *(volatile uint32_t *)data, ms = (uint32_t)(timer_ms() + 100 - end);
+    char line[220];
+    k_snprintf(line, sizeof(line),
+               "igfx: blitter test: %s (wrote %x) in %u ms; head %x tail %x ctl %x execlist %x:%x mode %x\n",
+               got == 0x600DF00D ? "ok" : "no answer", got, ms, mm(BCS + RING_HEAD), mm(BCS + RING_TAIL),
+               mm(BCS + RING_CTL), mm(BCS + EXECLIST_STATUS), mm(BCS + EXECLIST_STATUS + 4), mm(BCS + RING_MODE));
+    print_log(line);
+    blitter_ok = got == 0x600DF00D;
+    if (!blitter_ok) mm_wr(FORCEWAKE_GT, 0x00010000);
+    k_snprintf(blitter_status, sizeof(blitter_status), "%s", blitter_ok ? "blitter answers" : "blitter: no answer");
+    return blitter_ok ? 0 : -1;
+}
+
+/* ---- The blitter (step 3: copying frames) ----------------------------------
+ * The desktop's frame is drawn into the shadow (RAM); presenting copies the
+ * changed rectangles into the buffer the screen shows next. The blitter does
+ * that copy (XY_FAST_COPY_BLT) instead of the CPU. Its commands address
+ * memory through the context's own page tables (PPGTT, legacy 32-bit: four
+ * page directory pointers), not the GGTT; ours map the shadow at VA_SHADOW
+ * and the two screen buffers at VA_BUF1 and VA_BUF2 (both in RAM: the
+ * firmware's framebuffer is in stolen memory, which the blitter may not
+ * reach). A command that does not finish in 50 ms turns the blitter off and
+ * the CPU copies again. */
+#define VA_SHADOW        0x10000000u
+#define VA_BUF1          0x20000000u
+#define VA_BUF2          0x30000000u
+#define XY_FAST_COPY     ((2u << 29) | (0x42u << 22) | (10 - 2))
+#define FAST_COPY_32BPP  (3u << 24)
+#define MI_FLUSH_DW      ((0x26u << 23) | 2)
+#define PTE_RW           3u                     /* present, writable */
+
+static uint64_t *ppgtt_pd;                      /* the one directory (VA 0 - 1 GiB) */
+static const uint32_t *mapped_shadow;
+static uint32_t seqno, ring_bytes = RING_PAGES * 4096;
+static uint32_t src_off, src_pitch;              /* where the source starts in VA_SHADOW, its row length in bytes */
+static int tables_changed;                       /* the GPU may hold old translations: invalidate first */
+
+/* The physical page behind a kernel address (4 KiB or inside a 2 MiB page). */
+static uint64_t phys_of(uint64_t va) {
+    uint64_t e = paging_get_entry(va);
+    if (!(e & PAGE_PRESENT)) return 0;
+    if (e & PAGE_SIZE_2MB) return (e & 0x000FFFFFFFE00000ULL) + (va & 0x1FF000);
+    return e & 0x000FFFFFFFFFF000ULL;
+}
+
+static int ppgtt_map(uint32_t va, uint64_t phys) {
+    uint64_t *pde = &ppgtt_pd[(va >> 21) & 511];
+    if (!*pde) {
+        uint64_t pt = page_alloc();
+        if (!pt) return -1;
+        memset(phys_to_virt(pt), 0, 4096);
+        *pde = pt | PTE_RW;
+    }
+    uint64_t *pt = phys_to_virt(*pde & ~0xFFFULL);
+    pt[(va >> 12) & 511] = phys | PTE_RW;
+    return 0;
+}
+
+/* [cpu, cpu + bytes) from `va` on, which is then where `cpu`'s page starts:
+ * the data itself is at va + (cpu & 0xFFF). */
+static int ppgtt_map_range(uint32_t va, const void *cpu, uint64_t bytes) {
+    uint64_t first = (uint64_t)cpu & ~0xFFFULL;
+    bytes += (uint64_t)cpu & 0xFFF;
+    for (uint64_t off = 0; off < bytes; off += 4096) {
+        uint64_t p = phys_of(first + off);
+        if (!p || ppgtt_map(va + (uint32_t)off, p)) return -1;
+    }
+    return 0;
+}
+
+int igfx_blitter_ready(void) { return blitter_ok; }
+
+static void blitter_off(const char *why) {
+    blitter_ok = 0;
+    k_snprintf(blitter_status, sizeof(blitter_status), "blitter off: %s", why);
+    char line[200];
+    k_snprintf(line, sizeof(line), "igfx: blitter off (%s); head %x tail %x execlist %x:%x\n", why,
+               mm(BCS + RING_HEAD), mm(BCS + RING_TAIL), mm(BCS + EXECLIST_STATUS), mm(BCS + EXECLIST_STATUS + 4));
+    print_log(line);
+}
+
+/* The page tables for the copies (once): the screen buffers now, the shadow
+ * when it is first seen. */
+static int blitter_tables(const uint32_t *shadow) {
+    uint64_t bytes = (uint64_t)pitch * height;
+    if (!ppgtt_pd) {
+        uint64_t pd = page_alloc();
+        uint32_t *b2 = igfx_buffer(2), *b1 = igfx_buffer(1);
+        if (!pd || !b1 || !b2) return -1;
+        ppgtt_pd = phys_to_virt(pd);
+        memset(ppgtt_pd, 0, 4096);
+        if (ppgtt_map_range(VA_BUF1, b1, bytes) || ppgtt_map_range(VA_BUF2, b2, bytes)) return -1;
+        uint32_t *r = ctx_regs;                       /* PDP0 (low, high) in the context */
+        r[49] = (uint32_t)(pd >> 32);
+        r[51] = (uint32_t)pd;
+    }
+    if (shadow && shadow != mapped_shadow) {   /* (0: the buffers only) */
+        if (ppgtt_map_range(VA_SHADOW, shadow, (uint64_t)width * height * 4)) return -1;
+        mapped_shadow = shadow;
+        src_off = (uint32_t)((uint64_t)shadow & 0xFFF);   /* (the heap's block need not start a page) */
+        src_pitch = width * 4;
+        tables_changed = 1;
+        __asm__ volatile("wbinvd" ::: "memory");      /* the tables out of the CPU's caches */
+    }
+    return 0;
+}
+
+/* The source is a program's frame instead (its physical pages, `pages[0]`
+ * holding its first pixel at `offset`): the blitter reads it where the
+ * program drew it, and the CPU copies nothing. `token` is the program's
+ * address of it. Under the kernel lock. -> 0 */
+int igfx_copy_source(const void *token, const uint64_t *pages, int n, uint32_t offset, uint32_t pitch_bytes) {
+    if (!blitter_ok || blitter_tables(0) < 0) return -1;
+    for (int i = 0; i < n; i++)
+        if (ppgtt_map(VA_SHADOW + (uint32_t)i * 4096, pages[i])) return -1;
+    mapped_shadow = token;
+    src_off = offset;
+    src_pitch = pitch_bytes;
+    tables_changed = 1;
+    __asm__ volatile("wbinvd" ::: "memory");
+    return 0;
+}
+
+/* Under the kernel lock (it allocates): the tables for this shadow. -> 0 ready. */
+int igfx_copy_prepare(const uint32_t *shadow) {
+    if (!blitter_ok) return -1;
+    if (blitter_tables(shadow)) {
+        blitter_off("no memory for its page tables");
+        return -1;
+    }
+    return 0;
+}
+
+int igfx_copy(const uint32_t *shadow, int buffer, const int *rects, int n) {
+    if (!blitter_ok || shadow != mapped_shadow || buffer < 1 || buffer > 2 || n <= 0) return -1;
+    uint32_t need = (uint32_t)(4 + n * 10 + 4 + 4 + 2) * 4;
+    if (need > ring_bytes / 2) return -1;
+    if (ring_tail + need > ring_bytes) {              /* wrap: no-ops to the end */
+        while (ring_tail < ring_bytes) ctx_ring[ring_tail / 4] = MI_NOOP, ring_tail += 4;
+        ring_tail = 0;
+    }
+    uint32_t *c = ctx_ring + ring_tail / 4, *start = c;
+    uint32_t dst = buffer == 1 ? VA_BUF1 : VA_BUF2;
+    if (tables_changed) {                             /* forget old translations (needs a post-sync write) */
+        *c++ = MI_FLUSH_DW | (1u << 18) | (1u << 14);
+        *c++ = (ctx_data_g + 4) | (1u << 2);          /* (GGTT) */
+        *c++ = 0;
+        *c++ = 0;
+        tables_changed = 0;
+    }
+    for (int i = 0; i < n; i++) {
+        uint32_t x0 = (uint32_t)rects[4 * i], y0 = (uint32_t)rects[4 * i + 1];
+        uint32_t x1 = (uint32_t)rects[4 * i + 2], y1 = (uint32_t)rects[4 * i + 3];
+        *c++ = XY_FAST_COPY;
+        *c++ = FAST_COPY_32BPP | pitch;               /* destination: linear */
+        *c++ = (y0 << 16) | x0;
+        *c++ = (y1 << 16) | x1;
+        *c++ = dst;
+        *c++ = 0;
+        *c++ = (y0 << 16) | x0;                       /* source: the same place in the shadow */
+        *c++ = src_pitch;
+        *c++ = VA_SHADOW + src_off;
+        *c++ = 0;
+    }
+    *c++ = MI_FLUSH_DW;                               /* the copies reach memory */
+    *c++ = 0;
+    *c++ = 0;
+    *c++ = 0;
+    *c++ = MI_STORE_GGTT;                             /* then: this frame's number */
+    *c++ = ctx_data_g;
+    *c++ = 0;
+    *c++ = ++seqno;
+    if ((c - start) & 1) *c++ = MI_NOOP;
+    ring_tail += (uint32_t)(c - start) * 4;
+    if (ring_tail >= ring_bytes) ring_tail = 0;
+    ctx_regs[7] = ring_tail;                          /* the context's RING_TAIL */
+    __asm__ volatile("sfence" ::: "memory");
+    mm_wr(BCS + EXECLIST_SQ_LO, ctx_desc_lo);
+    mm_wr(BCS + EXECLIST_SQ_HI, ctx_desc_hi);
+    mm_wr(BCS + EXECLIST_CONTROL, 1);
+
+    uint64_t end = timer_ms() + 50;
+    while (*(volatile uint32_t *)ctx_data != seqno) {
+        if (timer_ms() > end) {
+            blitter_off("a copy did not finish");
+            return -1;
+        }
+        __asm__ volatile("pause");
+    }
+    return 0;
 }

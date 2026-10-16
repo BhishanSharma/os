@@ -334,8 +334,11 @@ void kernel_main() {
     if (have_ticks) msi_init();
     registry_scan_pci();                       // the device tree (`ioreg`)
     if (have_fb && fbcon_active() && !no_gpu) {
-        if (igfx_init(&fb) == 0) print_boot_status(BOOT_OK, "Graphics", "%s", igfx_status());
-        else if (strncmp(igfx_status(), "no Intel", 8)) print_boot_status(BOOT_WARN, "Graphics", "%s", igfx_status());
+        if (igfx_init(&fb) == 0) {
+            print_boot_status(BOOT_OK, "Graphics", "%s", igfx_status());
+            igfx_engines_probe();
+            igfx_blitter_test();
+        } else if (strncmp(igfx_status(), "no Intel", 8)) print_boot_status(BOOT_WARN, "Graphics", "%s", igfx_status());
     }
     registry_add(0, "Memory", "memory", "%u MiB usable", (uint32_t)(get_total_memory() >> 20));
 

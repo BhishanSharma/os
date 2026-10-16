@@ -259,6 +259,8 @@ struct os_task {
 #define GFX_BLIT     2   /* arg = struct os_blit *: 0x00RRGGBB pixels -> 0 */
 #define GFX_END      3   /* give it back: the console redraws (also when the program ends) */
 #define GFX_PRESENT  5   /* show what was blitted at the next refresh, after the frame before -> 1, 0: no page flipping */
+#define GFX_SURFACE  6   /* arg = struct os_blit * (the whole screen, x = y = 0): the frame the
+                            blits come from; the GPU copies from it -> 0, SYSERR_NOENT: no blitter */
 #define GFX_CURSOR   4   /* arg = struct os_cursor *: the kernel draws the pointer (0: stop) -> 0 */
 
 struct os_gfx_info {

@@ -1952,6 +1952,11 @@ int main(int argc, char **argv) {
         if (fresh) {
             paced = gfx_present() > 0;                /* tear-free on Intel graphics */
             unpresented = 0;
+            static int surface_tries;                 /* the GPU takes frames from scr itself */
+            if (surface_tries >= 0 && surface_tries++ < 20 && gfx_surface(scr.px, W, H, scr.stride) == 0) {
+                printf("windowserver: the GPU copies frames from here on\n");
+                surface_tries = -1;
+            }
         }
         if (!paced) sleep_ms(5);                      /* else the screen's refresh set the pace */
     }

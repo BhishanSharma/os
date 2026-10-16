@@ -44,6 +44,7 @@ void print_set_tap(int (*tap)(char));
 /* The system log from byte *from on (counted since power-on): up to max
  * bytes; *from moves past them (and forward, if they were overwritten). */
 uint32_t print_log_read(uint64_t *from, char *buf, uint32_t max);
+void print_log(const char *str);       /* into the system log only (and serial), not on the screen */
 void print_str(const char* str);
 void print_set_color(uint8_t foreground, uint8_t background);
 void print_int(int value);

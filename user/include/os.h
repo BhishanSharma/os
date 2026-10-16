@@ -66,7 +66,10 @@ int getmouse(struct os_mouse *m);            /* 1 if there is a mouse; takes it 
 /* Pixels (framebuffer console only): see GFX_* in sys/syscall_nums.h */
 int gfx_info(struct os_gfx_info *info);      /* 0, or SYSERR_NOENT in VGA text mode */
 int gfx_begin(void);                         /* take the screen below the status bar */
-int gfx_begin_full(void);                    /* the whole screen, status bar too (the desktop) */
+int gfx_begin_full(void);
+/* The screen-sized frame your blits come from: the GPU copies straight from it
+ * (no copy by the CPU) -> 0; SYSERR_AGAIN: draw all of it once first. */
+int gfx_surface(const unsigned int *pixels, int w, int h, int stride);                    /* the whole screen, status bar too (the desktop) */
 int gfx_blit(int x, int y, int w, int h, const unsigned int *pixels, int stride);   /* 0x00RRGGBB */
 int gfx_end(void);
 int gfx_present(void);                       /* after blits: shown at the next refresh (waits for the last) -> 1, 0 */

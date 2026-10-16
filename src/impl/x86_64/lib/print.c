@@ -312,9 +312,7 @@ uint32_t print_log_read(uint64_t *from, char *buf, uint32_t max) {
     return n;
 }
 
-void print_char(char character) {
-    serial_putc(character);   // mirror everything to COM1 (survives crashes)
-    if (bootlog_on && bootlog_len < BOOTLOG_SIZE) bootlog[bootlog_len++] = character;
+static void syslog_putc(char character) {
     static int line_start = 1;                          /* each line starts with the time */
     if (line_start) {
         char stamp[16];
@@ -324,6 +322,19 @@ void print_char(char character) {
     }
     syslog_ring[syslog_total++ % SYSLOG_SIZE] = character;
     line_start = character == '\n';
+}
+
+void print_log(const char *str) {
+    for (; *str; str++) {
+        serial_putc(*str);
+        syslog_putc(*str);
+    }
+}
+
+void print_char(char character) {
+    serial_putc(character);   // mirror everything to COM1 (survives crashes)
+    if (bootlog_on && bootlog_len < BOOTLOG_SIZE) bootlog[bootlog_len++] = character;
+    syslog_putc(character);
     if (print_tap && print_tap(character)) return;     /* into a Terminal window's pipe */
     if (console_muted) return;
     if (scrollback_view_offset) scroll_to_bottom();   // new output: back to the live screen

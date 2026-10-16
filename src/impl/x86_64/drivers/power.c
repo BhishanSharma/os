@@ -7,6 +7,8 @@
 // methods read), and the polled event loop: the ACPI interrupt (SCI) is not
 // wired up, power_poll() checks the event registers from the idle loop.
 #include "drivers/power.h"
+#include "drivers/addr.h"
+#include "core/multiboot2.h"
 #include "drivers/acpi.h"
 #include "drivers/paging.h"
 #include "drivers/heap.h"
@@ -53,6 +55,9 @@ static void calibrate(void) {
     tsc_base = rdtsc();
 }
 
+static uint64_t slept_ms, waited_ms;             /* (for the log: where ACPI's start-up time goes) */
+static int ec_timeouts;
+
 uacpi_u64 uacpi_kernel_get_nanoseconds_since_boot(void) {
     return (rdtsc() - tsc_base) * 1000 / tsc_per_us;
 }
@@ -64,6 +69,7 @@ void uacpi_kernel_stall(uacpi_u8 usec) {
 
 void uacpi_kernel_sleep(uacpi_u64 msec) {
     uint64_t end = uacpi_kernel_get_nanoseconds_since_boot() + msec * 1000000;
+    slept_ms += msec;
     while (uacpi_kernel_get_nanoseconds_since_boot() < end) cpu_wait();
 }
 
@@ -81,7 +87,22 @@ uacpi_status uacpi_kernel_get_rsdp(uacpi_phys_addr *out) {
 static struct { uint64_t phys, len; uint8_t *virt; } maps[MAPS];
 static int map_count, map_next;
 
+/* The firmware's tables and its RAM (ACPI reclaim and NVS) are in the direct
+ * map, cached; reading them uncached made loading the tables take 8 s on a
+ * laptop (14 tables, 600 KiB of AML). Only device registers get mmio_map. */
+#define RAM_REGIONS 64
+static mb2_region_t ram[RAM_REGIONS];
+static int ram_count = -1;
+
+static int in_ram(uint64_t addr, uint64_t len) {
+    if (ram_count < 0) ram_count = mb2_get_ram_like(ram, RAM_REGIONS);
+    for (int i = 0; i < ram_count; i++)
+        if (addr >= ram[i].base && addr + len <= ram[i].base + ram[i].length) return 1;
+    return 0;
+}
+
 void *uacpi_kernel_map(uacpi_phys_addr addr, uacpi_size len) {
+    if (in_ram(addr, len)) return phys_to_virt(addr);
     for (int i = 0; i < map_count; i++)
         if (addr >= maps[i].phys && addr + len <= maps[i].phys + maps[i].len)
             return maps[i].virt + (addr - maps[i].phys);
@@ -105,8 +126,8 @@ void uacpi_kernel_free(void *mem) {
 /* ---- Log: the serial line only (the screen gets a summary) ------------------ */
 
 void uacpi_kernel_log(uacpi_log_level level, const uacpi_char *msg) {
-    serial_puts(level <= UACPI_LOG_WARN ? "acpi! " : "acpi: ");
-    serial_puts(msg);
+    print_log(level <= UACPI_LOG_WARN ? "acpi! " : "acpi: ");
+    print_log(msg);
 }
 
 /* ---- Ports and PCI ------------------------------------------------------------ */
@@ -200,9 +221,13 @@ uacpi_status uacpi_kernel_acquire_mutex(uacpi_handle h, uacpi_u16 timeout) {
     counter_t *m = h;
     uint64_t start = uacpi_kernel_get_nanoseconds_since_boot();
     while (!__sync_bool_compare_and_swap(&m->value, 0, 1)) {
-        if (timeout == 0 || timed_out(start, timeout)) return UACPI_STATUS_TIMEOUT;
+        if (timeout == 0 || timed_out(start, timeout)) {
+            waited_ms += (uacpi_kernel_get_nanoseconds_since_boot() - start) / 1000000;
+            return UACPI_STATUS_TIMEOUT;
+        }
         cpu_wait();
     }
+    waited_ms += (uacpi_kernel_get_nanoseconds_since_boot() - start) / 1000000;
     return UACPI_STATUS_OK;
 }
 
@@ -217,7 +242,10 @@ uacpi_bool uacpi_kernel_wait_for_event(uacpi_handle h, uacpi_u16 timeout) {
         int v = e->value;
         if (v > 0 && __sync_bool_compare_and_swap(&e->value, v, v - 1)) return UACPI_TRUE;
         if (v > 0) continue;
-        if (timeout == 0 || timed_out(start, timeout)) return UACPI_FALSE;
+        if (timeout == 0 || timed_out(start, timeout)) {
+            waited_ms += (uacpi_kernel_get_nanoseconds_since_boot() - start) / 1000000;
+            return UACPI_FALSE;
+        }
         cpu_wait();
     }
 }
@@ -316,7 +344,10 @@ static int ec_up;
 static int ec_wait(uint8_t mask, uint8_t want) {
     uint64_t end = uacpi_kernel_get_nanoseconds_since_boot() + 100000000;   /* 100 ms */
     while ((inb(ec_cmd) & mask) != want)
-        if (uacpi_kernel_get_nanoseconds_since_boot() > end) return -1;
+        if (uacpi_kernel_get_nanoseconds_since_boot() > end) {
+            ec_timeouts++;
+            return -1;
+        }
     return 0;
 }
 
@@ -541,6 +572,20 @@ static uacpi_interrupt_ret power_button(uacpi_handle ctx) {
 
 /* ---- The interface ------------------------------------------------------------------------ */
 
+/* One line in the system log per start-up step: how long it took and what of
+ * that was the firmware's Sleep()s, waits and the EC's timeouts (100 ms each). */
+static void step(const char *what) {
+    static uint64_t last;
+    uint64_t now = uacpi_kernel_get_nanoseconds_since_boot() / 1000000;
+    char line[128];
+    k_snprintf(line, sizeof(line), "acpi: %s: %u ms (sleeps %u ms, waits %u ms, EC timeouts %d)\n",
+               what, (unsigned)(now - last), (unsigned)slept_ms, (unsigned)waited_ms, ec_timeouts);
+    print_log(line);
+    last = now;
+    slept_ms = waited_ms = 0;
+    ec_timeouts = 0;
+}
+
 int power_init(char *how, int how_len) {
     if (!acpi_rsdp_phys()) {
         k_snprintf(how, how_len, "no ACPI tables");
@@ -548,13 +593,17 @@ int power_init(char *how, int how_len) {
     }
     calibrate();
     uacpi_status st = uacpi_initialize(0);
+    step("tables");
     if (st == UACPI_STATUS_OK) st = uacpi_namespace_load();
+    step("namespace load");
     if (st != UACPI_STATUS_OK) {
         k_snprintf(how, how_len, "ACPI did not start: %s", uacpi_status_to_string(st));
         return -1;
     }
     ec_find();                                        /* before _REG and _INI run */
+    step("embedded controller");
     st = uacpi_namespace_initialize();
+    step("namespace initialize (_REG, _INI)");
     if (st != UACPI_STATUS_OK) {
         k_snprintf(how, how_len, "ACPI did not start: %s", uacpi_status_to_string(st));
         return -1;
@@ -564,7 +613,9 @@ int power_init(char *how, int how_len) {
     uacpi_find_devices("PNP0C0C", found_button, UACPI_NULL);
     uacpi_find_devices("PNP0C0A", found_battery, UACPI_NULL);
     uacpi_find_devices("ACPI0003", found_ac, UACPI_NULL);
+    step("devices");
     refresh();
+    step("battery");
     acpi_ready = 1;
     ready_since = get_tick();
     button_pressed = 0;

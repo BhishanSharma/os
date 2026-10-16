@@ -46,6 +46,8 @@ int fbcon_cursor_active(void);
  * graphics), waiting for the frame before to be shown: 1, or 0 when there is
  * no page flipping. */
 int fbcon_present(void);
+/* The desktop's frame as the blitter's source (GFX_SURFACE) -> 0. */
+int fbcon_surface(const uint32_t *px, int stride, const uint64_t *pages, int n);
 void fbcon_flip_poll(void);              /* from the 1 kHz timer */
 
 /* Draw one cell; `cursor` draws an underline cursor in it. */

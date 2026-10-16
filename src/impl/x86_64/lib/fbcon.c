@@ -332,7 +332,10 @@ void fbcon_cursor_move(int x, int y) {
 #define MAX_RECTS 32
 typedef struct { int x0, y0, x1, y1; } rect_t;
 static rect_t now_rects[MAX_RECTS], last_rects[MAX_RECTS];
-static int now_n, last_n, front;          /* front: 0 the firmware's buffer, 1 ours */
+static int now_n, last_n, front;          /* front: 0 the firmware's buffer, 1 or 2 ours */
+static const uint32_t *surface;           /* the desktop's own frame (GFX_SURFACE): no shadow copy */
+static int surface_stride;
+static int ram_pair;                      /* flipping between buffers 1 and 2 (with the blitter) */
 
 static void add_rect(rect_t *list, int *n, int x0, int y0, int x1, int y1) {
     if (x0 < 0) x0 = 0;
@@ -362,12 +365,15 @@ static void flip_start(void) {
     now_n = last_n = 0;
     add_rect(last_rects, &last_n, 0, 0, (int)fb.width, (int)fb.height);   /* ours holds nothing yet */
     front = 0;
+    ram_pair = igfx_blitter_ready();          /* buffers 1 and 2 take turns: both start empty */
+    if (ram_pair) add_rect(now_rects, &now_n, 0, 0, (int)fb.width, (int)fb.height);
     flip_on = 1;
 }
 
 static void flip_stop(void) {
     if (!flip_on) return;
     flip_on = 0;
+    surface = 0;
     if (front) igfx_flip(0);               /* the console draws into the firmware's buffer */
     front = 0;
 }
@@ -375,6 +381,16 @@ static void flip_stop(void) {
 static void flip_blit(int x, int y, int w, int h, const uint32_t *src, int stride) {
     int x0 = x < 0 ? 0 : x, x1 = x + w > (int)fb.width ? (int)fb.width : x + w;
     if (x1 <= x0) return;
+    if (surface) {
+        if (stride == surface_stride && src == surface + (int64_t)y * stride + x) {
+            add_rect(now_rects, &now_n, x, y, x + w, y + h);   /* it is already there */
+            return;
+        }
+        for (uint32_t j = 0; j < fb.height; j++)       /* from elsewhere: back to the shadow */
+            memcpy(shadow + (uint64_t)j * fb.width, surface + (uint64_t)j * surface_stride, fb.width * 4);
+        surface = 0;
+        add_rect(now_rects, &now_n, 0, 0, (int)fb.width, (int)fb.height);
+    }
     for (int j = 0; j < h; j++) {
         int sy = y + j;
         if (sy < 0 || (uint32_t)sy >= fb.height) continue;
@@ -384,8 +400,10 @@ static void flip_blit(int x, int y, int w, int h, const uint32_t *src, int strid
 }
 
 static void copy_rect(uint8_t *dst, const rect_t *r) {
+    const uint32_t *src = surface ? surface : shadow;
+    uint64_t stride = surface ? (uint64_t)surface_stride : fb.width;
     for (int j = r->y0; j < r->y1; j++) {
-        const uint32_t *from = shadow + (uint64_t)j * fb.width + r->x0;
+        const uint32_t *from = src + (uint64_t)j * stride + r->x0;
         uint32_t *to = (uint32_t *)(dst + (uint64_t)j * fb.pitch) + r->x0;
         uint64_t n = (uint64_t)(r->x1 - r->x0);
         __asm__ volatile("rep movsl" : "+D"(to), "+S"(from), "+c"(n) : : "memory");
@@ -393,6 +411,17 @@ static void copy_rect(uint8_t *dst, const rect_t *r) {
 }
 
 static volatile int flip_waiting;
+
+/* The desktop's frame (`px`, rows `stride` pixels apart, the screen's size)
+ * is what its blits come from: the blitter copies from it directly. `pages`:
+ * its physical pages. -> 0, -1 if there is no blitter or page flipping. */
+int fbcon_surface(const uint32_t *px, int stride, const uint64_t *pages, int n) {
+    if (!flip_on || !ram_pair || !igfx_blitter_ready()) return -1;
+    if (igfx_copy_source(px, pages, n, (uint32_t)((uint64_t)px & 0xFFF), (uint32_t)stride * 4)) return -1;
+    surface = px;
+    surface_stride = stride;
+    return 0;
+}
 
 /* From the 1 kHz timer: the last flip reached the screen. */
 void fbcon_flip_poll(void) {
@@ -412,8 +441,9 @@ int fbcon_present(void) {
         flip_waiting = 1;
         task_block((const void *)&flip_waiting, 20);
     }
-    int target = !front;
-    uint8_t *dst = target ? (uint8_t *)igfx_back_buffer() : fb_base;
+    int target = ram_pair ? (front == 1 ? 2 : 1) : !front;   /* with the blitter: our two RAM buffers */
+    int gpu = ram_pair && (surface ? igfx_blitter_ready() : igfx_copy_prepare(shadow) == 0);
+    uint8_t *dst = target ? (uint8_t *)igfx_buffer(target) : fb_base;
     rect_t todo[2 * MAX_RECTS];                    /* this frame's and the last (the buffer is a frame behind) */
     int n = 0;
     for (int i = 0; i < now_n; i++) todo[n++] = now_rects[i];
@@ -425,7 +455,8 @@ int fbcon_present(void) {
      * the desktop's present uses: other cores may use the kernel meanwhile.
      * (A blit that lands in the shadow now is copied again next frame.) */
     int depth = bkl_drop();
-    for (int i = 0; i < n; i++) copy_rect(dst, &todo[i]);
+    if (!gpu || igfx_copy(surface ? surface : shadow, target, &todo[0].x0, n) != 0)
+        for (int i = 0; i < n; i++) copy_rect(dst, &todo[i]);
     bkl_take(depth);
     if (!flip_on) return 0;                         /* the desktop ended meanwhile */
     igfx_flip(target);

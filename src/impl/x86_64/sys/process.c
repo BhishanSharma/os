@@ -512,15 +512,15 @@ static void __attribute__((noreturn)) finish(int code, int whole) {
         kfree(p);
         t->process = 0;
     }
-    t->root = paging_kernel_root();
-    paging_switch(t->root);
-    paging_free_address_space(root);
-    if (mouse_owner() == t->pid) mouse_set_owner(0);  // the console gets the mouse back
-    if (graphics_owner == t->pid) {                    // and the screen
+    if (graphics_owner == t->pid) {                    // the screen (before its memory goes: the GPU may read it)
         graphics_owner = 0;
         fbcon_cursor_set(0, 0, 0, 0, 0, 0, 0);
         print_set_graphics(0);
     }
+    t->root = paging_kernel_root();
+    paging_switch(t->root);
+    paging_free_address_space(root);
+    if (mouse_owner() == t->pid) mouse_set_owner(0);  // the console gets the mouse back
     // Its programs live on; pid 1 (login) collects them when they end.
     for (int i = 0; i < MAX_TASKS; i++) {
         task_t *c = task_at(i);
@@ -1636,6 +1636,30 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
         case GFX_PRESENT:
             if (graphics_owner != me) return SYSERR_PERM;
             return fbcon_present();
+        case GFX_SURFACE: {
+            if (graphics_owner != me) return SYSERR_PERM;
+            if (!user_range_ok(arg, sizeof(struct os_blit), 0)) return SYSERR_FAULT;
+            struct os_blit b = *(const struct os_blit *)arg;
+            if (b.w != (int)width || b.h != (int)height || b.stride < b.w) return SYSERR_BADCALL;
+            uint64_t va = (uint64_t)(uintptr_t)b.pixels;
+            uint64_t bytes = ((uint64_t)(b.h - 1) * (uint64_t)b.stride + (uint64_t)b.w) * 4;
+            if (!user_range_ok(va, bytes, 0)) return SYSERR_FAULT;
+            int n = (int)(((va & 0xFFF) + bytes + 4095) / 4096);
+            uint64_t *pages = kmalloc((uint64_t)n * 8);
+            if (!pages) return SYSERR_NOMEM;
+            uint64_t root = task_current()->root;
+            for (int i = 0; i < n; i++) {
+                uint64_t e = paging_get_user_entry(root, (va & ~0xFFFULL) + (uint64_t)i * 4096);
+                if (!(e & 1)) {                          /* not touched yet: draw once, then ask */
+                    kfree(pages);
+                    return SYSERR_AGAIN;
+                }
+                pages[i] = e & 0x000FFFFFFFFFF000ULL;
+            }
+            int r = fbcon_surface(b.pixels, b.stride, pages, n);
+            kfree(pages);
+            return r == 0 ? 0 : SYSERR_NOENT;
+        }
         case GFX_END:
             if (graphics_owner != me) return SYSERR_PERM;
             graphics_owner = 0;
