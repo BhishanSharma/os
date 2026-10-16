@@ -31,7 +31,8 @@ struct ws_reply {
 };
 
 enum { WS_EV_KEY = 1, WS_EV_DOWN, WS_EV_UP, WS_EV_MOVE, WS_EV_WHEEL, WS_EV_CLOSE,
-       WS_EV_RESIZE };      /* x, y: the new content size; the canvas has it already */
+       WS_EV_RESIZE,        /* x, y: the new content size; the canvas has it already */
+       WS_EV_PREFS };       /* Dark / Increase Contrast / ... changed: redraw (ui_pref is current) */
 
 struct ws_event {
     int type;

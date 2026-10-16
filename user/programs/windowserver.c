@@ -1453,7 +1453,10 @@ static void run(const char *program, const char *arg) {
 /* Tell every window (ws.h `prefs`) when a setting changes. */
 static void push_prefs(void) {
     for (int k = 0; k < MAX_WINDOWS; k++)
-        if (wins[k].used) wins[k].s->prefs = prefs_bits();
+        if (wins[k].used) {
+            wins[k].s->prefs = prefs_bits();
+            send_event(&wins[k], WS_EV_PREFS, 0, 0, 0);     /* so the app redraws in the new look */
+        }
 }
 
 static void menu_choose(int id) {

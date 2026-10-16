@@ -87,6 +87,7 @@ int main(void) {
 | `WS_EV_KEY`    | a key                                     | `key`: `'a'`, `'\n'`, `'\b'`, `27` (Esc), `KEYCODE_UP`/`DOWN`/`LEFT`/`RIGHT`, Ctrl+letter = 1-26 |
 | `WS_EV_RESIZE` | the window has a new size                 | `x`, `y` = width, height (already in `win.c`) |
 | `WS_EV_CLOSE`  | the red button or Ctrl+W                  | -                              |
+| `WS_EV_PREFS`  | Dark / Increase Contrast changed          | - (redraw: `ui_color` is already current) |
 
 `ui_wait(&win, &e, ms)` waits up to `ms` (0: no limit) and returns 0 on a
 timeout: a clock redraws on the timeout. `ui_poll` never waits (games, video).
@@ -108,9 +109,14 @@ All coordinates are pixels in the window, colours `0xRRGGBB`.
 | `ui_clip`, `ui_noclip` | keep drawing inside a rectangle |
 | `ui_set_title` | change the title bar |
 
-Colours that match the rest of the desktop: `UI_WINDOW`, `UI_TEXT`, `UI_DIM`,
-`UI_ACCENT`, `UI_BORDER`, `UI_WHITE`. `ui_pref(UI_PREF_DARK)` tells you if
-the user chose the dark appearance.
+Colours are semantic, as in macOS: ask `ui_color(token)` for what a colour is
+*for* (`UI_C_LABEL`, `UI_C_SECONDARY`, `UI_C_CONTENT`, `UI_C_SIDEBAR`,
+`UI_C_SEPARATOR`, `UI_C_ACCENT`, ... see `ui.h`) and it gives the right value for
+the light or dark appearance and for Increase Contrast. Ask every time you
+draw (never keep the value) and redraw on `WS_EV_PREFS`. The older names
+`UI_WINDOW`, `UI_TEXT`, `UI_DIM`, `UI_ACCENT`, `UI_BORDER` are tokens too;
+`UI_WHITE` is a literal white (text on the accent, a paper canvas).
+`ui_pref(UI_PREF_DARK)` tells you if the user chose the dark appearance.
 
 ### The system (`os.h`)
 

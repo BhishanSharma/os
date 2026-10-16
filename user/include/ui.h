@@ -11,13 +11,34 @@
 
 #include <ws.h>
 
-/* Colours, 0x00RRGGBB */
-#define UI_WINDOW   0xF2F2F2
-#define UI_TEXT     0x1E1E1E
-#define UI_DIM      0x8A8A8A
-#define UI_ACCENT   0x2F7BF5
-#define UI_BORDER   0xC8C8C8
-#define UI_WHITE    0xFFFFFF
+/* Colours, 0x00RRGGBB. Semantic tokens (the macOS way): a token says what a colour
+ * is FOR, and resolves for the current appearance (light, dark, Increase Contrast).
+ * Ask when you draw and never keep the value: the look can change while the program
+ * runs (WS_EV_PREFS), so redraw on that event. */
+enum {
+    UI_C_LABEL,          /* primary text */
+    UI_C_SECONDARY,      /* secondary text, column headers */
+    UI_C_TERTIARY,       /* placeholders, disabled text */
+    UI_C_WINDOW,         /* window background */
+    UI_C_TOOLBAR,        /* toolbar: the same as the title bar above it */
+    UI_C_CONTENT,        /* lists, text areas, documents */
+    UI_C_SIDEBAR,        /* sidebars */
+    UI_C_SEPARATOR,      /* hairlines between areas */
+    UI_C_ACCENT,         /* selection, default buttons, focus */
+    UI_C_ROW_ALT,        /* the striped rows of a table */
+    UI_C_FIELD,          /* text field background */
+    UI_C_CONTROL,        /* a button's face */
+    UI_C_CONTROL_EDGE,   /* a control's outline */
+    UI_C_CONTROL_OFF,    /* a disabled control's face */
+    UI_C_COUNT
+};
+unsigned ui_color(int token);
+#define UI_WINDOW   ui_color(UI_C_WINDOW)
+#define UI_TEXT     ui_color(UI_C_LABEL)
+#define UI_DIM      ui_color(UI_C_SECONDARY)
+#define UI_ACCENT   ui_color(UI_C_ACCENT)
+#define UI_BORDER   ui_color(UI_C_CONTROL_EDGE)
+#define UI_WHITE    0xFFFFFF   /* literal white (text on the accent, a paper canvas) */
 
 /* Pixels to draw on, with a clip rectangle. */
 typedef struct {

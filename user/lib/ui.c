@@ -514,8 +514,50 @@ int ui_icon(ui_canvas *c, int x, int y, int size, const char *name, int alpha) {
 
 /* ---- Widgets ------------------------------------------------------------- */
 
-/* Increase Contrast: rims at full opacity, darker borders. */
-static unsigned border_color(unsigned normal) { return ui_pref(UI_PREF_CONTRAST) ? 0x6E6E73 : normal; }
+/* Semantic colours: [Increase Contrast][Dark][token]. The light and dark values
+ * match the window server's tokens (windowserver.c). */
+static const unsigned color_table[2][2][UI_C_COUNT] = {
+    [0][0] = {   /* light */
+        [UI_C_LABEL] = 0x1D1D1F,   [UI_C_SECONDARY] = 0x6E6E73,   [UI_C_TERTIARY] = 0xA1A1A6,
+        [UI_C_WINDOW] = 0xF2F2F4,  [UI_C_TOOLBAR] = 0xE9E9EB,     [UI_C_CONTENT] = 0xFFFFFF,
+        [UI_C_SIDEBAR] = 0xEDEDF0, [UI_C_SEPARATOR] = 0xD8D8DC,   [UI_C_ACCENT] = 0x007AFF,
+        [UI_C_ROW_ALT] = 0xF5F5F7, [UI_C_FIELD] = 0xFFFFFF,       [UI_C_CONTROL] = 0xFFFFFF,
+        [UI_C_CONTROL_EDGE] = 0xD0D0D4, [UI_C_CONTROL_OFF] = 0xE8E8EC,
+    },
+    [0][1] = {   /* dark */
+        [UI_C_LABEL] = 0xF5F5F7,   [UI_C_SECONDARY] = 0x98989D,   [UI_C_TERTIARY] = 0x636366,
+        [UI_C_WINDOW] = 0x2C2C2E,  [UI_C_TOOLBAR] = 0x3A3A3C,     [UI_C_CONTENT] = 0x1E1E20,
+        [UI_C_SIDEBAR] = 0x262628, [UI_C_SEPARATOR] = 0x444447,   [UI_C_ACCENT] = 0x0A84FF,
+        [UI_C_ROW_ALT] = 0x262629, [UI_C_FIELD] = 0x1E1E20,       [UI_C_CONTROL] = 0x5C5C60,
+        [UI_C_CONTROL_EDGE] = 0x6B6B70, [UI_C_CONTROL_OFF] = 0x3A3A3C,
+    },
+    [1][0] = {   /* light, Increase Contrast: darker text, accent and outlines */
+        [UI_C_LABEL] = 0x000000,   [UI_C_SECONDARY] = 0x48484A,   [UI_C_TERTIARY] = 0x6E6E73,
+        [UI_C_WINDOW] = 0xF2F2F4,  [UI_C_TOOLBAR] = 0xE9E9EB,     [UI_C_CONTENT] = 0xFFFFFF,
+        [UI_C_SIDEBAR] = 0xEDEDF0, [UI_C_SEPARATOR] = 0x8E8E93,   [UI_C_ACCENT] = 0x0058D0,
+        [UI_C_ROW_ALT] = 0xF2F2F4, [UI_C_FIELD] = 0xFFFFFF,       [UI_C_CONTROL] = 0xFFFFFF,
+        [UI_C_CONTROL_EDGE] = 0x6E6E73, [UI_C_CONTROL_OFF] = 0xE0E0E4,
+    },
+    [1][1] = {   /* dark, Increase Contrast */
+        [UI_C_LABEL] = 0xFFFFFF,   [UI_C_SECONDARY] = 0xC7C7CC,   [UI_C_TERTIARY] = 0x98989D,
+        [UI_C_WINDOW] = 0x2C2C2E,  [UI_C_TOOLBAR] = 0x3A3A3C,     [UI_C_CONTENT] = 0x1E1E20,
+        [UI_C_SIDEBAR] = 0x262628, [UI_C_SEPARATOR] = 0xAEAEB2,   [UI_C_ACCENT] = 0x409CFF,
+        [UI_C_ROW_ALT] = 0x2C2C2E, [UI_C_FIELD] = 0x1E1E20,       [UI_C_CONTROL] = 0x5C5C60,
+        [UI_C_CONTROL_EDGE] = 0xAEAEB2, [UI_C_CONTROL_OFF] = 0x3A3A3C,
+    },
+};
+
+unsigned ui_color(int token) {
+    if (token < 0 || token >= UI_C_COUNT) return 0;
+    return color_table[ui_pref(UI_PREF_CONTRAST)][ui_pref(UI_PREF_DARK)][token];
+}
+
+/* `c` darkened by pct percent (a pressed accent button). */
+static unsigned shade(unsigned c, int pct) {
+    unsigned r = ((c >> 16) & 255) * (100 - pct) / 100, g = ((c >> 8) & 255) * (100 - pct) / 100,
+             b = (c & 255) * (100 - pct) / 100;
+    return r << 16 | g << 8 | b;
+}
 
 /* The ring sits 2 px outside the control: its radius is the control's + 2 px. */
 void ui_focus_ring(ui_canvas *c, int x, int y, int w, int h, int r, int scale) {
@@ -527,14 +569,14 @@ void ui_button_ex(ui_canvas *c, int x, int y, int w, int h, const char *label, i
     int r = (flags & UI_BTN_LARGE) ? UI_R_FULL : UI_R_MEDIUM * scale;      /* capsule, or radius.medium */
     int off = flags & UI_BTN_DISABLED, down = (flags & UI_BTN_PRESSED) && !off;
     int accent = (down || ((flags & UI_BTN_DEFAULT) && !off));
-    unsigned face = off ? 0xE8E8EC : accent ? (down ? 0x1F5FD0 : UI_ACCENT) : UI_WHITE;
-    unsigned ink = off ? UI_DIM : accent ? UI_WHITE : UI_TEXT;
+    unsigned face = off ? ui_color(UI_C_CONTROL_OFF) : accent ? (down ? shade(UI_ACCENT, 20) : UI_ACCENT) : ui_color(UI_C_CONTROL);
+    unsigned ink = off ? ui_color(UI_C_TERTIARY) : accent ? UI_WHITE : UI_TEXT;
     if ((flags & UI_BTN_FOCUSED) && !off) ui_focus_ring(c, x, y, w, h, r > h / 2 ? h / 2 : r, scale);
     if (!off) ui_shadow(c, x, y + scale, w, h, r > h / 2 ? h / 2 : r, 2 * scale, 40);
-    ui_round(c, x, y, w, h, r, accent ? face : border_color(0xD0D0D4));
+    ui_round(c, x, y, w, h, r, accent ? face : ui_color(UI_C_CONTROL_EDGE));
     ui_round(c, x + 1, y + 1, w - 2, h - 2, r > h / 2 ? (h - 2) / 2 : r - 1, face);
     if ((flags & UI_BTN_HOVER) && !off)                                    /* hover: +10% */
-        ui_round_ex(c, x, y, w, h, r, accent ? 0xFFFFFF : 0x000000, 26, UI_ALL);
+        ui_round_ex(c, x, y, w, h, r, (accent || ui_pref(UI_PREF_DARK)) ? 0xFFFFFF : 0x000000, 26, UI_ALL);
     ui_text(c, x + (w - ui_text_width(label, scale)) / 2, y + (h - 16 * scale) / 2, label, ink, scale);
 }
 
@@ -545,8 +587,8 @@ void ui_button(ui_canvas *c, int x, int y, int w, int h, const char *label, int 
 void ui_textfield(ui_canvas *c, int x, int y, int w, int h, const char *text, int scale, int focused) {
     int r = UI_R_MEDIUM * scale;                                           /* radius.medium: inputs */
     if (focused) ui_focus_ring(c, x, y, w, h, r, scale);
-    ui_round(c, x, y, w, h, r, focused ? UI_ACCENT : border_color(UI_BORDER));
-    ui_round(c, x + 1, y + 1, w - 2, h - 2, r - 1, UI_WHITE);
+    ui_round(c, x, y, w, h, r, focused ? UI_ACCENT : ui_color(UI_C_CONTROL_EDGE));
+    ui_round(c, x + 1, y + 1, w - 2, h - 2, r - 1, ui_color(UI_C_FIELD));
     int room = w - 16 * scale;
     const char *shown = text;                           /* the end stays in view */
     while (*shown && ui_text_width(shown, scale) > room) shown++;
@@ -562,12 +604,12 @@ int ui_list_hit(int y, int scale) { return y < 0 ? -1 : y / row_height(scale); }
 
 void ui_list_icons(ui_canvas *c, int x, int y, int w, int h, const char *const *items,
                    const char *const *icon_names, int count, int selected, int first, int scale) {
-    ui_fill(c, x, y, w, h, UI_WHITE);
+    ui_fill(c, x, y, w, h, ui_color(UI_C_CONTENT));
     int rows = ui_list_rows(h, scale), rh = row_height(scale), is = 16 * scale;
     for (int i = 0; i < rows && first + i < count; i++) {
         int k = first + i, ry = y + i * rh, tx = x + 16 * scale;
         if (k == selected) ui_round(c, x + 4 * scale, ry + 2 * scale, w - 8 * scale, rh - 4 * scale, UI_R_SMALL * scale, UI_ACCENT);
-        else if (k % 2) ui_fill(c, x, ry, w, rh, 0xF6F6F8);
+        else if (k % 2) ui_fill(c, x, ry, w, rh, ui_color(UI_C_ROW_ALT));
         if (icon_names && icon_names[k] && ui_icon(c, tx, ry + (rh - is) / 2, is, icon_names[k], 255) == 0)
             tx += is + 8 * scale;
         ui_text(c, tx, ry + (rh - 16 * scale) / 2, items[k], k == selected ? UI_WHITE : UI_TEXT, scale);
