@@ -171,6 +171,7 @@ typedef struct {
     spring_t sc;                       /* ANIM_OPEN: the scale, in percent * FP */
     int resizable, zoomed, gen;        /* zoom: WS_RESIZABLE, filling the screen, surface number */
     int saved_x, saved_y, saved_w, saved_h, want_x, want_y;   /* before zooming; where it goes */
+    int gpu_body, gpu_y0, gpu_y1;      /* this frame the GPU copies its content rows [gpu_y0, gpu_y1) */
 } window_t;
 
 typedef struct {
@@ -1127,8 +1128,14 @@ static void window_body(ui_canvas *cv, window_t *w, int cx, int cy, int focused,
     if (tx < cx + 80 * S) tx = cx + 80 * S;
     ui_text_bold(cv, tx, cy - TITLE_H + (TITLE_H - 16 * S) / 2, w->title,
                  focused ? TH.title_text_on : TH.title_text_off, S);
-    ui_copy_round(cv, cx, cy, (const unsigned *)((char *)w->s + WS_HEADER), w->w, w->h, w->w,
-                  RADIUS - 1, UI_BL | UI_BR);
+    const unsigned *px = (const unsigned *)((char *)w->s + WS_HEADER);
+    if (w->gpu_body && cx == w->x && cy == w->y) {      /* the GPU copies the middle (gfx_copy) */
+        int a = w->gpu_y0 - cy, b = w->gpu_y1 - cy;
+        if (a > 0) ui_copy(cv, cx, cy, px, w->w, a, w->w);
+        ui_copy_round(cv, cx, cy + b, px + (long)b * w->w, w->w, w->h - b, w->w, RADIUS - 1, UI_BL | UI_BR);
+        return;
+    }
+    ui_copy_round(cv, cx, cy, px, w->w, w->h, w->w, RADIUS - 1, UI_BL | UI_BR);
 }
 
 /* ---- Window motion ----------------------------------------------------------
@@ -1433,9 +1440,68 @@ static int motion(void) {
     return 0;
 }
 
+/* Window contents the GPU copies into the frame (gfx_copy) instead of the
+ * CPU: the rows of a window that nothing is drawn over (no window above it,
+ * no open menu; the menu bar's and the Dock's rows stay with the CPU), down to
+ * where its rounded corners start. The CPU draws the rest, then the GPU fills
+ * these in, then copies the frame to the screen. */
+static int gpu_frames;                                 /* gfx_surface took our frame */
+
+static int overlaps(int ax0, int ay0, int ax1, int ay1, int bx, int by, int bw, int bh) {
+    return ax0 < bx + bw && bx < ax1 && ay0 < by + bh && by < ay1;
+}
+
+static void plan_gpu_copies(void) {
+    static struct os_copy items[64];
+    int n = 0;
+    for (int k = 0; k < MAX_WINDOWS; k++) wins[k].gpu_body = 0;
+    if (!gpu_frames || !kernel_cursor || motion()) return;
+    int dock_top = dock_bottom() - dock_h() - 48 * S;  /* (with its labels and magnified icons) */
+    for (int i = 0; i < norder; i++) {
+        window_t *w = &wins[order[i]];
+        if (!live(w) || w->minimised || w->anim != ANIM_NONE) continue;
+        int x0 = w->x < 0 ? 0 : w->x, x1 = w->x + w->w > W ? W : w->x + w->w;
+        int y0 = w->y < MENU_H ? MENU_H : w->y, y1 = w->y + w->h - RADIUS;
+        if (y1 > dock_top) y1 = dock_top;
+        if (x1 <= x0 || y1 <= y0) continue;
+        int covered = menu_open && overlaps(x0, y0, x1, y1, menu_x() - SHADOW, menu_y() - SHADOW,
+                                            menu_w() + 2 * SHADOW, menu_h() + 2 * SHADOW);
+        for (int j = i + 1; j < norder && !covered; j++) {
+            window_t *u = &wins[order[j]];
+            int ox, oy, ow, oh;
+            if (!live(u) || u->minimised) continue;
+            outer(u, &ox, &oy, &ow, &oh);
+            covered = overlaps(x0, y0, x1, y1, ox - SHADOW, oy - SHADOW, ow + 2 * SHADOW, oh + 2 * SHADOW);
+        }
+        if (covered) continue;
+        int first = n;
+        for (int d = 0; d < ndmg && n <= 64; d++) {    /* what changed of it */
+            int a0 = dmg[d].x0 > x0 ? dmg[d].x0 : x0, a1 = dmg[d].x1 < x1 ? dmg[d].x1 : x1;
+            int b0 = dmg[d].y0 > y0 ? dmg[d].y0 : y0, b1 = dmg[d].y1 < y1 ? dmg[d].y1 : y1;
+            if (a1 <= a0 || b1 <= b0) continue;
+            if (n == 64) {
+                n = 65;
+                break;
+            }
+            items[n++] = (struct os_copy){ (const unsigned *)((char *)w->s + WS_HEADER), w->w, w->h,
+                                           a0, b0, a1 - a0, b1 - b0, a0 - w->x, b0 - w->y };
+        }
+        if (n > 64) {                                  /* too many pieces: the CPU draws this one */
+            n = first;
+            break;
+        }
+        w->gpu_body = 1;
+        w->gpu_y0 = y0;
+        w->gpu_y1 = y1;
+    }
+    if (n && gfx_copy(items, n) != 0)
+        for (int k = 0; k < MAX_WINDOWS; k++) wins[k].gpu_body = 0;
+}
+
 /* -> 1 if the frame was paced by the screen (page flipping): no sleep then. */
 static int compose(void) {
     frame_no++;
+    plan_gpu_copies();
     long area = 0;
     for (int d = 0; d < ndmg; d++) area += (long)(dmg[d].x1 - dmg[d].x0) * (dmg[d].y1 - dmg[d].y0);
     if (n_painters > 1 && frame_no > 1 && area >= PAINT_MIN && !motion()) {   /* (the first frame loads the font) */
@@ -1944,6 +2010,7 @@ int main(int argc, char **argv) {
             last_tidy = uptime_ms();
             tidy();
         }
+        if (gpu_frames) gfx_sync();                  /* the GPU has read the frame before */
         int fresh = compose(), paced = 0;
         mutex_unlock(&lock);
         /* Present without the lock: on Intel graphics it waits for the screen's
@@ -1954,8 +2021,9 @@ int main(int argc, char **argv) {
             unpresented = 0;
             static int surface_tries;                 /* the GPU takes frames from scr itself */
             if (surface_tries >= 0 && surface_tries++ < 20 && gfx_surface(scr.px, W, H, scr.stride) == 0) {
-                printf("windowserver: the GPU copies frames from here on\n");
+                printf("windowserver: the GPU copies frames (and window contents) from here on\n");
                 surface_tries = -1;
+                gpu_frames = 1;
             }
         }
         if (!paced) sleep_ms(5);                      /* else the screen's refresh set the pace */

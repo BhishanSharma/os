@@ -4,6 +4,7 @@
 #include "drivers/paging.h"
 #include "drivers/heap.h"
 #include "drivers/igfx.h"
+#include "drivers/timer.h"
 #include "sys/task.h"
 #include "sys/smp.h"
 #include "lib/string.h"
@@ -370,10 +371,89 @@ static void flip_start(void) {
     flip_on = 1;
 }
 
+/* ---- A batch on the GPU ------------------------------------------------------
+ * Presenting hands the copies to the blitter and returns; the flip happens
+ * when the batch is done (the 1 kHz timer looks, or whoever waits first).
+ * Until then the source must not change: the shadow (blits wait) or the
+ * desktop's frame (it calls GFX_SYNC before drawing). A batch that does not
+ * finish in 50 ms turns the blitter off and the CPU does its copies. */
+#define MAX_PRE 64
+typedef struct { struct igfx_pre g; const uint32_t *src; int stride; } pre_t;   /* + the CPU's view */
+static pre_t pre[MAX_PRE];
+static int npre;
+static int pending = -1;                    /* the buffer to show when the batch is done */
+static uint32_t pending_seq, pending_since;
+static rect_t pend_rects[2 * MAX_RECTS];
+static int pend_n, pend_npre;
+static pre_t pend_pre[MAX_PRE];
+
+static void copy_rect(uint8_t *dst, const rect_t *r);
+
+static void cpu_pre(const pre_t *p, int n) {           /* window contents into the desktop's frame */
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < p[i].g.h; j++)
+            memcpy((uint32_t *)surface + (uint64_t)(p[i].g.y + j) * surface_stride + p[i].g.x,
+                   p[i].src + (uint64_t)(p[i].g.sy + j) * p[i].stride + p[i].g.sx, (size_t)p[i].g.w * 4);
+}
+
+/* `wait` 0: only if it is done (the timer). -> 1 nothing pending any more. */
+static int pending_finish(int wait) {
+    while (pending >= 0) {
+        if (igfx_copy_done(pending_seq)) {
+            igfx_copy_idle();
+        } else if (!wait) {
+            return 0;
+        } else if (timer_ms() - pending_since > 50) {
+            igfx_copy_failed();                       /* the CPU does this frame's copies */
+            uint8_t *dst = (uint8_t *)igfx_buffer(pending);
+            if (surface) cpu_pre(pend_pre, pend_npre);
+            for (int i = 0; i < pend_n; i++) copy_rect(dst, &pend_rects[i]);
+        } else {
+            for (int i = 0; i < 200 && !igfx_copy_done(pending_seq); i++)
+                for (int k = 0; k < 1000; k++) __asm__ volatile("pause");   /* (usually well under 1 ms) */
+            if (!igfx_copy_done(pending_seq)) task_block((const void *)&pending, 1);
+            continue;
+        }
+        igfx_flip(pending);
+        pending = -1;
+        task_wakeup((const void *)&pending);
+    }
+    return 1;
+}
+
+/* GFX_SYNC: the desktop may draw into its frame again. */
+void fbcon_sync(void) {
+    if (flip_on) pending_finish(1);
+}
+
+/* GFX_COPY: a window's contents (`src`, rows `stride` pixels apart; its
+ * blitter address src_va) at (sx, sy), to (x, y) in the desktop's frame,
+ * w x h, before the next present. -> 0, -1 (the CPU draws it). */
+int fbcon_queue_copy(const uint32_t *src, int stride, uint32_t src_va, int x, int y, int w, int h, int sx, int sy) {
+    if (!surface || npre == MAX_PRE || !igfx_blitter_ready()) return -1;
+    if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > (int)fb.width || y + h > (int)fb.height) return -1;
+    pre_t *p = &pre[npre++];
+    p->g.src_va = src_va;
+    p->g.src_pitch = (uint32_t)stride * 4;
+    p->g.x = x;
+    p->g.y = y;
+    p->g.w = w;
+    p->g.h = h;
+    p->g.sx = sx;
+    p->g.sy = sy;
+    p->src = src;
+    p->stride = stride;
+    return 0;
+}
+
+void fbcon_drop_copies(void) { npre = 0; }
+
 static void flip_stop(void) {
     if (!flip_on) return;
+    pending_finish(1);                     /* (the GPU may be reading the desktop's memory) */
     flip_on = 0;
     surface = 0;
+    npre = 0;
     if (front) igfx_flip(0);               /* the console draws into the firmware's buffer */
     front = 0;
 }
@@ -386,11 +466,15 @@ static void flip_blit(int x, int y, int w, int h, const uint32_t *src, int strid
             add_rect(now_rects, &now_n, x, y, x + w, y + h);   /* it is already there */
             return;
         }
+        pending_finish(1);
+        cpu_pre(pre, npre);
+        npre = 0;
         for (uint32_t j = 0; j < fb.height; j++)       /* from elsewhere: back to the shadow */
             memcpy(shadow + (uint64_t)j * fb.width, surface + (uint64_t)j * surface_stride, fb.width * 4);
         surface = 0;
         add_rect(now_rects, &now_n, 0, 0, (int)fb.width, (int)fb.height);
     }
+    pending_finish(1);                                 /* the GPU may be reading the shadow */
     for (int j = 0; j < h; j++) {
         int sy = y + j;
         if (sy < 0 || (uint32_t)sy >= fb.height) continue;
@@ -417,14 +501,16 @@ static volatile int flip_waiting;
  * its physical pages. -> 0, -1 if there is no blitter or page flipping. */
 int fbcon_surface(const uint32_t *px, int stride, const uint64_t *pages, int n) {
     if (!flip_on || !ram_pair || !igfx_blitter_ready()) return -1;
+    pending_finish(1);
     if (igfx_copy_source(px, pages, n, (uint32_t)((uint64_t)px & 0xFFF), (uint32_t)stride * 4)) return -1;
     surface = px;
     surface_stride = stride;
     return 0;
 }
 
-/* From the 1 kHz timer: the last flip reached the screen. */
+/* From the 1 kHz timer: the GPU's batch is done (flip), the last flip reached the screen. */
 void fbcon_flip_poll(void) {
+    if (pending >= 0) pending_finish(0);
     if (flip_waiting && igfx_flip_done()) {
         flip_waiting = 0;
         task_wakeup((const void *)&flip_waiting);
@@ -436,7 +522,11 @@ void fbcon_flip_poll(void) {
  * (no page flipping). */
 int fbcon_present(void) {
     if (!flip_on) return 0;
-    if (!now_n && !last_n) return 0;
+    pending_finish(1);                              /* the frame before: copied and flipped */
+    if (!now_n && !last_n) {
+        npre = 0;
+        return 0;
+    }
     for (int tries = 0; !igfx_flip_done() && tries < 5; tries++) {
         flip_waiting = 1;
         task_block((const void *)&flip_waiting, 20);
@@ -451,13 +541,28 @@ int fbcon_present(void) {
     memcpy(last_rects, now_rects, sizeof(rect_t) * (size_t)now_n);
     last_n = now_n;
     now_n = 0;
-    /* The copy goes to the hidden buffer from the shadow, kernel memory only
-     * the desktop's present uses: other cores may use the kernel meanwhile.
-     * (A blit that lands in the shadow now is copied again next frame.) */
+    struct igfx_pre g[MAX_PRE];
+    for (int i = 0; i < npre; i++) g[i] = pre[i].g;
+    uint32_t seq;
+    if (gpu && igfx_copy_submit(surface ? surface : shadow, target, &todo[0].x0, n, g, npre, &seq) == 0) {
+        pending = target;                           /* flipped when it is done */
+        pending_seq = seq;
+        pending_since = timer_ms();
+        memcpy(pend_rects, todo, sizeof(rect_t) * (size_t)n);
+        pend_n = n;
+        memcpy(pend_pre, pre, sizeof(pre_t) * (size_t)npre);
+        pend_npre = npre;
+        npre = 0;
+        front = target;
+        return 1;
+    }
+    /* The CPU: other cores may use the kernel meanwhile (the source is the
+     * shadow, or the memory of the desktop, which is waiting for this call). */
     int depth = bkl_drop();
-    if (!gpu || igfx_copy(surface ? surface : shadow, target, &todo[0].x0, n) != 0)
-        for (int i = 0; i < n; i++) copy_rect(dst, &todo[i]);
+    if (surface) cpu_pre(pre, npre);
+    for (int i = 0; i < n; i++) copy_rect(dst, &todo[i]);
     bkl_take(depth);
+    npre = 0;
     if (!flip_on) return 0;                         /* the desktop ended meanwhile */
     igfx_flip(target);
     front = target;

@@ -8,6 +8,7 @@
 // be in the foreground: it gets the keyboard and Ctrl+C.
 #include "sys/process.h"
 #include "sys/smp.h"
+#include "drivers/igfx.h"
 #include "sys/syscall_nums.h"
 #include "sys/task.h"
 #include "sys/users.h"
@@ -1636,6 +1637,38 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
         case GFX_PRESENT:
             if (graphics_owner != me) return SYSERR_PERM;
             return fbcon_present();
+        case GFX_SYNC:
+            if (graphics_owner != me) return SYSERR_PERM;
+            fbcon_sync();
+            return 0;
+        case GFX_COPY: {
+            if (graphics_owner != me) return SYSERR_PERM;
+            if (!user_range_ok(arg, sizeof(struct os_copy_list), 0)) return SYSERR_FAULT;
+            struct os_copy_list l = *(const struct os_copy_list *)arg;
+            if (l.n < 0 || l.n > 64 || !user_range_ok((uint64_t)(uintptr_t)l.items, (uint64_t)l.n * sizeof(struct os_copy), 0))
+                return SYSERR_FAULT;
+            uint64_t root = task_current()->root;
+            const unsigned int *last = 0;
+            uint32_t va = 0;
+            for (int i = 0; i < l.n; i++) {
+                struct os_copy k = l.items[i];
+                uint64_t bytes = (uint64_t)k.rows * (uint64_t)k.stride * 4;
+                if (k.stride <= 0 || k.rows <= 0 || k.sx < 0 || k.sy < 0 || k.sx + k.w > k.stride || k.sy + k.h > k.rows ||
+                    !user_range_ok((uint64_t)(uintptr_t)k.pixels, bytes, 0)) {
+                    fbcon_drop_copies();
+                    return SYSERR_BADCALL;
+                }
+                if (k.pixels != last) {                  /* (a window's rectangles come together) */
+                    va = igfx_map_user(root, (uint64_t)(uintptr_t)k.pixels, bytes);
+                    last = k.pixels;
+                }
+                if (!va || fbcon_queue_copy(k.pixels, k.stride, va, k.x, k.y, k.w, k.h, k.sx, k.sy)) {
+                    fbcon_drop_copies();
+                    return SYSERR_NOENT;
+                }
+            }
+            return 0;
+        }
         case GFX_SURFACE: {
             if (graphics_owner != me) return SYSERR_PERM;
             if (!user_range_ok(arg, sizeof(struct os_blit), 0)) return SYSERR_FAULT;

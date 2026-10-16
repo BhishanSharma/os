@@ -69,7 +69,11 @@ int gfx_begin(void);                         /* take the screen below the status
 int gfx_begin_full(void);
 /* The screen-sized frame your blits come from: the GPU copies straight from it
  * (no copy by the CPU) -> 0; SYSERR_AGAIN: draw all of it once first. */
-int gfx_surface(const unsigned int *pixels, int w, int h, int stride);                    /* the whole screen, status bar too (the desktop) */
+int gfx_surface(const unsigned int *pixels, int w, int h, int stride);
+int gfx_sync(void);                          /* the GPU is done reading that frame: draw */
+/* Copies into that frame by the GPU, after your drawing (at gfx_present) -> 0;
+ * otherwise draw them yourself. */
+int gfx_copy(const struct os_copy *items, int n);                    /* the whole screen, status bar too (the desktop) */
 int gfx_blit(int x, int y, int w, int h, const unsigned int *pixels, int stride);   /* 0x00RRGGBB */
 int gfx_end(void);
 int gfx_present(void);                       /* after blits: shown at the next refresh (waits for the last) -> 1, 0 */

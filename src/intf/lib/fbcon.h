@@ -48,6 +48,12 @@ int fbcon_cursor_active(void);
 int fbcon_present(void);
 /* The desktop's frame as the blitter's source (GFX_SURFACE) -> 0. */
 int fbcon_surface(const uint32_t *px, int stride, const uint64_t *pages, int n);
+/* GFX_SYNC: wait until the GPU has read the desktop's frame (before drawing). */
+void fbcon_sync(void);
+/* GFX_COPY: a window's contents into the desktop's frame by the GPU, at the
+ * next present -> 0, -1 (draw it with the CPU); drop: forget the queued ones. */
+int fbcon_queue_copy(const uint32_t *src, int stride, uint32_t src_va, int x, int y, int w, int h, int sx, int sy);
+void fbcon_drop_copies(void);
 void fbcon_flip_poll(void);              /* from the 1 kHz timer */
 
 /* Draw one cell; `cursor` draws an underline cursor in it. */

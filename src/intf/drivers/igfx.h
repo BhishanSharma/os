@@ -15,10 +15,21 @@ const char *igfx_blitter_status(void);
 int igfx_blitter_ready(void);
 /* Screen buffers in RAM: 1 and 2 (0 is the firmware's). */
 uint32_t *igfx_buffer(int i);
-/* The blitter copies rectangles (x0, y0, x1, y1 each) from the shadow (the
- * screen's size, tightly packed) into buffer 1 or 2 -> 0 when done, -1: copy
- * them with the CPU (the blitter is off or out of room). */
-int igfx_copy(const uint32_t *shadow, int buffer, const int *rects, int n);
+/* A window's contents into the desktop's frame, before the frame is copied:
+ * from src_va (igfx_map_user) at (sx, sy), rows src_pitch bytes apart, to
+ * (x, y) in the frame, w x h. */
+struct igfx_pre { uint32_t src_va, src_pitch; int x, y, w, h, sx, sy; };
+/* One batch: the `pre` copies, then rectangles (x0, y0, x1, y1 each) from the
+ * frame (`src`: the shadow or the desktop's surface) into buffer 1 or 2.
+ * -> 0 and its number in *seq (not waited for); -1: copy with the CPU. */
+int igfx_copy_submit(const uint32_t *src, int buffer, const int *rects, int n,
+                     const struct igfx_pre *pre, int npre, uint32_t *seq);
+int igfx_copy_done(uint32_t seq);           /* 1 once batch `seq` has finished */
+void igfx_copy_idle(void);                  /* done: the GPU may sleep */
+void igfx_copy_failed(void);                /* it did not finish: the blitter is turned off */
+/* A program's memory [va, va + bytes) (its page tables at `root`) for the
+ * blitter -> the address the blitter uses for `va`, 0 if it cannot. */
+uint32_t igfx_map_user(uint64_t root, uint64_t va, uint64_t bytes);
 int igfx_copy_prepare(const uint32_t *shadow);
 int igfx_copy_source(const void *token, const uint64_t *pages, int n, uint32_t offset, uint32_t pitch_bytes);   /* first, under the kernel lock -> 0 ready */
 const char *igfx_status(void);          /* for the boot screen and `sysinfo` */

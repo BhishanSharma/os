@@ -261,6 +261,9 @@ struct os_task {
 #define GFX_PRESENT  5   /* show what was blitted at the next refresh, after the frame before -> 1, 0: no page flipping */
 #define GFX_SURFACE  6   /* arg = struct os_blit * (the whole screen, x = y = 0): the frame the
                             blits come from; the GPU copies from it -> 0, SYSERR_NOENT: no blitter */
+#define GFX_SYNC     7   /* wait until the GPU has read the frame given to GFX_SURFACE (draw after) -> 0 */
+#define GFX_COPY     8   /* arg = struct os_copy_list *: window contents into that frame by the GPU,
+                            done at the next GFX_PRESENT (after your drawing) -> 0, else draw them */
 #define GFX_CURSOR   4   /* arg = struct os_cursor *: the kernel draws the pointer (0: stop) -> 0 */
 
 struct os_gfx_info {
@@ -279,6 +282,17 @@ struct os_blit {
     int x, y, w, h;        /* where on the screen, and the size */
     int stride;            /* pixels from one row of `pixels` to the next */
     const unsigned int *pixels;
+};
+
+struct os_copy {           /* GFX_COPY: from (sx, sy) in `pixels` to (x, y) in the frame, w x h */
+    const unsigned int *pixels;
+    int stride, rows;      /* the source: its row length (pixels) and number of rows */
+    int x, y, w, h, sx, sy;
+};
+
+struct os_copy_list {
+    int n;                 /* at most 64 */
+    const struct os_copy *items;
 };
 
 /* getmouse() */

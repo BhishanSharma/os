@@ -395,7 +395,7 @@ int igfx_blitter_test(void) {
                mm(BCS + RING_CTL), mm(BCS + EXECLIST_STATUS), mm(BCS + EXECLIST_STATUS + 4), mm(BCS + RING_MODE));
     print_log(line);
     blitter_ok = got == 0x600DF00D;
-    if (!blitter_ok) mm_wr(FORCEWAKE_GT, 0x00010000);
+    mm_wr(FORCEWAKE_GT, 0x00010000);                  /* (each batch wakes it again) */
     k_snprintf(blitter_status, sizeof(blitter_status), "%s", blitter_ok ? "blitter answers" : "blitter: no answer");
     return blitter_ok ? 0 : -1;
 }
@@ -520,61 +520,164 @@ int igfx_copy_prepare(const uint32_t *shadow) {
     return 0;
 }
 
-int igfx_copy(const uint32_t *shadow, int buffer, const int *rects, int n) {
-    if (!blitter_ok || shadow != mapped_shadow || buffer < 1 || buffer > 2 || n <= 0) return -1;
-    uint32_t need = (uint32_t)(4 + n * 10 + 4 + 4 + 2) * 4;
+/* ---- The blitter (step 4: batches, sleeping, window contents) ---------------
+ * One batch a frame: window contents into the desktop's frame (copies the
+ * desktop asked for, GFX_COPY), then the frame's changed rectangles into the
+ * screen buffer, a flush, and the frame's number written to memory. The
+ * kernel does not wait for it: fbcon flips when the number shows up.
+ * Forcewake (the GT kept out of its sleep state, RC6) is held from the
+ * submission until the batch is done, so the GPU sleeps between frames.
+ * Programs' memory (the windows) is mapped into the blitter's tables in
+ * 16 MiB slots below VA_SHADOW, checked against the program's pages on each
+ * use. */
+#define SLOTS            15
+#define SLOT_VA(i)       (0x01000000u * (uint32_t)((i) + 1))
+#define SLOT_MAX         0x01000000u
+
+static struct { uint64_t root, va, bytes; uint32_t used; } slots[SLOTS];
+static uint32_t slot_clock;
+static uint32_t *bc, *bstart;                       /* the batch being written into the ring */
+static int fw_held;
+
+static void fw_get(void) {
+    if (fw_held) return;
+    mm_wr(FORCEWAKE_GT, 0x00010001);
+    uint64_t end = timer_ms() + 2;
+    while (!(mm(FORCEWAKE_GT_ACK) & 1) && timer_ms() <= end) __asm__ volatile("pause");
+    fw_held = 1;
+}
+
+static void fw_put(void) {
+    if (!fw_held) return;
+    mm_wr(FORCEWAKE_GT, 0x00010000);
+    fw_held = 0;
+}
+
+/* A PPGTT entry changed: out of the CPU's caches (the GPU reads the tables
+ * from memory), and the GPU's own copies of them are invalidated next batch. */
+static void pte_set(uint32_t va, uint64_t phys) {
+    uint64_t *pde = &ppgtt_pd[(va >> 21) & 511];
+    if (!*pde) {                                      /* a new table: all of it out of the caches */
+        if (ppgtt_map(va, phys) == 0) __asm__ volatile("wbinvd" ::: "memory");
+        tables_changed = 1;
+        return;
+    }
+    uint64_t *pte = (uint64_t *)phys_to_virt(*pde & ~0xFFFULL) + ((va >> 12) & 511);
+    if (*pte == (phys | PTE_RW)) return;
+    *pte = phys | PTE_RW;
+    __asm__ volatile("clflush (%0)" :: "r"(pte) : "memory");
+    tables_changed = 1;
+}
+
+uint32_t igfx_map_user(uint64_t root, uint64_t va, uint64_t bytes) {
+    if (!blitter_ok || !ppgtt_pd || !bytes) return 0;
+    uint64_t first = va & ~0xFFFULL, span = (va & 0xFFF) + bytes;
+    if (span > SLOT_MAX) return 0;
+    int k = -1;
+    for (int i = 0; i < SLOTS; i++)
+        if (slots[i].root == root && slots[i].va == first && slots[i].bytes >= span) k = i;
+    if (k < 0) {                                       /* the slot used longest ago */
+        k = 0;
+        for (int i = 1; i < SLOTS; i++)
+            if (slots[i].used < slots[k].used) k = i;
+        slots[k].root = root;
+        slots[k].va = first;
+        slots[k].bytes = span;
+    }
+    slots[k].used = ++slot_clock;
+    for (uint64_t off = 0; off < span; off += 4096) {  /* (the program may have new pages there) */
+        uint64_t e = paging_get_user_entry(root, first + off);
+        if (!(e & 1)) {
+            slots[k].root = 0;
+            return 0;
+        }
+        pte_set(SLOT_VA(k) + (uint32_t)off, e & 0x000FFFFFFFFFF000ULL);
+    }
+    __asm__ volatile("mfence" ::: "memory");
+    return SLOT_VA(k) + (uint32_t)(va & 0xFFF);
+}
+
+static int batch_begin(uint32_t dwords) {
+    uint32_t need = (dwords + 4 + 4 + 4 + 2) * 4;
     if (need > ring_bytes / 2) return -1;
     if (ring_tail + need > ring_bytes) {              /* wrap: no-ops to the end */
         while (ring_tail < ring_bytes) ctx_ring[ring_tail / 4] = MI_NOOP, ring_tail += 4;
         ring_tail = 0;
     }
-    uint32_t *c = ctx_ring + ring_tail / 4, *start = c;
-    uint32_t dst = buffer == 1 ? VA_BUF1 : VA_BUF2;
+    bc = bstart = ctx_ring + ring_tail / 4;
     if (tables_changed) {                             /* forget old translations (needs a post-sync write) */
-        *c++ = MI_FLUSH_DW | (1u << 18) | (1u << 14);
-        *c++ = (ctx_data_g + 4) | (1u << 2);          /* (GGTT) */
-        *c++ = 0;
-        *c++ = 0;
+        *bc++ = MI_FLUSH_DW | (1u << 18) | (1u << 14);
+        *bc++ = (ctx_data_g + 4) | (1u << 2);         /* (GGTT) */
+        *bc++ = 0;
+        *bc++ = 0;
         tables_changed = 0;
     }
-    for (int i = 0; i < n; i++) {
-        uint32_t x0 = (uint32_t)rects[4 * i], y0 = (uint32_t)rects[4 * i + 1];
-        uint32_t x1 = (uint32_t)rects[4 * i + 2], y1 = (uint32_t)rects[4 * i + 3];
-        *c++ = XY_FAST_COPY;
-        *c++ = FAST_COPY_32BPP | pitch;               /* destination: linear */
-        *c++ = (y0 << 16) | x0;
-        *c++ = (y1 << 16) | x1;
-        *c++ = dst;
-        *c++ = 0;
-        *c++ = (y0 << 16) | x0;                       /* source: the same place in the shadow */
-        *c++ = src_pitch;
-        *c++ = VA_SHADOW + src_off;
-        *c++ = 0;
-    }
-    *c++ = MI_FLUSH_DW;                               /* the copies reach memory */
-    *c++ = 0;
-    *c++ = 0;
-    *c++ = 0;
-    *c++ = MI_STORE_GGTT;                             /* then: this frame's number */
-    *c++ = ctx_data_g;
-    *c++ = 0;
-    *c++ = ++seqno;
-    if ((c - start) & 1) *c++ = MI_NOOP;
-    ring_tail += (uint32_t)(c - start) * 4;
+    return 0;
+}
+
+static void batch_copy(uint32_t dst, uint32_t dst_pitch, int x0, int y0, int x1, int y1,
+                       uint32_t src, uint32_t src_pitch, int sx, int sy) {
+    *bc++ = XY_FAST_COPY;
+    *bc++ = FAST_COPY_32BPP | dst_pitch;              /* linear */
+    *bc++ = ((uint32_t)y0 << 16) | (uint32_t)x0;
+    *bc++ = ((uint32_t)y1 << 16) | (uint32_t)x1;
+    *bc++ = dst;
+    *bc++ = 0;
+    *bc++ = ((uint32_t)sy << 16) | (uint32_t)sx;
+    *bc++ = src_pitch;
+    *bc++ = src;
+    *bc++ = 0;
+}
+
+static void batch_flush(void) {
+    *bc++ = MI_FLUSH_DW;                              /* what came before reaches memory */
+    *bc++ = 0;
+    *bc++ = 0;
+    *bc++ = 0;
+}
+
+static uint32_t batch_submit(void) {
+    *bc++ = MI_STORE_GGTT;                            /* then: this batch's number */
+    *bc++ = ctx_data_g;
+    *bc++ = 0;
+    *bc++ = ++seqno;
+    if ((bc - bstart) & 1) *bc++ = MI_NOOP;
+    ring_tail += (uint32_t)(bc - bstart) * 4;
     if (ring_tail >= ring_bytes) ring_tail = 0;
     ctx_regs[7] = ring_tail;                          /* the context's RING_TAIL */
     __asm__ volatile("sfence" ::: "memory");
+    fw_get();                                         /* awake until igfx_copy_idle */
     mm_wr(BCS + EXECLIST_SQ_LO, ctx_desc_lo);
     mm_wr(BCS + EXECLIST_SQ_HI, ctx_desc_hi);
     mm_wr(BCS + EXECLIST_CONTROL, 1);
+    return seqno;
+}
 
-    uint64_t end = timer_ms() + 50;
-    while (*(volatile uint32_t *)ctx_data != seqno) {
-        if (timer_ms() > end) {
-            blitter_off("a copy did not finish");
-            return -1;
-        }
-        __asm__ volatile("pause");
+int igfx_copy_submit(const uint32_t *src, int buffer, const int *rects, int n,
+                     const struct igfx_pre *pre, int npre, uint32_t *seq) {
+    if (!blitter_ok || src != mapped_shadow || buffer < 1 || buffer > 2 || n + npre <= 0) return -1;
+    if (batch_begin((uint32_t)(n + npre) * 10)) return -1;
+    if (npre) {                                       /* window contents into the frame first */
+        for (int i = 0; i < npre; i++)
+            batch_copy(VA_SHADOW + src_off, src_pitch, pre[i].x, pre[i].y, pre[i].x + pre[i].w, pre[i].y + pre[i].h,
+                       pre[i].src_va, pre[i].src_pitch, pre[i].sx, pre[i].sy);
+        batch_flush();
     }
+    uint32_t dst = buffer == 1 ? VA_BUF1 : VA_BUF2;
+    for (int i = 0; i < n; i++)
+        batch_copy(dst, pitch, rects[4 * i], rects[4 * i + 1], rects[4 * i + 2], rects[4 * i + 3],
+                   VA_SHADOW + src_off, src_pitch, rects[4 * i], rects[4 * i + 1]);
+    batch_flush();
+    *seq = batch_submit();
     return 0;
+}
+
+int igfx_copy_done(uint32_t seq) { return (int32_t)(*(volatile uint32_t *)ctx_data - seq) >= 0; }
+
+void igfx_copy_idle(void) { fw_put(); }
+
+void igfx_copy_failed(void) {
+    fw_get();
+    blitter_off("a copy did not finish");
+    fw_put();
 }
