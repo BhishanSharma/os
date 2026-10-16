@@ -147,12 +147,17 @@ int main(int argc, char **argv) {
         printf("textedit: the desktop is not running\n");
         return 1;
     }
+    ui_set_resizable(&win);
     load();
     draw();
     for (;;) {
         struct ws_event e;
         ui_wait(&win, &e, 0);
         if (e.type == WS_EV_CLOSE) return 0;
+        if (e.type == WS_EV_RESIZE) {                  /* the green button: a new size */
+            draw();
+            continue;
+        }
         if (e.type == WS_EV_KEY) key(e.key);
         else if (e.type == WS_EV_DOWN) {
             if (ui_inside(e.x, e.y, win.c.w - 190 * S, 8 * S, 84 * S, 28 * S)) {

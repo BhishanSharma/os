@@ -95,6 +95,7 @@ int main(void) {
         printf("activity: the desktop is not running\n");
         return 1;
     }
+    ui_set_resizable(&win);
     last_sample = uptime_ms();
     sample();
     draw();
@@ -106,6 +107,10 @@ int main(void) {
             continue;
         }
         if (e.type == WS_EV_CLOSE) return 0;
+        if (e.type == WS_EV_RESIZE) {                  /* the green button: a new size */
+            draw();
+            continue;
+        }
         int top = 44 * S, rh = 24 * S, by = win.c.h - 46 * S;
         if (e.type == WS_EV_DOWN) {
             if (ui_inside(e.x, e.y, win.c.w - 150 * S, by, 134 * S, 30 * S)) {

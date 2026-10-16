@@ -10,7 +10,10 @@
 
 #define WS_SERVICE "windowserver"
 
-enum { WS_CREATE = 1, WS_TITLE = 2 };
+/* WS_RESIZE: the program answers a WS_EV_RESIZE with the new size (w, h) and
+ * gets a new surface (the UI library does it). WS_RESIZABLE: the program can
+ * redraw at any size, so the green button (zoom) may resize it. */
+enum { WS_CREATE = 1, WS_TITLE = 2, WS_RESIZE = 3, WS_RESIZABLE = 4 };
 
 struct ws_request {
     int op;
@@ -26,7 +29,8 @@ struct ws_reply {
     int x, y;              /* where the content starts on the screen */
 };
 
-enum { WS_EV_KEY = 1, WS_EV_DOWN, WS_EV_UP, WS_EV_MOVE, WS_EV_WHEEL, WS_EV_CLOSE };
+enum { WS_EV_KEY = 1, WS_EV_DOWN, WS_EV_UP, WS_EV_MOVE, WS_EV_WHEEL, WS_EV_CLOSE,
+       WS_EV_RESIZE };      /* x, y: the new content size; the canvas has it already */
 
 struct ws_event {
     int type;

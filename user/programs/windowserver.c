@@ -169,6 +169,8 @@ typedef struct {
     struct ws_surface *s;
     int anim, anim_ms;                 /* ANIM_*, and how long it has run */
     spring_t sc;                       /* ANIM_OPEN: the scale, in percent * FP */
+    int resizable, zoomed, gen;        /* zoom: WS_RESIZABLE, filling the screen, surface number */
+    int saved_x, saved_y, saved_w, saved_h, want_x, want_y;   /* before zooming; where it goes */
 } window_t;
 
 typedef struct {
@@ -705,6 +707,70 @@ static int create_window(const struct ws_request *q, struct ws_reply *r) {
     return 0;
 }
 
+/* The green button: fill the screen between the menu bar and the Dock, or go
+ * back. The program gets WS_EV_RESIZE and asks for the new surface (WS_RESIZE). */
+static void zoom_window(int k) {
+    window_t *w = &wins[k];
+    if (!w->resizable) return;
+    int nx, ny, nw, nh;
+    if (!w->zoomed) {
+        w->saved_x = w->x;
+        w->saved_y = w->y;
+        w->saved_w = w->w;
+        w->saved_h = w->h;
+        nx = 1;
+        ny = MENU_H + TITLE_H + 1;
+        nw = W - 2;
+        nh = dock_bottom() - dock_h() - 8 * S - ny;
+    } else {
+        nx = w->saved_x;
+        ny = w->saved_y;
+        nw = w->saved_w;
+        nh = w->saved_h;
+    }
+    if (nh < 100 * S) nh = 100 * S;
+    w->zoomed = !w->zoomed;
+    printf("windowserver: zoom %s to %dx%d\n", w->title, nw, nh);   /* (for the tests) */
+    w->want_x = nx;
+    w->want_y = ny;
+    send_event(w, WS_EV_RESIZE, nw, nh, 0);
+}
+
+/* WS_RESIZE: a new surface of the size asked, the events and settings carried over. */
+static int resize_window(const struct ws_request *q, struct ws_reply *r) {
+    int max_w = W - 2, max_h = H - MENU_H - TITLE_H - 2;
+    if (q->w < 1 || q->h < 1 || q->w > max_w || q->h > max_h) return SYSERR_BADCALL;
+    for (int k = 0; k < MAX_WINDOWS; k++) {
+        window_t *w = &wins[k];
+        if (!w->used || w->id != q->id || w->pid != q->pid) continue;
+        snprintf(r->shm, sizeof(r->shm), "ws.%d.%d", w->id, ++w->gen);
+        struct ws_surface *s = shm_map(r->shm, ws_surface_size(q->w, q->h));
+        if (!s) return SYSERR_NOMEM;
+        memcpy(s, w->s, sizeof(*s));                   /* events, focus, settings */
+        s->w = q->w;
+        s->h = q->h;
+        damage_window(w);                              /* where it was */
+        munmap(w->s);
+        w->s = s;
+        w->seen = s->damage - 1;
+        w->w = q->w;
+        w->h = q->h;
+        w->x = w->want_x ? w->want_x : w->x;
+        w->y = w->want_y ? w->want_y : w->y;
+        w->want_x = w->want_y = 0;
+        if (w->x + w->w > W - 1) w->x = W - 1 - w->w;
+        if (w->y + w->h > H - 1) w->y = H - 1 - w->h;
+        if (w->x < 1) w->x = 1;
+        if (w->y < MENU_H + TITLE_H + 1) w->y = MENU_H + TITLE_H + 1;
+        damage_window(w);
+        r->id = w->id;
+        r->x = w->x;
+        r->y = w->y;
+        return 0;
+    }
+    return SYSERR_NOENT;
+}
+
 /* The window port: programs open windows and change their titles. */
 static void serve(void *arg) {
     int port = *(int *)arg;
@@ -718,16 +784,18 @@ static void serve(void *arg) {
         }
         q.title[sizeof(q.title) - 1] = 0;
         mutex_lock(&lock);
-        if (q.op == WS_CREATE) {
+        if (q.op == WS_CREATE || q.op == WS_RESIZE) {
             struct ws_reply r;
             memset(&r, 0, sizeof(r));
-            int e = create_window(&q, &r);
+            int e = q.op == WS_CREATE ? create_window(&q, &r) : resize_window(&q, &r);
             if (e < 0) r.id = e;
             mutex_unlock(&lock);
             if (reply >= 0) port_send(reply, &r, sizeof(r), -1);
         } else {
             for (int k = 0; k < MAX_WINDOWS; k++)
-                if (wins[k].used && wins[k].id == q.id && wins[k].pid == q.pid) {
+                if (wins[k].used && wins[k].id == q.id && wins[k].pid == q.pid && q.op == WS_RESIZABLE) {
+                    wins[k].resizable = 1;
+                } else if (wins[k].used && wins[k].id == q.id && wins[k].pid == q.pid) {
                     snprintf(wins[k].title, sizeof(wins[k].title), "%s", q.title);
                     damage_window(&wins[k]);
                     damage_menu_bar();
@@ -1280,12 +1348,7 @@ static int compose(void) {
     }
     if (ndmg) unpresented = 1;
     ndmg = 0;
-    int paced = 0;
-    if (unpresented) {
-        paced = gfx_present() > 0;                    /* tear-free on Intel graphics */
-        unpresented = 0;
-    }
-    return paced;
+    return unpresented;                                /* main() presents it, outside the lock */
 }
 
 /* ---- Input --------------------------------------------------------------- */
@@ -1454,8 +1517,10 @@ static void press(void) {
             minimise_window(k);
             return;
         }
-        if (ui_inside(mouse_x, mouse_y, w->x + LIGHT_X(2) - r, cy - r, 2 * r, 2 * r))
-            return;                                    /* zoom: windows cannot be resized yet */
+        if (ui_inside(mouse_x, mouse_y, w->x + LIGHT_X(2) - r, cy - r, 2 * r, 2 * r)) {
+            zoom_window(k);                            /* the green button */
+            return;
+        }
         unsigned long now = uptime_ms();
         if (last_title_win == k && now - last_title_click < 400) {   /* double-click: minimise */
             last_title_win = -1;
@@ -1716,8 +1781,15 @@ int main(int argc, char **argv) {
             last_tidy = uptime_ms();
             tidy();
         }
-        int paced = compose();
+        int fresh = compose(), paced = 0;
         mutex_unlock(&lock);
+        /* Present without the lock: on Intel graphics it waits for the screen's
+         * refresh, and holding the lock meanwhile starved the thread that opens
+         * windows (apps launched from the Dock never appeared). */
+        if (fresh) {
+            paced = gfx_present() > 0;                /* tear-free on Intel graphics */
+            unpresented = 0;
+        }
         if (!paced) sleep_ms(5);                      /* else the screen's refresh set the pace */
     }
 }

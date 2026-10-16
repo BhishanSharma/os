@@ -128,6 +128,7 @@ int ui_desktop(void);                                      /* 1 if the window se
 int ui_scale(void);                                        /* before opening a window */
 int ui_open(ui_window *w, const char *title, int width, int height);   /* -> 0, < 0 no desktop */
 void ui_set_title(ui_window *w, const char *title);
+void ui_set_resizable(ui_window *w);                      /* it redraws on WS_EV_RESIZE: zoom allowed */
 void ui_present(ui_window *w);                            /* show what was drawn */
 int ui_poll(ui_window *w, struct ws_event *e);             /* -> 1 if there was an event */
 int ui_wait(ui_window *w, struct ws_event *e, int timeout_ms);   /* 0 = no limit; -> 0 on timeout */

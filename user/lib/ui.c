@@ -639,12 +639,49 @@ void ui_present(ui_window *w) {
     w->s->damage++;
 }
 
+void ui_set_resizable(ui_window *w) {
+    int server = port_lookup(WS_SERVICE);
+    if (server < 0) return;
+    struct ws_request q;
+    memset(&q, 0, sizeof(q));
+    q.op = WS_RESIZABLE;
+    q.id = w->id;
+    q.pid = getpid();
+    port_send(server, &q, sizeof(q), -1);
+    port_close(server);
+}
+
+/* WS_EV_RESIZE: a new surface of that size from the server, the canvas on it. */
+static void resize(ui_window *w, int width, int height) {
+    int server = port_lookup(WS_SERVICE);
+    if (server < 0) return;
+    struct ws_request q;
+    memset(&q, 0, sizeof(q));
+    q.op = WS_RESIZE;
+    q.id = w->id;
+    q.pid = getpid();
+    q.w = width;
+    q.h = height;
+    struct ws_reply r;
+    int n = port_call(server, &q, sizeof(q), &r, sizeof(r), 5000);
+    port_close(server);
+    if (n < (int)sizeof(r) || r.id < 0) return;
+    struct ws_surface *s = shm_map(r.shm, ws_surface_size(width, height));
+    if (!s) return;
+    munmap(w->s);
+    w->s = s;
+    w->x = r.x;
+    w->y = r.y;
+    ui_canvas_init(&w->c, (unsigned *)((char *)s + WS_HEADER), width, height, width);
+}
+
 int ui_poll(ui_window *w, struct ws_event *e) {
     struct ws_surface *s = w->s;
     prefs = s->prefs;
     if (s->ev_tail == s->ev_head) return 0;
     *e = s->ev[s->ev_tail % WS_EVENTS];
     s->ev_tail++;
+    if (e->type == WS_EV_RESIZE) resize(w, e->x, e->y);
     return 1;
 }
 

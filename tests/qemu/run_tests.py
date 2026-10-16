@@ -523,6 +523,9 @@ def test_gui():
         check(m.text().count("anna logged in") == 1, "a wrong password was accepted")
         m.type("pw1")
         m.expect(r"loginwindow: anna logged in", 20)
+        m.expect(r"windowserver: \d+x\d+", 30)            # the desktop again, not the text console
+        time.sleep(2)
+        m.screenshot("gui2")
     finally:
         m.stop()
 
@@ -557,8 +560,48 @@ def test_apps():
         m.stop()
 
 
+def test_zoom():
+    """The green button fills the screen with Terminal; Up recalls a command."""
+    m = Machine("zoom", usb_stick())
+    try:
+        login(m)
+        m.type("windowserver terminal")
+        ws = m.expect(r"windowserver: (\d+)x(\d+), scale (\d), cells (\d+)x(\d+)", 30)
+        time.sleep(3)
+        S, cw, ch = int(ws.group(3)), int(ws.group(4)), int(ws.group(5))
+        target = (142 * S, 64 * S)                   # Terminal's green button (first window)
+        move_mouse(m, -4000, -4000)
+        time.sleep(0.5)
+        at = (0, 0)
+        for _ in range(4):                           # aim, click, correct
+            move_mouse(m, (target[0] - at[0]) * 8 // cw, (target[1] - at[1]) * 16 // ch, step=4)
+            time.sleep(0.5)
+            m.monitor("mouse_button 1")
+            time.sleep(0.3)
+            m.monitor("mouse_button 0")
+            time.sleep(0.8)
+            if "windowserver: zoom" in m.text():
+                break
+            clicks = re.findall(r"click at (\d+),(\d+)", m.text())
+            if clicks:
+                at = (int(clicks[-1][0]), int(clicks[-1][1]))
+        m.expect(r"windowserver: zoom Terminal to \d+x\d+", 10, since=0)
+        time.sleep(1)
+        start = len(m.text())
+        m.type("whoami")                             # a kernel command: it shows on serial too
+        time.sleep(1)
+        m.keys("up")
+        m.keys("ret")
+        time.sleep(1.5)
+        m.screenshot("zoom")
+        check(len(re.findall(r"^root\r?$", m.text()[start:], re.M)) >= 2,
+              "Up did not bring the command back", m.text()[-600:])
+    finally:
+        m.stop()
+
+
 TESTS = [("boot", test_boot), ("files", test_files), ("fault", test_fault), ("panic", test_panic),
-         ("kernel", test_kernel), ("desktop", test_desktop), ("gui", test_gui), ("apps", test_apps), ("user", test_user), ("video", test_nvme_video), ("install", test_install), ("network", test_network),
+         ("kernel", test_kernel), ("desktop", test_desktop), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("user", test_user), ("video", test_nvme_video), ("install", test_install), ("network", test_network),
          ("bios", test_legacy_bios)]
 NEEDS_INTERNET = {"network"}
 

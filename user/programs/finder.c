@@ -87,6 +87,7 @@ int main(void) {
         printf("finder: the desktop is not running (type windowserver)\n");
         return 1;
     }
+    ui_set_resizable(&win);
     load();
     draw();
     unsigned long last_click = 0;
@@ -95,6 +96,10 @@ int main(void) {
         struct ws_event e;
         ui_wait(&win, &e, 0);
         if (e.type == WS_EV_CLOSE) return 0;
+        if (e.type == WS_EV_RESIZE) {                  /* the green button: a new size */
+            draw();
+            continue;
+        }
         int rows = ui_list_rows(win.c.h - LIST_Y, S);
         if (e.type == WS_EV_WHEEL) {
             first += e.key;

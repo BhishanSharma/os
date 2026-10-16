@@ -263,6 +263,7 @@ int main(int argc, char **argv) {
         printf("settings: the desktop is not running\n");
         return 1;
     }
+    ui_set_resizable(&win);
     refresh_wifi();
     vol = volume(-1);
     if (vol < 0) vol = -1;
@@ -275,6 +276,10 @@ int main(int argc, char **argv) {
             continue;
         }
         if (e.type == WS_EV_CLOSE) return 0;
+        if (e.type == WS_EV_RESIZE) {                  /* the green button: a new size */
+            draw();
+            continue;
+        }
         if (e.type == WS_EV_DOWN) click(e.x, e.y);
         else if (e.type == WS_EV_MOVE && dragging) set_volume_at(e.x);
         else if (e.type == WS_EV_UP) dragging = 0;

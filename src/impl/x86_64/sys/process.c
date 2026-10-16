@@ -821,7 +821,7 @@ static int64_t sys_getkey(uint64_t wait) {
         if (wait) wait_for_foreground();
         else if (foreground_pid != task_current()->pid) return 0;
         c = get_char();
-        if (scroll_key(c)) continue;
+        if (print_graphics_mode() < 2 && scroll_key(c)) continue;   /* the desktop: they are its keys */
         if (c || !wait) break;
         check_killed();
         task_sleep(10);
@@ -1591,7 +1591,11 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
             return 0;
         }
         case GFX_BEGIN:
-            if (foreground_pid != me) return SYSERR_PERM;
+            /* The foreground program, or one it just started: loginwindow hands
+             * the screen to the desktop, which may ask before the hand-over
+             * (wait()) has happened on another core. */
+            if (foreground_pid != me && (!foreground_pid || task_current()->parent != foreground_pid))
+                return SYSERR_PERM;
             if (graphics_owner && graphics_owner != me) return SYSERR_AGAIN;
             graphics_owner = me;
             graphics_full = arg == 1;                        /* the desktop: the whole screen */
