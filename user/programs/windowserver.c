@@ -183,21 +183,12 @@ typedef struct {
 } dock_app_t;
 
 static dock_app_t apps[] = {
-<<<<<<< HEAD
-    { "Files", "finder", "F", "folder", 0x2F7BF5, 0, 0, { 0, 0 }, 0, 0, 0, 0 },
-    { "Terminal", "terminal", ">_", "terminal", 0x30323A, 0, 0, { 0, 0 }, 0, 0, 0, 0 },
-    { "TextEdit", "textedit", "T", "textedit", 0xF2F2F2, 0, 0, { 0, 0 }, 0, 0, 0, 0 },
-    { "Paint", "paint", "P", "paint", 0xFF9500, 0, 0, { 0, 0 }, 0, 0, 0, 0 },
-    { "Activity Monitor", "activity", "A", "activity", 0x34C759, 0, 0, { 0, 0 }, 0, 0, 0, 0 },
-    { "System Settings", "settings", "S", "gear", 0x8E8E93, 0, 0, { 0, 0 }, 0, 0, 0, 0 },
-=======
     { .name = "Files", .program = "finder", .glyph = "F", .icon = "folder", .color = 0x2F7BF5 },
     { .name = "Terminal", .program = "terminal", .glyph = ">_", .icon = "terminal", .color = 0x30323A },
     { .name = "TextEdit", .program = "textedit", .glyph = "T", .icon = "textedit", .color = 0xF2F2F2 },
     { .name = "Paint", .program = "paint", .glyph = "P", .icon = "paint", .color = 0xFF9500 },
     { .name = "Activity Monitor", .program = "activity", .glyph = "A", .icon = "activity", .color = 0x34C759 },
     { .name = "System Settings", .program = "settings", .glyph = "S", .icon = "gear", .color = 0x8E8E93 },
->>>>>>> a93e441314f3ad33018607b8f615930be945a4dc
 };
 #define DOCK_APPS ((int)(sizeof(apps) / sizeof(apps[0])))
 
