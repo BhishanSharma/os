@@ -46,3 +46,6 @@ scale, wait instead of spinning).
   licence that allows it here (MIT, BSD, zlib, public domain): put it in
   `third_party/` with its licence file. No GPL code.
 - Pictures and fonts too: only ones you may share, with their licence.
+
+Terminal OS is under the MIT licence ([LICENSE](LICENSE)); by sending a change
+you agree that it is shared under it too.
