@@ -2021,6 +2021,15 @@ static int64_t sys_system(uint64_t op, uint64_t a, uint64_t b) {
         case SYSTEM_SETUP_TEXT:
             users_setup_text();
             return 0;
+        case SYSTEM_LOG: {
+            if (!user_range_ok(a, sizeof(struct os_log), 1)) return SYSERR_FAULT;
+            struct os_log *l = (struct os_log *)a;
+            if (l->max < 0 || !user_range_ok((uint64_t)(uintptr_t)l->buf, (uint64_t)l->max, 1)) return SYSERR_FAULT;
+            uint64_t from = l->from;
+            uint32_t n = print_log_read(&from, l->buf, (uint32_t)l->max);
+            l->from = from;
+            return n;
+        }
         case SYSTEM_POWER:
             print_set_graphics(0);
             if (a == 1) reboot();

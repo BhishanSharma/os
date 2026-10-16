@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 
-typedef enum { DISK_NONE, DISK_ATA, DISK_RAM, DISK_NVME } disk_kind_t;
+typedef enum { DISK_NONE, DISK_ATA, DISK_RAM, DISK_NVME, DISK_USB } disk_kind_t;
 
 /* A device in 512-byte sectors; a volume reads and writes through it. */
 typedef struct {
@@ -27,5 +27,7 @@ int disk_open(disk_kind_t kind, blockdev_t *out);
 /* One partition of the NVMe drive; writes only if `writable` (our own
  * TERMINALOS partition: never Windows' data). */
 int disk_open_nvme_partition(uint64_t start, uint64_t sectors, int writable, int number, blockdev_t *out);
+/* One partition of USB stick `stick` (usb_storage_*); writes only if `writable`. */
+int disk_open_usb_partition(int stick, uint64_t start, uint64_t sectors, int writable, blockdev_t *out);
 
 #endif

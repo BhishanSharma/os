@@ -1,4 +1,4 @@
-// xhci.c - USB 3 host controller (xHCI) and USB mice
+// xhci.c - USB 3 host controller (xHCI): mice, keyboards and USB sticks
 //
 // The controller works from rings of 16-byte TRBs in memory: a command ring
 // (we ask it to give a device an address, set up an endpoint, ...), one
@@ -9,7 +9,8 @@
 //
 // Reference: the eXtensible Host Controller Interface specification 1.2, and
 // the USB 2.0 spec chapter 9 (device requests) and HID 1.11 appendix B (boot
-// protocol mouse).
+// protocol mouse); for sticks, the USB Mass Storage Bulk-Only Transport 1.0
+// and the SCSI block commands (SBC-3: READ CAPACITY, READ and WRITE (10)).
 #include "drivers/usb.h"
 #include "sys/smp.h"
 #include "drivers/msi.h"
@@ -95,10 +96,12 @@ typedef struct {
 enum {
     TRB_NORMAL = 1, TRB_SETUP = 2, TRB_DATA = 3, TRB_STATUS = 4, TRB_LINK = 6,
     TRB_ENABLE_SLOT = 9, TRB_ADDRESS_DEVICE = 11, TRB_CONFIGURE_EP = 12, TRB_EVALUATE = 13,
+    TRB_RESET_EP = 14, TRB_SET_DEQUEUE = 16,
     TRB_EV_TRANSFER = 32, TRB_EV_COMMAND = 33, TRB_EV_PORT = 34,
 };
 
 #define CC_SUCCESS     1
+#define CC_STALL       6
 #define CC_SHORT       13
 
 #define RING_TRBS 64
@@ -139,6 +142,14 @@ typedef struct {
     const char *note;               /* why it is not used, if it is not */
     ring_t ep0;
     void *in_ctx, *out_ctx;
+    /* A USB stick (mass storage, SCSI over bulk-only transport). */
+    int storage;                    /* 1: ready to read and write */
+    uint8_t st_in_ep, st_out_ep;    /* endpoint addresses (0x81, 0x02, ...) */
+    int st_in_dci, st_out_dci;
+    uint16_t st_in_mps, st_out_mps;
+    ring_t st_in, st_out;
+    uint32_t st_tag;
+    uint64_t st_sectors;            /* 512-byte blocks */
 } usb_device_t;
 
 /* Keyboard repeat (USB keyboards only say what is held down). */
@@ -419,6 +430,154 @@ static int setup_hid(usb_device_t *d, uint8_t config_value, const uint16_t *mps,
     return 0;
 }
 
+/* ---- USB sticks (mass storage) ------------------------------------------------
+ * Bulk-only transport: a 31-byte command block (CBW) goes out, the data moves
+ * in or out, and a 13-byte status (CSW) comes back. The commands are SCSI.
+ * Data passes through one 64 KiB buffer that never crosses a 64 KiB line
+ * (a TRB's buffer must not). Only 512-byte blocks (every stick). */
+
+#define ST_CHUNK 128                    /* sectors per command: 64 KiB */
+static uint8_t *st_buf, *st_cbw, *st_csw;
+
+static int bulk(usb_device_t *d, int in, void *buf, uint32_t len) {
+    ring_t *r = in ? &d->st_in : &d->st_out;
+    trb_t *t = ring_push(r, virt_to_phys(buf), len, TRB_TYPE(TRB_NORMAL) | TRB_IOC | (in ? TRB_ISP : 0));
+    ring_doorbell(d->slot, in ? d->st_in_dci : d->st_out_dci);
+    trb_t ev;
+    int cc = wait_for(t, 5000, &ev);
+    if (cc == CC_SUCCESS || cc == CC_SHORT) return (int)(len - (ev.status & 0xFFFFFF));
+    return cc == CC_STALL ? -2 : -1;
+}
+
+/* A halted endpoint: reset it on the controller, point its ring at the next
+ * free TRB, and clear the halt on the device. */
+static void clear_stall(usb_device_t *d, int in) {
+    int dci = in ? d->st_in_dci : d->st_out_dci;
+    ring_t *r = in ? &d->st_in : &d->st_out;
+    command(0, 0, TRB_TYPE(TRB_RESET_EP) | ((uint32_t)dci << 16) | ((uint32_t)d->slot << 24), 0);
+    command(virt_to_phys(&r->trbs[r->enqueue]) | r->cycle, 0,
+            TRB_TYPE(TRB_SET_DEQUEUE) | ((uint32_t)dci << 16) | ((uint32_t)d->slot << 24), 0);
+    control(d, 0x02, 1, 0, in ? d->st_in_ep : d->st_out_ep, 0, 0);   /* CLEAR_FEATURE(ENDPOINT_HALT) */
+}
+
+static void put_be32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v; }
+
+/* One SCSI command; data (len bytes) in st_buf. 0 if the device says it worked. */
+static int scsi(usb_device_t *d, const uint8_t *cdb, int cdb_len, uint32_t len, int in) {
+    memset(st_cbw, 0, 31);
+    st_cbw[0] = 'U'; st_cbw[1] = 'S'; st_cbw[2] = 'B'; st_cbw[3] = 'C';
+    uint32_t tag = ++d->st_tag;
+    memcpy(st_cbw + 4, &tag, 4);
+    memcpy(st_cbw + 8, &len, 4);
+    st_cbw[12] = in ? 0x80 : 0;
+    st_cbw[14] = (uint8_t)cdb_len;
+    memcpy(st_cbw + 15, cdb, (size_t)cdb_len);
+    if (bulk(d, 0, st_cbw, 31) != 31) return -1;
+    if (len && bulk(d, in, st_buf, len) == -2) clear_stall(d, in);   /* the status still follows */
+    int n = bulk(d, 1, st_csw, 13);
+    if (n == -2) {
+        clear_stall(d, 1);
+        n = bulk(d, 1, st_csw, 13);
+    }
+    if (n != 13 || memcmp(st_csw, "USBS", 4) || memcmp(st_csw + 4, &tag, 4)) return -1;
+    return st_csw[12] == 0 ? 0 : -1;
+}
+
+static int setup_storage(usb_device_t *d, uint8_t config_value) {
+    if (!st_buf) {
+        st_buf = dma_alloc(ST_CHUNK * 512, 65536);
+        st_cbw = dma_alloc(64, 64);
+        st_csw = dma_alloc(64, 64);
+    }
+    if (!st_buf || !st_cbw || !st_csw || ring_init(&d->st_in) != 0 || ring_init(&d->st_out) != 0) {
+        d->note = "out of memory";
+        return -1;
+    }
+    uint32_t *icc = in_entry(d, 0), *slot = in_entry(d, 1);
+    memset(d->in_ctx, 0, (uint64_t)ctx_size * 33);
+    memcpy(slot, d->out_ctx, (uint64_t)ctx_size);
+    icc[1] = 1u | 1u << d->st_in_dci | 1u << d->st_out_dci;
+    for (int k = 0; k < 2; k++) {
+        int dci = k ? d->st_in_dci : d->st_out_dci;
+        uint32_t mps = k ? d->st_in_mps : d->st_out_mps;
+        ring_t *r = k ? &d->st_in : &d->st_out;
+        uint32_t *ep = in_entry(d, dci + 1);
+        ep[1] = (3u << 1) | ((k ? 6u : 2u) << 3) | (mps << 16);   /* CErr 3, bulk IN / OUT */
+        uint64_t deq = virt_to_phys(r->trbs) | 1;
+        ep[2] = (uint32_t)deq;
+        ep[3] = (uint32_t)(deq >> 32);
+        ep[4] = 3072;                                       /* average TRB length (bulk) */
+    }
+    int last = d->st_in_dci > d->st_out_dci ? d->st_in_dci : d->st_out_dci;
+    slot[0] = (slot[0] & ~(0x1Fu << 27)) | ((uint32_t)last << 27);
+    if (command(virt_to_phys(d->in_ctx), 0, TRB_TYPE(TRB_CONFIGURE_EP) | ((uint32_t)d->slot << 24), 0)
+        != CC_SUCCESS) { d->note = "endpoint setup failed"; return -1; }
+    if (control(d, 0x00, 9, config_value, 0, 0, 0) != 0) { d->note = "SET_CONFIGURATION failed"; return -1; }
+
+    uint8_t inquiry[6] = { 0x12, 0, 0, 0, 36, 0 };
+    scsi(d, inquiry, 6, 36, 1);
+    int ready = 0;                                          /* sticks take a moment after power-on */
+    for (int i = 0; i < 20 && !ready; i++) {
+        uint8_t tur[6] = { 0 };
+        ready = scsi(d, tur, 6, 0, 0) == 0;
+        if (!ready) {
+            uint8_t sense[6] = { 0x03, 0, 0, 0, 18, 0 };   /* REQUEST SENSE clears "medium changed" */
+            scsi(d, sense, 6, 18, 1);
+            delay_ms(100);
+        }
+    }
+    uint8_t cap[10] = { 0x25 };                             /* READ CAPACITY (10) */
+    if (!ready || scsi(d, cap, 10, 8, 1) != 0) { d->note = "storage: not ready"; return -1; }
+    uint32_t last_lba = (uint32_t)st_buf[0] << 24 | st_buf[1] << 16 | st_buf[2] << 8 | st_buf[3];
+    uint32_t block = (uint32_t)st_buf[4] << 24 | st_buf[5] << 16 | st_buf[6] << 8 | st_buf[7];
+    if (block != 512) { d->note = "storage: blocks are not 512 bytes"; return -1; }
+    d->st_sectors = (uint64_t)last_lba + 1;
+    d->storage = 1;
+    return 0;
+}
+
+static usb_device_t *stick(int n) {
+    for (int i = 0; i < device_count; i++)
+        if (devices[i].storage && n-- == 0) return &devices[i];
+    return 0;
+}
+
+int usb_storage_count(void) {
+    int n = 0;
+    for (int i = 0; i < device_count; i++) n += devices[i].storage;
+    return n;
+}
+
+uint64_t usb_storage_sectors(int n) {
+    usb_device_t *d = stick(n);
+    return d ? d->st_sectors : 0;
+}
+
+static int storage_io(int n, uint64_t lba, uint32_t count, void *buf, int write) {
+    usb_device_t *d = stick(n);
+    if (!d || lba + count > d->st_sectors) return -1;
+    int was_busy = busy, r = 0;
+    busy = 1;                                               /* the timer poll leaves the events alone */
+    for (uint32_t done = 0; done < count && r == 0;) {
+        uint32_t k = count - done > ST_CHUNK ? ST_CHUNK : count - done;
+        uint8_t cdb[10] = { write ? 0x2A : 0x28 };          /* WRITE / READ (10) */
+        put_be32(cdb + 2, (uint32_t)(lba + done));
+        cdb[7] = (uint8_t)(k >> 8);
+        cdb[8] = (uint8_t)k;
+        if (write) memcpy(st_buf, (const uint8_t *)buf + (uint64_t)done * 512, (uint64_t)k * 512);
+        r = scsi(d, cdb, 10, k * 512, !write);
+        if (r == 0 && !write) memcpy((uint8_t *)buf + (uint64_t)done * 512, st_buf, (uint64_t)k * 512);
+        done += k;
+    }
+    busy = was_busy;
+    return r;
+}
+
+int usb_storage_read(int n, uint64_t lba, uint32_t count, void *buf) { return storage_io(n, lba, count, buf, 0); }
+int usb_storage_write(int n, uint64_t lba, uint32_t count, const void *buf) {
+    return storage_io(n, lba, count, (void *)buf, 1);
+}
+
 static void setup_device(usb_device_t *d) {
     uint8_t *buf = dma_alloc(512, 64);
     if (!buf) { d->note = "out of memory"; return; }
@@ -437,7 +596,7 @@ static void setup_device(usb_device_t *d) {
 
     /* Walk the descriptors: the first interface (for lsusb), and each boot
      * keyboard or mouse interface with its interrupt IN endpoint. */
-    int kind = 0, have_iface = 0;
+    int kind = 0, have_iface = 0, msc = 0;
     uint8_t iface = 0;
     uint16_t mps[MAX_HID];
     uint8_t interval[MAX_HID];
@@ -453,6 +612,18 @@ static void setup_device(usb_device_t *d) {
             int boot = buf[i + 5] == 3 && buf[i + 6] == 1;
             kind = boot && (buf[i + 7] == HID_MOUSE || buf[i + 7] == HID_KEYBOARD) ? buf[i + 7] : 0;
             iface = buf[i + 2];
+            msc = buf[i + 5] == 8 && buf[i + 6] == 6 && buf[i + 7] == 0x50 && !d->st_in_ep;   /* SCSI, bulk-only */
+        } else if (type == 5 && len >= 7 && msc && (buf[i + 3] & 3) == 2) {   /* a bulk endpoint */
+            uint16_t size = (uint16_t)((buf[i + 4] | buf[i + 5] << 8) & 0x7FF);
+            if (buf[i + 2] & 0x80) {
+                d->st_in_ep = buf[i + 2];
+                d->st_in_dci = (buf[i + 2] & 0xF) * 2 + 1;
+                d->st_in_mps = size;
+            } else {
+                d->st_out_ep = buf[i + 2];
+                d->st_out_dci = (buf[i + 2] & 0xF) * 2;
+                d->st_out_mps = size;
+            }
         } else if (type == 5 && len >= 7 && kind && (buf[i + 2] & 0x80) && (buf[i + 3] & 3) == 3 &&
                    d->hid_count < MAX_HID) {
             hid_t *h = &d->hid[d->hid_count];
@@ -467,6 +638,10 @@ static void setup_device(usb_device_t *d) {
     }
     if (d->hid_count) {
         if (setup_hid(d, config_value, mps, interval) != 0) d->hid_count = 0;
+        return;
+    }
+    if (d->st_in_ep && d->st_out_ep) {
+        setup_storage(d, config_value);
         return;
     }
     if (d->dev_class == 9 || d->if_class == 9) d->note = "hub: devices behind hubs are not supported yet";
@@ -494,10 +669,11 @@ static void scan_ports(void) {
         if (!d->speed) continue;                            /* USB 3 half of a USB 2 device, etc. */
         device_count++;
         setup_device(d);
-        kprintf("USB port %d: %04x:%04x class %u/%u/%u%s%s%s%s\n", port, d->vendor, d->product,
+        kprintf("USB port %d: %04x:%04x class %u/%u/%u%s%s%s%s%s\n", port, d->vendor, d->product,
                 d->if_class, d->if_subclass, d->if_protocol,
                 (device_kinds(d) >> HID_KEYBOARD) & 1 ? ", keyboard" : "",
                 (device_kinds(d) >> HID_MOUSE) & 1 ? ", mouse" : "",
+                d->storage ? ", storage" : "",
                 d->note ? ": " : "", d->note ? d->note : "");
     }
 }
@@ -807,6 +983,7 @@ void usb_print_devices(void) {
                            kinds == 1 << HID_MOUSE ? "mouse (in use)" :
                            kinds == 1 << HID_KEYBOARD ? "keyboard (in use)" :
                            d->if_class == 3 ? "HID device" :
+                           d->storage ? "storage (in use)" :
                            d->if_class == 8 ? "storage" : d->if_class == 9 || d->dev_class == 9 ? "hub" :
                            d->if_class == 0xE0 ? "wireless (Bluetooth?)" : d->if_class == 0x0E ? "camera" :
                            d->if_class == 1 ? "audio" : "device";

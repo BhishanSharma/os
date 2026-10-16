@@ -33,6 +33,7 @@ typedef struct {
 int  nic_probe_init(void);           /* 0 if a supported card was initialized */
 int  nic_is_up(void);
 const char *nic_name(void);
+int nic_link_down(void);              /* 1: no cable (when the card can tell) */
 uint8_t nic_get_irq(void);           /* PIC line to install at 0x20 + irq, or NIC_IRQ_NONE */
 void nic_handle_irq(void);           /* called from the NIC IRQ stub and when polling */
 void nic_get_mac(uint8_t mac[6]);

@@ -113,6 +113,37 @@ static void mount_persistent(void) {
     }
 }
 
+/* The USB stick Terminal OS started from (its partition is labelled "TERMOS
+ * USB", mkusbimg.sh) is mounted at /USB, writable: logd keeps the logs there
+ * (/USB/LOGS), so they can be read in Windows later. Only that partition:
+ * never another stick's or an external drive's. */
+static int usb_scan_stick;
+static int usb_stick_reader(uint64_t lba, uint32_t count, void *buf) {
+    return usb_storage_read(usb_scan_stick, lba, count, buf);
+}
+
+static void mount_usb_stick(void) {
+    static partition_t parts[16];
+    for (int s = 0; s < usb_storage_count(); s++) {
+        usb_scan_stick = s;
+        int n = part_scan(usb_stick_reader, parts, 16);
+        for (int i = 0; i < n; i++) {
+            if (!parts[i].fat32 || strcmp(parts[i].label, "TERMOS USB")) continue;
+            blockdev_t dev;
+            if (disk_open_usb_partition(s, parts[i].start, parts[i].sectors, 1, &dev) != 0) return;
+            if (vfs_mount("/USB", &dev) != 0) {
+                print_boot_status(BOOT_WARN, "USB stick", "the TERMOS USB partition is not readable FAT32");
+                return;
+            }
+            registry_add(registry_find("storage"), "TERMOS USB", "volume", "USB stick %d, partition %d, mounted at /USB",
+                         s + 1, i + 1);
+            print_boot_status(BOOT_OK, "USB stick", "the boot stick at /USB (%u MiB; logs in /USB/LOGS)",
+                              (uint32_t)(parts[i].sectors / 2048));
+            return;
+        }
+    }
+}
+
 /* The registry node of the first PCI function of this class (0: the root). */
 static int find_class_node(uint8_t cls, uint8_t sub) {
     for (int id = 0; registry_node(id); id++) {
@@ -313,6 +344,7 @@ void kernel_main() {
         int mice = usb_init();
         print_boot_status(mice > 0 ? BOOT_OK : BOOT_WARN, "USB", "%s%s", usb_description(),
                           mice == 0 ? " (plug a mouse in any time)" : "");
+        mount_usb_stick();
         char nvme_how[160];
         int nv = nvme_init(nvme_how, sizeof(nvme_how));
         if (nv == 0 || strncmp(nvme_how, "no NVMe", 7) != 0)
@@ -339,6 +371,8 @@ void kernel_main() {
     // DHCP needs the timer and NIC interrupts, so it runs after sti.
     if (net_is_up() && !have_ticks) {
         print_boot_status(BOOT_WARN, "DHCP", "skipped: no timer to time it out");
+    } else if (net_is_up() && nic_link_down()) {
+        print_boot_status(BOOT_OK, "DHCP", "skipped: no cable in the network port");
     } else if (net_is_up()) {
         char ip[16], gw[16];
         int ok = net_configure() == 0;

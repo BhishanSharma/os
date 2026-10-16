@@ -2,6 +2,7 @@
 #include "drivers/disk.h"
 #include "drivers/ata.h"
 #include "drivers/nvme.h"
+#include "drivers/usb.h"
 #include "drivers/heap.h"
 #include "lib/string.h"
 
@@ -53,6 +54,39 @@ static int nvme_part_write(void *ctx, uint64_t lba, uint32_t count, const void *
     nvme_part_t *p = ctx;
     if (!p->writable || lba + count > p->sectors) return -1;    /* only inside our own partition */
     return nvme_write(p->start + lba, count, buf);
+}
+
+typedef struct { int stick; uint64_t start, sectors; int writable; } usb_part_t;
+
+static int usb_part_read(void *ctx, uint64_t lba, uint32_t count, void *buf) {
+    usb_part_t *p = ctx;
+    if (lba + count > p->sectors) return -1;
+    return usb_storage_read(p->stick, p->start + lba, count, buf);
+}
+
+static int usb_part_write(void *ctx, uint64_t lba, uint32_t count, const void *buf) {
+    usb_part_t *p = ctx;
+    if (!p->writable || lba + count > p->sectors) return -1;    /* only inside the partition */
+    return usb_storage_write(p->stick, p->start + lba, count, buf);
+}
+
+int disk_open_usb_partition(int stick, uint64_t start, uint64_t sectors, int writable, blockdev_t *out) {
+    usb_part_t *p = kmalloc(sizeof(*p));
+    if (!p) return -1;
+    p->stick = stick;
+    p->start = start;
+    p->sectors = sectors;
+    p->writable = writable;
+    memset(out, 0, sizeof(*out));
+    out->kind = DISK_USB;
+    out->part_start = start;
+    out->read = usb_part_read;
+    out->write = usb_part_write;
+    out->ctx = p;
+    out->sectors = sectors;
+    out->writable = writable;
+    k_snprintf(out->name, sizeof(out->name), "USB stick %d", stick + 1);
+    return 0;
 }
 
 int disk_open(disk_kind_t kind, blockdev_t *out) {

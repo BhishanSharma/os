@@ -73,6 +73,20 @@ qemu-system-x86_64 -m 512M -cdrom dist\x86_64\kernel.iso -drive file=disk.img,fo
 (or `.\build.ps1 -Log`). `-no-reboot` freezes at the fault instead of resetting; `qemu.log`
 lists every exception with its vector, error code and `RIP`.
 
+### 2a. Logs from a real PC
+
+Booted from the USB stick, Terminal OS mounts the stick's own partition at `/USB`
+and `logd` saves everything printed (boot steps, drivers, crash reports) to
+`/USB/LOGS/BOOTnnnn.LOG` every 3 seconds; the last 10 boots are kept. On the PC,
+the Console app in the Dock shows the same log live. Back in Windows:
+
+```powershell
+.\scripts\usb-logs.ps1      # copies them into .\logs (read only: the stick is not changed)
+```
+
+When an app the desktop started crashes, a "quit unexpectedly" window says so;
+the kernel's report (instruction and address) is in the log.
+
 ### 2b. Serial console
 
 All kernel output (boot log, shell, panic reports) is mirrored to COM1. Add `-serial stdio`

@@ -6,6 +6,7 @@
 #include "lib/fbcon.h"
 #include "drivers/heap.h"
 #include "drivers/addr.h"
+#include "drivers/timer.h"
 
 #define VGA_CTRL_REGISTER 0x3D4
 #define VGA_DATA_REGISTER 0x3D5
@@ -295,9 +296,34 @@ void print_newLine() {
 static int (*print_tap)(char);
 void print_set_tap(int (*tap)(char)) { print_tap = tap; }
 
+/* The system log: everything printed since power-on (the kernel's messages,
+ * programs' console output), each line after the seconds since the timer
+ * started, the newest SYSLOG_SIZE bytes of it. logd saves
+ * it to the boot stick; Console shows it. */
+#define SYSLOG_SIZE (256 * 1024)
+static char syslog_ring[SYSLOG_SIZE];
+static uint64_t syslog_total;
+
+uint32_t print_log_read(uint64_t *from, char *buf, uint32_t max) {
+    if (*from > syslog_total) *from = syslog_total;
+    if (syslog_total - *from > SYSLOG_SIZE) *from = syslog_total - SYSLOG_SIZE;   /* overwritten */
+    uint32_t n = 0;
+    while (n < max && *from < syslog_total) buf[n++] = syslog_ring[(*from)++ % SYSLOG_SIZE];
+    return n;
+}
+
 void print_char(char character) {
     serial_putc(character);   // mirror everything to COM1 (survives crashes)
     if (bootlog_on && bootlog_len < BOOTLOG_SIZE) bootlog[bootlog_len++] = character;
+    static int line_start = 1;                          /* each line starts with the time */
+    if (line_start) {
+        char stamp[16];
+        uint32_t ms = timer_ms();
+        int n = k_snprintf(stamp, sizeof(stamp), "[%4u.%03u] ", ms / 1000, ms % 1000);
+        for (int i = 0; i < n; i++) syslog_ring[syslog_total++ % SYSLOG_SIZE] = stamp[i];
+    }
+    syslog_ring[syslog_total++ % SYSLOG_SIZE] = character;
+    line_start = character == '\n';
     if (print_tap && print_tap(character)) return;     /* into a Terminal window's pipe */
     if (console_muted) return;
     if (scrollback_view_offset) scroll_to_bottom();   // new output: back to the live screen

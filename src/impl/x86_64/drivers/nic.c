@@ -52,6 +52,8 @@ void nic_attach(nic_driver_t *drv) {
 }
 
 int nic_is_up(void) { return active != 0; }
+/* 1 if the card knows its cable is out (RTL8168 reads its PHY; the others say 0). */
+int nic_link_down(void) { return active == &rtl8168_drv && !rtl8168_link_up(); }
 
 const char *nic_name(void) { return active ? active->name : "none"; }
 

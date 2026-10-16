@@ -137,3 +137,9 @@ int setup_accounts(const char *name, const char *password) {
     return (int)os_syscall(SYS_SYSTEM, SYSTEM_SETUP, (long)name, (long)password);
 }
 void setup_text(void)                           { os_syscall(SYS_SYSTEM, SYSTEM_SETUP_TEXT, 0, 0); }
+int syslog_read(unsigned long *from, char *buf, int max) {
+    struct os_log l = { *from, buf, max };
+    int n = (int)os_syscall(SYS_SYSTEM, SYSTEM_LOG, (long)&l, 0);
+    if (n >= 0) *from = l.from;
+    return n;
+}

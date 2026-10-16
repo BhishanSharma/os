@@ -145,6 +145,7 @@ int power(int restart);                       /* 0 shut down, 1 restart: returns
 int setup_needed(void);                       /* 1: no accounts yet (first start) */
 int setup_accounts(const char *name, const char *password);   /* 0; -2 bad name, -3 bad password */
 void setup_text(void);                        /* the first-start questions on the console */
+int syslog_read(unsigned long *from, char *buf, int max);   /* the system log from byte *from -> bytes */
 void console_echo(int on);                   /* off: read(0) does not show the typing */
 
 /* Console */

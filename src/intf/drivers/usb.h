@@ -23,4 +23,11 @@ const char *usb_description(void);
 /* `lsusb`: the controller and what is plugged into each port. */
 void usb_print_devices(void);
 
+/* USB sticks (mass storage), numbered from 0 in the order found. Sectors are
+ * 512 bytes; read and write return 0 on success. */
+int usb_storage_count(void);
+uint64_t usb_storage_sectors(int n);
+int usb_storage_read(int n, uint64_t lba, uint32_t count, void *buf);
+int usb_storage_write(int n, uint64_t lba, uint32_t count, const void *buf);
+
 #endif

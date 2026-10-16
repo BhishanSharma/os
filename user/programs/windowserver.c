@@ -1445,9 +1445,17 @@ static void launch(int i) {
 
 static void quit(void);
 
+/* The programs run() started, by pid: a crash report can name them. */
+static struct { int pid; char name[16]; } started[16];
+static int n_started;
+
 static void run(const char *program, const char *arg) {
     char *argv[] = { (char *)program, (char *)arg, 0 };
-    spawn(program, argv, 0);
+    int pid = spawn(program, argv, 0);
+    if (pid <= 0) return;
+    int k = n_started++ % 16;
+    started[k].pid = pid;
+    snprintf(started[k].name, sizeof(started[k].name), "%s", program);
 }
 
 /* Tell every window (ws.h `prefs`) when a setting changes. */
@@ -1697,16 +1705,37 @@ static void animate_windows(int dt) {
     }
 }
 
+/* A program the desktop started crashed: say so, like macOS's "quit
+ * unexpectedly" (crashrep; the details are in the log, which Console shows). */
+static void crashed(int pid, const char *name, int status) {
+    static int reporter;
+    if (pid == reporter) return;                       /* not about itself */
+    for (int k = 0; !name && k < MAX_WINDOWS; k++)
+        if (wins[k].used && wins[k].pid == pid) name = wins[k].title;
+    for (int k = 0; !name && k < 16; k++)
+        if (started[k].pid == pid) name = started[k].name;
+    const char *why = status == 139 ? "it used memory it may not (a segmentation fault)"
+                    : status == 132 ? "it ran an invalid instruction"
+                                    : "it divided by zero";
+    char *argv[] = { "crashrep", (char *)(name && name[0] ? name : "A program"), (char *)why, 0 };
+    reporter = spawn("crashrep", argv, 0);
+}
+
 static void tidy(void) {
     int status, pid;
-    while ((pid = wait(-1, &status, WAIT_NOHANG)) > 0)
+    while ((pid = wait(-1, &status, WAIT_NOHANG)) > 0) {
+        const char *name = 0;
         for (int i = 0; i < DOCK_APPS; i++)
             if (apps[i].pid == pid) {
+                name = apps[i].name;
                 apps[i].pid = 0;
                 apps[i].launching = 0;
                 apps[i].bounce = apps[i].bvel = 0;
                 damage_dock();
             }
+        if (status == 139 || status == 132 || status == 136)   /* EXIT_SEGFAULT, _ILLEGAL, _ARITHMETIC */
+            crashed(pid, name, status);
+    }
     for (int k = 0; k < MAX_WINDOWS; k++)            /* windows of programs that ended */
         if (wins[k].used && sigsend(wins[k].pid, 0) < 0) remove_window(k);
     static const char *months[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -1797,8 +1826,10 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {                   /* apps to open: from the Dock, or any program */
         int k = 0;
         while (k < DOCK_APPS && strcmp(argv[i], apps[k].program)) k++;
+        char *arg = strchr(argv[i], ':');                  /* "program:argument" */
+        if (arg) *arg++ = 0;
         if (k < DOCK_APPS) launch(k);
-        else run(argv[i], 0);
+        else run(argv[i], arg);
     }
 
     unsigned long last_tidy = 0, last_frame = uptime_ms();

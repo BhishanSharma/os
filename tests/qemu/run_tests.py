@@ -602,8 +602,30 @@ def test_zoom():
         m.stop()
 
 
+def test_logs():
+    """The boot stick is at /USB; logd saves the log there; an app that crashes
+    on the desktop gets a "quit unexpectedly" report."""
+    m = Machine("logs", usb_stick())
+    try:
+        login(m)
+        time.sleep(4)                                # logd saves every 3 s
+        out = m.run("ls /USB/LOGS")
+        check("BOOT0001.LOG" in out.upper(), "no log on the stick", out)
+        out = m.run("cat /USB/LOGS/BOOT0001.LOG")
+        check("USB stick" in out and "logd: saving" in out, "the saved log is not the boot's", out)
+        start = len(m.text())
+        m.type("windowserver fault:null")
+        m.expect(r"crashrep: .* quit unexpectedly", 30, since=start)
+        time.sleep(2)
+        m.screenshot("crash")
+        m.keys("ctrl-q")
+        m.expect(PROMPT, 20)
+    finally:
+        m.stop()
+
+
 TESTS = [("boot", test_boot), ("files", test_files), ("fault", test_fault), ("panic", test_panic),
-         ("kernel", test_kernel), ("desktop", test_desktop), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("user", test_user), ("video", test_nvme_video), ("install", test_install), ("network", test_network),
+         ("kernel", test_kernel), ("desktop", test_desktop), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("logs", test_logs), ("user", test_user), ("video", test_nvme_video), ("install", test_install), ("network", test_network),
          ("bios", test_legacy_bios)]
 NEEDS_INTERNET = {"network"}
 
