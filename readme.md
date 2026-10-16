@@ -62,6 +62,7 @@ See [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) for the honest list of rough ed
 | Doc                                      | What's in it                                              |
 | ---------------------------------------- | --------------------------------------------------------- |
 | [docs/SETUP.md](docs/SETUP.md)           | Set up a build environment (Windows / Linux / macOS)      |
+| [docs/APPS.md](docs/APPS.md)             | Writing a desktop app (and [CONTRIBUTING.md](CONTRIBUTING.md)) |
 | [docs/DEVELOPING.md](docs/DEVELOPING.md) | Daily workflow, debugging, adding commands and drivers    |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Boot flow, memory map, interrupts, source layout       |
 | [docs/SHELL.md](docs/SHELL.md)           | Every shell command, editor keys, scripting, C subset     |

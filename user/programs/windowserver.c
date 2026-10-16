@@ -184,15 +184,60 @@ typedef struct {
     unsigned long launch_at;
 } dock_app_t;
 
-static dock_app_t apps[] = {
-    { .name = "Files", .program = "finder", .glyph = "F", .icon = "folder", .color = 0x2F7BF5 },
-    { .name = "Terminal", .program = "terminal", .glyph = ">_", .icon = "terminal", .color = 0x30323A },
-    { .name = "TextEdit", .program = "textedit", .glyph = "T", .icon = "textedit", .color = 0xF2F2F2 },
-    { .name = "Paint", .program = "paint", .glyph = "P", .icon = "paint", .color = 0xFF9500 },
-    { .name = "Activity Monitor", .program = "activity", .glyph = "A", .icon = "activity", .color = 0x34C759 },
-    { .name = "System Settings", .program = "settings", .glyph = "S", .icon = "gear", .color = 0x8E8E93 },
-};
-#define DOCK_APPS ((int)(sizeof(apps) / sizeof(apps[0])))
+/* The Dock's apps come from DOCK.CFG, which the build makes from every
+ * apps/NAME/app.cfg (scripts/mkdock.sh): "order|name|program|icon|color". */
+#define MAX_DOCK 16
+static dock_app_t apps[MAX_DOCK];
+static int n_apps;
+#define DOCK_APPS n_apps
+
+static void dock_add(char *name, char *program, char *icon, unsigned color) {
+    static char glyphs[MAX_DOCK][2];
+    if (n_apps == MAX_DOCK) return;
+    dock_app_t *a = &apps[n_apps];
+    glyphs[n_apps][0] = name[0];                       /* the drawn icon, without a picture */
+    a->name = name;
+    a->program = program;
+    a->icon = icon;
+    a->glyph = glyphs[n_apps];
+    a->color = color;
+    n_apps++;
+}
+
+static void load_dock(void) {
+    static char text[4096];
+    int fd = open("/SYS/DOCK.CFG", OPEN_READ);
+    if (fd < 0) fd = open("/DOCK.CFG", OPEN_READ);
+    long n = fd >= 0 ? read(fd, text, sizeof(text) - 1) : -1;
+    if (fd >= 0) close(fd);
+    if (n > 0) {
+        text[n] = 0;
+        for (char *line = text, *next; line && *line; line = next) {
+            next = strchr(line, '\n');
+            if (next) *next++ = 0;
+            char *f[5];
+            int k = 0;
+            for (char *p = line; k < 5 && p; k++) {
+                f[k] = p;
+                p = strchr(p, '|');
+                if (p) *p++ = 0;
+            }
+            if (k < 5 || !f[1][0] || !f[2][0]) continue;
+            char *cr = strchr(f[4], '\r');
+            if (cr) *cr = 0;
+            unsigned color = 0;
+            for (char *p = f[4]; *p; p++)
+                color = color * 16 + (unsigned)(*p <= '9' ? *p - '0' : (*p | 32) - 'a' + 10);
+            dock_add(f[1], f[2], f[3], color);
+        }
+    }
+    if (!n_apps) {                                     /* no DOCK.CFG: the two that always exist */
+        static char files[] = "Files", finder[] = "finder", folder[] = "folder";
+        static char term[] = "Terminal", terminal[] = "terminal";
+        dock_add(files, finder, folder, 0x2F7BF5);
+        dock_add(term, terminal, terminal, 0x30323A);
+    }
+}
 
 enum { M_ABOUT = 1, M_SETTINGS, M_ACTIVITY, M_APPEARANCE, M_MOTION, M_TRANSP, M_TERMINAL,
        M_CONTRAST, M_RESTART, M_SHUTDOWN, M_LOGOUT, W_MINIMIZE, W_CLOSE, W_FRONT = 100 };
@@ -670,7 +715,11 @@ static void start_open(window_t *w) {
 
 static int create_window(const struct ws_request *q, struct ws_reply *r) {
     int max_w = W - 2, max_h = H - MENU_H - TITLE_H - 2;
-    if (q->w < 1 || q->h < 1 || q->w > max_w || q->h > max_h) return SYSERR_BADCALL;
+    if (q->w < 1 || q->h < 1) return SYSERR_BADCALL;
+    struct ws_request fit = *q;                    /* too big for this screen: as big as fits */
+    if (fit.w > max_w) fit.w = max_w;
+    if (fit.h > max_h) fit.h = max_h;
+    q = &fit;
     int k = 0;
     while (k < MAX_WINDOWS && wins[k].used) k++;
     if (k == MAX_WINDOWS) return SYSERR_AGAIN;
@@ -704,6 +753,8 @@ static int create_window(const struct ws_request *q, struct ws_reply *r) {
     r->id = w->id;
     r->x = w->x;
     r->y = w->y;
+    r->w = w->w;
+    r->h = w->h;
     return 0;
 }
 
@@ -766,6 +817,8 @@ static int resize_window(const struct ws_request *q, struct ws_reply *r) {
         r->id = w->id;
         r->x = w->x;
         r->y = w->y;
+        r->w = w->w;
+        r->h = w->h;
         return 0;
     }
     return SYSERR_NOENT;
@@ -1722,6 +1775,7 @@ int main(int argc, char **argv) {
     anim_cap = anim_col && anim_mask && snap ? cap : 0;                  /* else: no window motion, no menu fade */
     make_wallpaper();
     make_cursor();
+    load_dock();
     for (int i = 0; i < DOCK_APPS; i++) {
         apps[i].size = icon();
         apps[i].sp.pos = (long)icon() * FP;

@@ -108,6 +108,9 @@ A file name with spaces works with or without quotes: `cat my notes.txt`.
 
 ## Writing your own
 
+A program with a window (an app in the Dock) goes in `apps/` instead: see
+[APPS.md](APPS.md). This section is about command-line programs.
+
 1. Create `user/programs/NAME.c` (8 characters at most, the FAT short-name limit):
 
    ```c

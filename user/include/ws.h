@@ -27,6 +27,7 @@ struct ws_reply {
     int id;                /* < 0: an error */
     char shm[32];          /* the surface's shared memory name */
     int x, y;              /* where the content starts on the screen */
+    int w, h;              /* the content size given: smaller than asked on a small screen */
 };
 
 enum { WS_EV_KEY = 1, WS_EV_DOWN, WS_EV_UP, WS_EV_MOVE, WS_EV_WHEEL, WS_EV_CLOSE,

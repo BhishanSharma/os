@@ -610,6 +610,8 @@ int ui_open(ui_window *w, const char *title, int width, int height) {
     port_close(server);
     if (n < (int)sizeof(r)) return n < 0 ? n : SYSERR_BADCALL;
     if (r.id < 0) return r.id;
+    width = r.w;                                     /* maybe smaller: it fits the screen */
+    height = r.h;
     w->s = shm_map(r.shm, ws_surface_size(width, height));
     if (!w->s) return SYSERR_NOMEM;
     w->id = r.id;

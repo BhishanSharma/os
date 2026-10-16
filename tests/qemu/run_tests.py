@@ -531,13 +531,15 @@ def test_gui():
 
 
 def test_apps():
-    """The desktop's apps start and keep running: Settings, Activity Monitor,
-    Paint, TextEdit, Files, Terminal."""
+    """Every app in apps/ starts without crashing, and ends at Log Out."""
     m = Machine("apps", usb_stick())
     try:
         login(m)
         start = len(m.text())
-        m.type("windowserver settings activity paint textedit finder terminal")
+        # Every app in apps/ (Terminal last: the front window for the keys below).
+        apps = sorted(n for n in os.listdir(os.path.join(ROOT, "apps"))
+                      if os.path.isfile(os.path.join(ROOT, "apps", n, "app.cfg")) and n != "terminal")
+        m.type("windowserver " + " ".join(apps + ["terminal"]))
         m.expect(r"windowserver: \d+x\d+", 30)
         time.sleep(6)
         m.screenshot("apps")
@@ -553,7 +555,7 @@ def test_apps():
         m.keys("ctrl-q")
         m.expect(PROMPT, 20)
         out = m.run("ps")
-        for name in ("settings", "activity", "paint", "textedit"):
+        for name in apps:
             alive = [l for l in out.splitlines() if l.endswith(name) and " done " not in l]
             check(not alive, name + " kept running after Log Out", out)
     finally:

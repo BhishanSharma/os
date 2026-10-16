@@ -69,6 +69,12 @@ user_lib_obj := $(patsubst user/lib/%.c,$(USER_BUILD)/lib/%.o,$(wildcard user/li
 user_progs   := $(patsubst user/programs/%.c,%,$(wildcard user/programs/*.c))
 USER_ELFS    := $(addprefix $(USER_BUILD)/,$(addsuffix .elf,$(user_progs)))
 
+# Apps: every folder apps/NAME/ with an app.cfg. All its .c files link into
+# NAME.elf, and app.cfg puts it in the Dock (DOCK.CFG). See docs/APPS.md.
+app_names    := $(patsubst apps/%/app.cfg,%,$(wildcard apps/*/app.cfg))
+APP_ELFS     := $(addprefix $(USER_BUILD)/,$(addsuffix .elf,$(app_names)))
+app_objs      = $(patsubst apps/$(1)/%.c,$(USER_BUILD)/apps/$(1)/%.o,$(wildcard apps/$(1)/*.c))
+
 # ---- Flags ----------------------------------------------------------------
 #
 # -ffreestanding:
@@ -235,16 +241,18 @@ $(KERNEL_BIN): $(objects) $(BEARSSL_LIB) $(LINKER_LD)
 
 # ---- ISO ------------------------------------------------------------------
 
-$(RAMDISK_GZ): scripts/mkramdisk.sh $(wildcard $(RAMDISK_DIR)/*) $(USER_ELFS) $(THIS_MAKEFILE)
+$(RAMDISK_GZ): scripts/mkramdisk.sh scripts/mkdock.sh $(wildcard $(RAMDISK_DIR)/*) $(USER_ELFS) $(APP_ELFS) \
+               $(wildcard apps/*/app.cfg) $(THIS_MAKEFILE)
 	rm -rf $(RAMDISK_STAGE)
 	mkdir -p $(RAMDISK_STAGE)
-	cp $(RAMDISK_DIR)/* $(USER_ELFS) $(RAMDISK_STAGE)/
+	cp $(RAMDISK_DIR)/* $(USER_ELFS) $(APP_ELFS) $(RAMDISK_STAGE)/
+	sh scripts/mkdock.sh apps > $(RAMDISK_STAGE)/DOCK.CFG
 	sh scripts/mkramdisk.sh $(RAMDISK_STAGE) $(RAMDISK_MB) $@
 
 
 # ---- User programs ----------------------------------------------------------
 
-user: $(USER_ELFS) ## Build the user programs (build/user/*.elf)
+user: $(USER_ELFS) $(APP_ELFS) ## Build the user programs and apps (build/user/*.elf)
 
 # Keep the program objects (make would delete them as intermediates).
 .SECONDARY:
@@ -271,6 +279,17 @@ $(USER_BUILD)/libc.a: $(user_lib_obj)
 
 $(USER_BUILD)/%.elf: $(USER_BUILD)/programs/%.o $(USER_BUILD)/crt0.o $(USER_BUILD)/libc.a user/user.ld
 	$(LD) -T user/user.ld -z max-page-size=4096 -z noexecstack -o $@ $(USER_BUILD)/crt0.o $< $(USER_BUILD)/libc.a
+
+# An app's files: its own folder is on the include path (its headers).
+$(USER_BUILD)/apps/%.o: apps/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -I $(dir $<) -MMD -MP $< -o $@
+
+define APP_RULE
+$(USER_BUILD)/$(1).elf: $(call app_objs,$(1)) $(USER_BUILD)/crt0.o $(USER_BUILD)/libc.a user/user.ld
+	$$(LD) -T user/user.ld -z max-page-size=4096 -z noexecstack -o $$@ $(USER_BUILD)/crt0.o $(call app_objs,$(1)) $(USER_BUILD)/libc.a
+endef
+$(foreach a,$(app_names),$(eval $(call APP_RULE,$(a))))
 
 
 $(KERNEL_ISO): $(KERNEL_BIN) $(RAMDISK_GZ) $(ISO_SRC)/boot/grub/grub.cfg
@@ -402,4 +421,5 @@ clean: ## Remove build/ and dist/
 
 # ---- Header dependency tracking -------------------------------------------
 
+-include $(foreach a,$(app_names),$(patsubst %.o,%.d,$(call app_objs,$(a))))
 -include $(objects:.o=.d) $(user_lib_obj:.o=.d) $(patsubst %.elf,%.d,$(subst $(USER_BUILD)/,$(USER_BUILD)/programs/,$(USER_ELFS)))

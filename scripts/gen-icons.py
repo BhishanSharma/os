@@ -4,7 +4,8 @@
     python scripts/gen-icons.py   (needs Pillow; the output is committed)
 
 Icons: Microsoft's Fluent UI Emoji (3D style, MIT licence) in
-third_party/icons, and a Terminal icon drawn here. Each icon is stored at
+third_party/icons, and each app's own apps/NAME/icon.png (named NAME; square,
+512 x 512 or more looks best). Each icon is stored at
 48, 96 and 192 pixels square, 0xAARRGGBB (straight alpha), little-endian:
 
     "ICN1", u32 count
@@ -54,6 +55,14 @@ def terminal_icon(size=512):
 
 def main():
     images = {name: Image.open(os.path.join(ICONS, name + ".png")).convert("RGBA") for name in NAMES}
+    # An app's own picture: apps/NAME/icon.png becomes the icon "NAME".
+    apps = os.path.join(ROOT, "apps")
+    for app in sorted(os.listdir(apps)) if os.path.isdir(apps) else []:
+        png = os.path.join(apps, app, "icon.png")
+        if os.path.isfile(png):
+            if len(app) > 15:
+                raise SystemExit("apps/%s: the folder name is too long for an icon name (15 at most)" % app)
+            images[app] = Image.open(png).convert("RGBA")
     names = list(images)
     header = 8 + len(names) * (16 + len(SIZES) * 8)
     table, pixels = b"", bytearray()
