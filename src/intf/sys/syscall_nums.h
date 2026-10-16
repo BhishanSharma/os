@@ -97,6 +97,7 @@
 #define SYSTEM_SETUP        7  /* a = name, b = password: the first accounts -> 0; a = 0: 1 if needed */
 #define SYSTEM_SETUP_TEXT   8  /* the first-start questions on the console   -> 0 */
 #define SYSTEM_LOG          9  /* a = struct os_log *: the system log         -> bytes copied */
+#define SYSTEM_CPUS        10  /* -> how many cores run programs */
 
 struct os_log {
     unsigned long from;    /* in: the byte to start at (since power-on); out: past the last copied */

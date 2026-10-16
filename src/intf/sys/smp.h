@@ -32,6 +32,11 @@ void bkl_leave(void);
  * interrupt stopped); 0: skip, someone is busy. Pair with bkl_leave. */
 int bkl_try_enter(void);
 
+/* Let other cores into the kernel while this one copies memory only it uses
+ * (the screen's frame): bkl_drop -> its nesting, bkl_take(it) to come back. */
+int bkl_drop(void);
+void bkl_take(int depth);
+
 /* Wait for an interrupt, letting other cores into the kernel meanwhile.
  * Use instead of `hlt` in kernel code. Turns interrupts on. */
 void cpu_wait(void);

@@ -2030,6 +2030,8 @@ static int64_t sys_system(uint64_t op, uint64_t a, uint64_t b) {
             l->from = from;
             return n;
         }
+        case SYSTEM_CPUS:
+            return smp_cpu_count();
         case SYSTEM_POWER:
             print_set_graphics(0);
             if (a == 1) reboot();

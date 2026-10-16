@@ -5,6 +5,7 @@
 #include "drivers/heap.h"
 #include "drivers/igfx.h"
 #include "sys/task.h"
+#include "sys/smp.h"
 #include "lib/string.h"
 
 #define GLYPH_W 8
@@ -413,12 +414,21 @@ int fbcon_present(void) {
     }
     int target = !front;
     uint8_t *dst = target ? (uint8_t *)igfx_back_buffer() : fb_base;
-    for (int i = 0; i < now_n; i++) copy_rect(dst, &now_rects[i]);
-    for (int i = 0; i < last_n; i++) copy_rect(dst, &last_rects[i]);
-    igfx_flip(target);
-    front = target;
+    rect_t todo[2 * MAX_RECTS];                    /* this frame's and the last (the buffer is a frame behind) */
+    int n = 0;
+    for (int i = 0; i < now_n; i++) todo[n++] = now_rects[i];
+    for (int i = 0; i < last_n; i++) todo[n++] = last_rects[i];
     memcpy(last_rects, now_rects, sizeof(rect_t) * (size_t)now_n);
     last_n = now_n;
     now_n = 0;
+    /* The copy goes to the hidden buffer from the shadow, kernel memory only
+     * the desktop's present uses: other cores may use the kernel meanwhile.
+     * (A blit that lands in the shadow now is copied again next frame.) */
+    int depth = bkl_drop();
+    for (int i = 0; i < n; i++) copy_rect(dst, &todo[i]);
+    bkl_take(depth);
+    if (!flip_on) return 0;                         /* the desktop ended meanwhile */
+    igfx_flip(target);
+    front = target;
     return 1;
 }

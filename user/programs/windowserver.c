@@ -259,6 +259,20 @@ static int next_id = 1, placed;
 static struct os_gfx_info g;
 static int W, H, S, MENU_H, TITLE_H, RADIUS, SHADOW;
 static ui_canvas scr;                             /* the back buffer */
+
+/* The desktop is drawn by several cores at once (painters), each a band of
+ * the screen: its own copy of the back buffer's canvas (clipped to its band)
+ * and its own scratch space for materials. */
+typedef struct {
+    ui_canvas c;
+    unsigned *samp, *samp2, *mat, *xf;
+    int *xi;
+} painter_t;
+#define MAX_PAINTERS 8
+#define PAINT_MIN (256 * 256)                          /* smaller frames: one core (waking others costs more) */
+static painter_t painters[MAX_PAINTERS];
+static int n_painters = 1;
+static volatile int paint_job, paint_left;            /* the frame's number; painters still at it */
 static unsigned *wallpaper;                       /* one colour per row */
 static struct { int x0, y0, x1, y1; } dmg[MAX_DAMAGE];
 static int ndmg;
@@ -905,12 +919,12 @@ static void make_cursor(void) {
         }
 }
 
-static void draw_cursor(void) {
+static void draw_cursor(painter_t *p) {
     int cw = CURSOR_W * S, ch = CURSOR_H * S;
     for (int j = 0; j < ch; j++)
         for (int i = 0; i < cw; i++) {
-            ui_blend_pixel(&scr, mouse_x + i, mouse_y + j, 0x000000, cursor_black[j * cw + i]);
-            ui_blend_pixel(&scr, mouse_x + i, mouse_y + j, 0xFFFFFF, cursor_white[j * cw + i]);
+            ui_blend_pixel(&p->c, mouse_x + i, mouse_y + j, 0x000000, cursor_black[j * cw + i]);
+            ui_blend_pixel(&p->c, mouse_x + i, mouse_y + j, 0xFFFFFF, cursor_white[j * cw + i]);
         }
 }
 
@@ -969,10 +983,7 @@ static void make_wallpaper(void) {
 #define SAMP_W 512
 #define SAMP_H 320
 #define MAT_MAX (1 << 19)
-static unsigned samp[SAMP_W * SAMP_H], samp2[SAMP_W * SAMP_H];
-static unsigned mat[MAT_MAX];
-static int xi[2048];
-static unsigned xf[2048];
+
 
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
@@ -1024,44 +1035,45 @@ static unsigned saturate_tint(unsigned c, int sat, unsigned tint, int alpha) {
 
 /* A frosted rounded rectangle. Reduce Transparency (or a size too big to
  * sample): the solid colour instead. */
-static void material(int x, int y, int w, int h, int r, int corners, unsigned tint, int tint_a, unsigned solid) {
-    if (x + w <= scr.cx0 || x >= scr.cx1 || y + h <= scr.cy0 || y >= scr.cy1) return;
+static void material(painter_t *p, int x, int y, int w, int h, int r, int corners, unsigned tint, int tint_a, unsigned solid) {
+    if (x + w <= p->c.cx0 || x >= p->c.cx1 || y + h <= p->c.cy0 || y >= p->c.cy1) return;
     int bleed = 10 * S, bw = (w + 2 * bleed + 3) / 4, bh = (h + 2 * bleed + 3) / 4;
     if (reduce_transp || w > 2048 || bw > SAMP_W || bh > SAMP_H || (long)w * h > MAT_MAX) {
-        ui_round_ex(&scr, x, y, w, h, r, solid, 255, corners);
+        ui_round_ex(&p->c, x, y, w, h, r, solid, 255, corners);
         return;
     }
     for (int cy = 0; cy < bh; cy++)
         for (int cx = 0; cx < bw; cx++)
-            samp[cy * bw + cx] = backdrop_at(x - bleed + cx * 4 + 2, y - bleed + cy * 4 + 2);
-    box3(samp, samp2, bw, bh, 1);
-    box3(samp2, samp, bw, bh, 0);
-    box3(samp, samp2, bw, bh, 1);
-    box3(samp2, samp, bw, bh, 0);
-    for (int i = 0; i < bw * bh; i++) samp[i] = saturate_tint(samp[i], 180, tint, tint_a);
+            p->samp[cy * bw + cx] = backdrop_at(x - bleed + cx * 4 + 2, y - bleed + cy * 4 + 2);
+    box3(p->samp, p->samp2, bw, bh, 1);
+    box3(p->samp2, p->samp, bw, bh, 0);
+    box3(p->samp, p->samp2, bw, bh, 1);
+    box3(p->samp2, p->samp, bw, bh, 0);
+    for (int i = 0; i < bw * bh; i++) p->samp[i] = saturate_tint(p->samp[i], 180, tint, tint_a);
     for (int i = 0; i < w; i++) {                          /* bilinear, columns once */
         int u = (i + bleed) * 64 - 96, c0 = u >> 8;
         unsigned f = (unsigned)(u & 255);
         if (c0 < 0) { c0 = 0; f = 0; }
         if (c0 >= bw - 1) { c0 = bw - 1; f = 0; }
-        xi[i] = c0;
-        xf[i] = f;
+        p->xi[i] = c0;
+        p->xf[i] = f;
     }
-    for (int j = 0; j < h; j++) {
+    int j0 = p->c.cy0 > y ? p->c.cy0 - y : 0, j1 = p->c.cy1 < y + h ? p->c.cy1 - y : h;   /* (the rest is not drawn) */
+    for (int j = j0; j < j1; j++) {
         int v = (j + bleed) * 64 - 96, r0 = v >> 8;
         unsigned rf = (unsigned)(v & 255);
         if (r0 < 0) { r0 = 0; rf = 0; }
         if (r0 >= bh - 1) { r0 = bh - 1; rf = 0; }
-        const unsigned *a = samp + r0 * bw, *b = rf ? a + bw : a;
+        const unsigned *a = p->samp + r0 * bw, *b = rf ? a + bw : a;
         for (int i = 0; i < w; i++) {
-            int c = xi[i];
-            unsigned f = xf[i];
+            int c = p->xi[i];
+            unsigned f = p->xf[i];
             unsigned top = f ? lerp_rgb(a[c], a[c + 1], f) : a[c];
             unsigned bot = f ? lerp_rgb(b[c], b[c + 1], f) : b[c];
-            mat[j * w + i] = rf ? lerp_rgb(top, bot, rf) : top;
+            p->mat[j * w + i] = rf ? lerp_rgb(top, bot, rf) : top;
         }
     }
-    ui_copy_round(&scr, x, y, mat, w, h, w, r, corners);
+    ui_copy_round(&p->c, x, y, p->mat, w, h, w, r, corners);
 }
 
 /* ---- Drawing ------------------------------------------------------------- */
@@ -1096,10 +1108,10 @@ static void traffic_lights(ui_canvas *cv, int cx0, int cy0, int focused, int hov
 }
 
 /* The shadow round an outer rectangle; a255 fades it with the window. */
-static void window_shadow(int x, int y, int ww, int hh, int focused, int a255) {
-    ui_shadow(&scr, x + 2 * S, y + SHADOW / 3, ww - 4 * S, hh - 2 * S, RADIUS, SHADOW,
+static void window_shadow(painter_t *p, int x, int y, int ww, int hh, int focused, int a255) {
+    ui_shadow(&p->c, x + 2 * S, y + SHADOW / 3, ww - 4 * S, hh - 2 * S, RADIUS, SHADOW,
               (focused ? TH.shadow_on : TH.shadow_off) * a255 / 255);
-    ui_shadow(&scr, x, y, ww, hh, RADIUS, 2 * S, 50 * a255 / 255);        /* a tight edge */
+    ui_shadow(&p->c, x, y, ww, hh, RADIUS, 2 * S, 50 * a255 / 255);        /* a tight edge */
 }
 
 /* The window itself (outline, title bar, content), no shadow, onto `cv` with
@@ -1164,10 +1176,10 @@ static void anim_params(const window_t *w, int *scale, int *alpha, int *cx, int 
  * opacity alpha: bilinear, clipped to the damage rectangle in force. `under`
  * (or 0) is what was on the screen before the shadow was drawn, from (ux, uy),
  * uw wide: a see-through window shows that, not its own shadow, through its body. */
-static void blit_scaled(int dx, int dy, int dw, int dh, int ow, int oh, int alpha,
+static void blit_scaled(painter_t *p, int dx, int dy, int dw, int dh, int ow, int oh, int alpha,
                         const unsigned *under, int ux, int uy, int uw) {
-    int x0 = dx < scr.cx0 ? scr.cx0 : dx, y0 = dy < scr.cy0 ? scr.cy0 : dy;
-    int x1 = dx + dw > scr.cx1 ? scr.cx1 : dx + dw, y1 = dy + dh > scr.cy1 ? scr.cy1 : dy + dh;
+    int x0 = dx < p->c.cx0 ? p->c.cx0 : dx, y0 = dy < p->c.cy0 ? p->c.cy0 : dy;
+    int x1 = dx + dw > p->c.cx1 ? p->c.cx1 : dx + dw, y1 = dy + dh > p->c.cy1 ? p->c.cy1 : dy + dh;
     if (dw <= 0 || dh <= 0) return;
     for (int py = y0; py < y1; py++) {
         int v = ((2 * (py - dy) + 1) * oh * 128) / dh - 128;                         /* 1/256 texels */
@@ -1177,7 +1189,7 @@ static void blit_scaled(int dx, int dy, int dw, int dh, int ow, int oh, int alph
         if (ty >= oh - 1) { ty = oh - 1; fy = 0; }
         const unsigned *c0 = anim_col + (long)ty * ow, *c1 = fy ? c0 + ow : c0;
         const unsigned *m0 = anim_mask + (long)ty * ow, *m1 = fy ? m0 + ow : m0;
-        unsigned *row = scr.px + (long)py * scr.stride;
+        unsigned *row = p->c.px + (long)py * p->c.stride;
         for (int px = x0; px < x1; px++) {
             int u = ((2 * (px - dx) + 1) * ow * 128) / dw - 128, tx = u >> 8;
             unsigned fx = (unsigned)(u & 255);
@@ -1206,7 +1218,7 @@ static void blit_scaled(int dx, int dy, int dw, int dh, int ow, int oh, int alph
     }
 }
 
-static void draw_window_anim(int k, int focused, int hover) {
+static void draw_window_anim(painter_t *p, int k, int focused, int hover) {
     window_t *w = &wins[k];
     int ox, oy, ow, oh;
     outer(w, &ox, &oy, &ow, &oh);
@@ -1227,70 +1239,70 @@ static void draw_window_anim(int k, int focused, int hover) {
     int dw = ow * scale / 1000, dh = oh * scale / 1000;
     if (dw < 1 || dh < 1) return;
     int dx = cx - dw / 2, dy = cy - dh / 2;
-    int ux = dx < scr.cx0 ? scr.cx0 : dx, uy = dy < scr.cy0 ? scr.cy0 : dy;
-    int ux1 = dx + dw > scr.cx1 ? scr.cx1 : dx + dw, uy1 = dy + dh > scr.cy1 ? scr.cy1 : dy + dh;
+    int ux = dx < p->c.cx0 ? p->c.cx0 : dx, uy = dy < p->c.cy0 ? p->c.cy0 : dy;
+    int ux1 = dx + dw > p->c.cx1 ? p->c.cx1 : dx + dw, uy1 = dy + dh > p->c.cy1 ? p->c.cy1 : dy + dh;
     int uw = ux1 - ux;
     const unsigned *under = 0;
     if (alpha < 255 && snap && uw > 0 && uy1 > uy && (long)uw * (uy1 - uy) <= anim_cap) {
         for (int y = uy; y < uy1; y++)
-            memcpy(snap + (long)(y - uy) * uw, scr.px + (long)y * scr.stride + ux, (size_t)uw * 4);
+            memcpy(snap + (long)(y - uy) * uw, p->c.px + (long)y * p->c.stride + ux, (size_t)uw * 4);
         under = snap;
     }
-    window_shadow(dx, dy, dw, dh, focused, alpha);
-    blit_scaled(dx, dy, dw, dh, ow, oh, alpha, under, ux, uy, uw);
+    window_shadow(p, dx, dy, dw, dh, focused, alpha);
+    blit_scaled(p, dx, dy, dw, dh, ow, oh, alpha, under, ux, uy, uw);
 }
 
-static void draw_window(int k, int front_win) {
+static void draw_window(painter_t *p, int k, int front_win) {
     window_t *w = &wins[k];
     if (w->minimised || w->anim == ANIM_WAIT) return;
     int exiting = w->anim == ANIM_CLOSE || w->anim == ANIM_MIN;
     int focused = front_win || exiting;                                          /* keeps its look while leaving */
     int hover = tl_hover >= 0 && &wins[tl_hover] == w;
     if (w->anim != ANIM_NONE && anim_ok(w)) {
-        draw_window_anim(k, focused, hover);
+        draw_window_anim(p, k, focused, hover);
         return;
     }
     int x, y, ww, hh;
     outer(w, &x, &y, &ww, &hh);
-    window_shadow(x, y, ww, hh, focused, 255);
-    window_body(&scr, w, w->x, w->y, focused, hover);
+    window_shadow(p, x, y, ww, hh, focused, 255);
+    window_body(&p->c, w, w->x, w->y, focused, hover);
 }
 
-static void draw_menu_bar(void) {
-    ui_fill_a(&scr, 0, 0, W, MENU_H, TH.bar_tint, TH.bar_alpha);           /* translucent */
-    ui_fill_a(&scr, 0, MENU_H - 1, W, 1, TH.sep, TH.sep_alpha);
+static void draw_menu_bar(painter_t *p) {
+    ui_fill_a(&p->c, 0, 0, W, MENU_H, TH.bar_tint, TH.bar_alpha);           /* translucent */
+    ui_fill_a(&p->c, 0, MENU_H - 1, W, 1, TH.sep, TH.sep_alpha);
     int ty = (MENU_H - 16 * S) / 2, x = 16 * S;
     int tw = ui_text_style_width("Terminal OS", S, UI_BOLD);
     bar_x0[1] = x - 8 * S;
     bar_x1[1] = x + tw + 8 * S;
     if (menu_open == 1)
-        ui_round_ex(&scr, bar_x0[1], 2 * S, bar_x1[1] - bar_x0[1], MENU_H - 4 * S, R_SMALL * S, TH.hl, TH.hl_alpha, UI_ALL);
-    ui_text_bold(&scr, x, ty, "Terminal OS", TH.label, S);
+        ui_round_ex(&p->c, bar_x0[1], 2 * S, bar_x1[1] - bar_x0[1], MENU_H - 4 * S, R_SMALL * S, TH.hl, TH.hl_alpha, UI_ALL);
+    ui_text_bold(&p->c, x, ty, "Terminal OS", TH.label, S);
     window_t *f = front();
     x = bar_x1[1] + 8 * S;
-    x += ui_text_bold(&scr, x, ty, f ? app_name(f) : "Desktop", TH.label, S) + 16 * S;
+    x += ui_text_bold(&p->c, x, ty, f ? app_name(f) : "Desktop", TH.label, S) + 16 * S;
     int ww = ui_text_width("Window", S);
     bar_x0[2] = x - 8 * S;
     bar_x1[2] = x + ww + 8 * S;
     if (menu_open == 2)
-        ui_round_ex(&scr, bar_x0[2], 2 * S, bar_x1[2] - bar_x0[2], MENU_H - 4 * S, R_SMALL * S, TH.hl, TH.hl_alpha, UI_ALL);
-    ui_text(&scr, x, ty, "Window", TH.label, S);
+        ui_round_ex(&p->c, bar_x0[2], 2 * S, bar_x1[2] - bar_x0[2], MENU_H - 4 * S, R_SMALL * S, TH.hl, TH.hl_alpha, UI_ALL);
+    ui_text(&p->c, x, ty, "Window", TH.label, S);
 
     int rx = W - 16 * S - ui_text_width(clock_text, S);
-    ui_text(&scr, rx, ty, clock_text, TH.label, S);
+    ui_text(&p->c, rx, ty, clock_text, TH.label, S);
     int is = 16 * S, iy = (MENU_H - is) / 2;
     status_x[0] = status_x[1] = status_x[2] = 0;
     rx -= 16 * S;
     if (vol_level >= 0) {                              /* sound */
         rx -= is;
         status_x[2] = rx;
-        ui_icon(&scr, rx, iy, is, "sound", vol_level ? 255 : 90);
+        ui_icon(&p->c, rx, iy, is, "sound", vol_level ? 255 : 90);
         rx -= 12 * S;
     }
     if (wifi_on >= 0) {                                /* Wi-Fi: faded when not connected */
         rx -= is;
         status_x[1] = rx;
-        ui_icon(&scr, rx, iy, is, "wifi", wifi_on ? 255 : 80);
+        ui_icon(&p->c, rx, iy, is, "wifi", wifi_on ? 255 : 80);
         rx -= 12 * S;
     }
     if (bat >= 0) {                                    /* battery and percent */
@@ -1298,105 +1310,146 @@ static void draw_menu_bar(void) {
         snprintf(pct, sizeof(pct), "%d%%", bat & 0xFF);
         int pw = ui_text_width(pct, S);
         rx -= pw;
-        ui_text(&scr, rx, ty, pct, TH.label, S);
+        ui_text(&p->c, rx, ty, pct, TH.label, S);
         rx -= is + 4 * S;
         status_x[0] = rx;
-        ui_icon(&scr, rx, iy, is, "battery", 255);
+        ui_icon(&p->c, rx, iy, is, "battery", 255);
     }
 }
 
-static void draw_dock(void) {
+static void draw_dock(painter_t *p) {
     int x = dock_x(), w = dock_w(), y = dock_bottom() - dock_h(), r = R_XXL * S;
-    ui_shadow_ex(&scr, x, y + 2 * S, w, dock_h(), r, 12 * S, 60, 1);          /* not under the glass */
-    ui_round_ex(&scr, x - 1, y - 1, w + 2, dock_h() + 2, r + 1, TH.dock_rim, TH.dock_rim_alpha, UI_ALL);
-    material(x, y, w, dock_h(), r, UI_ALL, TH.dock_tint, TH.dock_alpha, TH.dock_solid);
+    ui_shadow_ex(&p->c, x, y + 2 * S, w, dock_h(), r, 12 * S, 60, 1);          /* not under the glass */
+    ui_round_ex(&p->c, x - 1, y - 1, w + 2, dock_h() + 2, r + 1, TH.dock_rim, TH.dock_rim_alpha, UI_ALL);
+    material(p, x, y, w, dock_h(), r, UI_ALL, TH.dock_tint, TH.dock_alpha, TH.dock_solid);
     int hot = dock_hit(mouse_x, mouse_y);
     for (int i = 0; i < DOCK_APPS; i++) {
         dock_app_t *a = &apps[i];
         int size = a->size, ix = icon_x(i), iy = dock_bottom() - pad() - size - (int)(a->bounce / FP), rr = size * 22 / 100;
-        if (ui_icon(&scr, ix, iy, size, a->icon, 255) != 0) {   /* no icon file: a drawn one */
-            ui_shadow(&scr, ix, iy + size / 30, size, size, rr, size / 12 + 1, 70);
-            ui_round(&scr, ix, iy, size, size, rr, a->color);
+        if (ui_icon(&p->c, ix, iy, size, a->icon, 255) != 0) {   /* no icon file: a drawn one */
+            ui_shadow(&p->c, ix, iy + size / 30, size, size, rr, size / 12 + 1, 70);
+            ui_round(&p->c, ix, iy, size, size, rr, a->color);
             int ts = size / 22;
             if (ts < 1) ts = 1;
             if (ts > 4) ts = 4;
             int gw = ui_text_style_width(a->glyph, ts, UI_BOLD);
-            ui_text_bold(&scr, ix + (size - gw) / 2, iy + (size - 16 * ts) / 2, a->glyph, 0xFFFFFF, ts);
+            ui_text_bold(&p->c, ix + (size - gw) / 2, iy + (size - 16 * ts) / 2, a->glyph, 0xFFFFFF, ts);
         }
         if (a->pid > 0)                                          /* the running dot */
-            ui_circle(&scr, ix + size / 2, dock_bottom() - pad() / 2 + S, 2 * S, dark ? 0xE5E5E7 : 0x3A3A3E);
+            ui_circle(&p->c, ix + size / 2, dock_bottom() - pad() / 2 + S, 2 * S, dark ? 0xE5E5E7 : 0x3A3A3E);
         if (i == hot && !menu_open) {                          /* the name, above the icon */
             int ta = (int)(255 * ease_out((long)tip_ms * 1024 / FADE_MS) / 1024);      /* fades in over 120 ms */
             int lw = ui_text_width(a->name, S) + 16 * S, lh = 24 * S;
             int lx = ix + size / 2 - lw / 2, ly = dock_bottom() - dock_h() - lh - 8 * S - (size - icon());
-            ui_round_ex(&scr, lx, ly, lw, lh, R_MEDIUM * S, TH.tooltip, 225 * ta / 255, UI_ALL);
-            ui_text(&scr, lx + 8 * S, ly + (lh - 16 * S) / 2, a->name,
+            ui_round_ex(&p->c, lx, ly, lw, lh, R_MEDIUM * S, TH.tooltip, 225 * ta / 255, UI_ALL);
+            ui_text(&p->c, lx + 8 * S, ly + (lh - 16 * S) / 2, a->name,
                     lerp_rgb(TH.tooltip, 0xFFFFFF, (unsigned)(ta + (ta >> 7))), S);
         }
     }
 }
 
-static void draw_menu(void) {
+static void draw_menu(painter_t *p) {
     if (!menu_open) return;
     int x = menu_x(), y = menu_y(), w = menu_w(), h = menu_h(), r = R_LARGE * S;
-    ui_shadow_ex(&scr, x, y + 4 * S, w, h, r, 14 * S, 90, 1);                  /* blur 28 / 2 */
-    ui_round_ex(&scr, x - 1, y - 1, w + 2, h + 2, r + 1, TH.hair, TH.hair_alpha, UI_ALL);
-    material(x, y, w, h, r, UI_ALL, TH.menu_tint, TH.menu_alpha, TH.menu_solid);
+    ui_shadow_ex(&p->c, x, y + 4 * S, w, h, r, 14 * S, 90, 1);                  /* blur 28 / 2 */
+    ui_round_ex(&p->c, x - 1, y - 1, w + 2, h + 2, r + 1, TH.hair, TH.hair_alpha, UI_ALL);
+    material(p, x, y, w, h, r, UI_ALL, TH.menu_tint, TH.menu_alpha, TH.menu_solid);
     for (int i = 0; i < n_mitems; i++) {
         int iy = menu_item_y(i), ih = mi_h(i);
         if (mitems[i].flags & MI_SEP) {
-            ui_fill_a(&scr, x + 8 * S, iy + ih / 2, w - 16 * S, 1, TH.sep, TH.sep_alpha);
+            ui_fill_a(&p->c, x + 8 * S, iy + ih / 2, w - 16 * S, 1, TH.sep, TH.sep_alpha);
             continue;
         }
         int off = mitems[i].flags & MI_OFF, hot = i == menu_hot && !off;
-        if (hot) ui_round(&scr, x + 4 * S, iy, w - 8 * S, ih, R_SMALL * S, TH.accent);   /* 8 - 4 padding */
+        if (hot) ui_round(&p->c, x + 4 * S, iy, w - 8 * S, ih, R_SMALL * S, TH.accent);   /* 8 - 4 padding */
         unsigned fg = hot ? 0xFFFFFF : off ? TH.secondary : TH.label;
         int ty = iy + (ih - 16 * S) / 2;
-        ui_text(&scr, x + 16 * S, ty, mitems[i].label, fg, S);
+        ui_text(&p->c, x + 16 * S, ty, mitems[i].label, fg, S);
         if (mitems[i].key[0]) {
             int kw = ui_text_width(mitems[i].key, S);
-            ui_text(&scr, x + w - 16 * S - kw, ty, mitems[i].key, hot ? 0xFFFFFF : TH.secondary, S);
+            ui_text(&p->c, x + w - 16 * S - kw, ty, mitems[i].key, hot ? 0xFFFFFF : TH.secondary, S);
         }
     }
 }
 
 /* The menu, fading in over 120 ms (ease-out): what is behind it is saved, the
  * menu drawn, then the two mixed. A micro-interaction, so Reduce Motion keeps it. */
-static void draw_menu_faded(void) {
+static void draw_menu_faded(painter_t *p) {
     if (!menu_open) return;
     int a = (int)(255 * ease_out((long)menu_fade_ms * 1024 / FADE_MS) / 1024);
     int x0 = menu_x() - SHADOW, y0 = menu_y() - SHADOW, x1 = menu_x() + menu_w() + SHADOW, y1 = menu_y() + menu_h() + SHADOW;
-    if (x0 < scr.cx0) x0 = scr.cx0;
-    if (y0 < scr.cy0) y0 = scr.cy0;
-    if (x1 > scr.cx1) x1 = scr.cx1;
-    if (y1 > scr.cy1) y1 = scr.cy1;
+    if (x0 < p->c.cx0) x0 = p->c.cx0;
+    if (y0 < p->c.cy0) y0 = p->c.cy0;
+    if (x1 > p->c.cx1) x1 = p->c.cx1;
+    if (y1 > p->c.cy1) y1 = p->c.cy1;
     if (a >= 255 || !snap || x1 <= x0 || y1 <= y0 || (long)(x1 - x0) * (y1 - y0) > anim_cap) {
-        draw_menu();
+        draw_menu(p);
         return;
     }
     for (int y = y0; y < y1; y++)
-        memcpy(snap + (long)(y - y0) * (x1 - x0), scr.px + (long)y * scr.stride + x0, (size_t)(x1 - x0) * 4);
-    draw_menu();
+        memcpy(snap + (long)(y - y0) * (x1 - x0), p->c.px + (long)y * p->c.stride + x0, (size_t)(x1 - x0) * 4);
+    draw_menu(p);
     for (int y = y0; y < y1; y++) {
-        unsigned *row = scr.px + (long)y * scr.stride + x0;
+        unsigned *row = p->c.px + (long)y * p->c.stride + x0;
         const unsigned *old = snap + (long)(y - y0) * (x1 - x0);
         for (int x = 0; x < x1 - x0; x++) row[x] = lerp_rgb(old[x], row[x], (unsigned)(a + (a >> 7)));
     }
 }
 
+/* The damaged parts of rows [by0, by1). */
+static void paint(painter_t *p, int by0, int by1) {
+    window_t *f = front();
+    for (int d = 0; d < ndmg; d++) {
+        int x0 = dmg[d].x0, y0 = dmg[d].y0 > by0 ? dmg[d].y0 : by0, x1 = dmg[d].x1, y1 = dmg[d].y1 < by1 ? dmg[d].y1 : by1;
+        if (y1 <= y0) continue;
+        ui_clip(&p->c, x0, y0, x1 - x0, y1 - y0);
+        for (int y = y0; y < y1; y++) ui_fill(&p->c, x0, y, x1 - x0, 1, wallpaper[y]);
+        for (int i = 0; i < norder; i++) draw_window(p, order[i], &wins[order[i]] == f);
+        draw_menu_bar(p);
+        draw_dock(p);
+        draw_menu_faded(p);
+        if (!kernel_cursor) draw_cursor(p);
+    }
+}
+
+static void paint_band(int k) { paint(&painters[k], H * k / n_painters, H * (k + 1) / n_painters); }
+
+/* A painter thread: a band of every big frame. */
+static void painter(void *arg) {
+    int k = (int)(long)arg, seen = 0;
+    for (;;) {
+        while (paint_job == seen) futex(FUTEX_WAIT, &paint_job, seen);
+        seen = paint_job;
+        paint_band(k);
+        if (__sync_sub_and_fetch(&paint_left, 1) == 0) futex(FUTEX_WAKE, &paint_left, 0);
+    }
+}
+
+/* Window motion and the menu's fade share scratch buffers: one core then. */
+static int motion(void) {
+    if (menu_open && menu_fade_ms < FADE_MS) return 1;
+    for (int k = 0; k < MAX_WINDOWS; k++)
+        if (wins[k].used && wins[k].anim != ANIM_NONE) return 1;
+    return 0;
+}
+
 /* -> 1 if the frame was paced by the screen (page flipping): no sleep then. */
 static int compose(void) {
-    window_t *f = front();
     frame_no++;
+    long area = 0;
+    for (int d = 0; d < ndmg; d++) area += (long)(dmg[d].x1 - dmg[d].x0) * (dmg[d].y1 - dmg[d].y0);
+    if (n_painters > 1 && frame_no > 1 && area >= PAINT_MIN && !motion()) {   /* (the first frame loads the font) */
+        paint_left = n_painters - 1;
+        __sync_add_and_fetch(&paint_job, 1);
+        futex(FUTEX_WAKE, &paint_job, 0);
+        paint_band(0);
+        int left;
+        while ((left = paint_left) != 0) futex(FUTEX_WAIT, &paint_left, left);
+    } else if (ndmg) {
+        paint(&painters[0], 0, H);
+    }
     for (int d = 0; d < ndmg; d++) {
         int x0 = dmg[d].x0, y0 = dmg[d].y0, x1 = dmg[d].x1, y1 = dmg[d].y1;
-        ui_clip(&scr, x0, y0, x1 - x0, y1 - y0);
-        for (int y = y0; y < y1; y++) ui_fill(&scr, x0, y, x1 - x0, 1, wallpaper[y]);
-        for (int i = 0; i < norder; i++) draw_window(order[i], &wins[order[i]] == f);
-        draw_menu_bar();
-        draw_dock();
-        draw_menu_faded();
-        if (!kernel_cursor) draw_cursor();
         gfx_blit(x0, y0, x1 - x0, y1 - y0, scr.px + (long)y0 * scr.stride + x0, scr.stride);
     }
     if (ndmg) unpresented = 1;
@@ -1433,6 +1486,7 @@ static void launch(int i) {
         }
     char *argv[] = { (char *)apps[i].program, 0 };
     int pid = spawn(apps[i].program, argv, 0);
+    printf("windowserver: open %s: %s\n", apps[i].program, pid > 0 ? "started" : "cannot start");   /* (in the log) */
     if (pid > 0) {
         apps[i].pid = pid;
         apps[i].launching = !reduce_motion;
@@ -1452,6 +1506,7 @@ static int n_started;
 static void run(const char *program, const char *arg) {
     char *argv[] = { (char *)program, (char *)arg, 0 };
     int pid = spawn(program, argv, 0);
+    printf("windowserver: open %s: %s\n", program, pid > 0 ? "started" : "cannot start");
     if (pid <= 0) return;
     int k = n_started++ % 16;
     started[k].pid = pid;
@@ -1733,6 +1788,7 @@ static void tidy(void) {
                 apps[i].bounce = apps[i].bvel = 0;
                 damage_dock();
             }
+        if (name) printf("windowserver: %s quit (%d)\n", name, status);
         if (status == 139 || status == 132 || status == 136)   /* EXIT_SEGFAULT, _ILLEGAL, _ARITHMETIC */
             crashed(pid, name, status);
     }
@@ -1805,6 +1861,24 @@ int main(int argc, char **argv) {
     anim_mask = mmap((size_t)cap * 4, PROT_READ | PROT_WRITE, -1);
     snap = mmap((size_t)cap * 4, PROT_READ | PROT_WRITE, -1);
     anim_cap = anim_col && anim_mask && snap ? cap : 0;                  /* else: no window motion, no menu fade */
+    int cores = cpu_count();                           /* painters: one per core, up to 8 */
+    for (int k = 0; k < MAX_PAINTERS && (k == 0 || k < cores); k++) {
+        painter_t *pt = &painters[k];
+        pt->c = scr;
+        pt->samp = mmap(SAMP_W * SAMP_H * 4, PROT_READ | PROT_WRITE, -1);
+        pt->samp2 = mmap(SAMP_W * SAMP_H * 4, PROT_READ | PROT_WRITE, -1);
+        pt->mat = mmap(MAT_MAX * 4, PROT_READ | PROT_WRITE, -1);
+        pt->xf = mmap(2048 * 4, PROT_READ | PROT_WRITE, -1);
+        pt->xi = mmap(2048 * 4, PROT_READ | PROT_WRITE, -1);
+        if (!pt->samp || !pt->samp2 || !pt->mat || !pt->xf || !pt->xi) {
+            if (k == 0) {
+                printf("windowserver: out of memory\n");
+                return 1;
+            }
+            break;
+        }
+        n_painters = k + 1;
+    }
     make_wallpaper();
     make_cursor();
     load_dock();
@@ -1823,6 +1897,7 @@ int main(int argc, char **argv) {
     mouse_x = W / 2;
     mouse_y = H / 2;
     thread_create(serve, &port);
+    for (int k = 1; k < n_painters; k++) thread_create(painter, (void *)(long)k);
     for (int i = 1; i < argc; i++) {                   /* apps to open: from the Dock, or any program */
         int k = 0;
         while (k < DOCK_APPS && strcmp(argv[i], apps[k].program)) k++;

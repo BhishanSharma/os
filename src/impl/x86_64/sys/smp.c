@@ -86,6 +86,22 @@ void bkl_leave(void) {
     }
 }
 
+int bkl_drop(void) {
+    if (!smp_on || bkl_owner != cpu_index()) return 0;
+    int depth = bkl_depth;
+    bkl_depth = 0;
+    bkl_release();
+    return depth;
+}
+
+void bkl_take(int depth) {
+    if (!depth) return;
+    __asm__ volatile("cli");                        /* (as cpu_wait: no interrupt half-way) */
+    bkl_acquire(cpu_index());
+    bkl_depth = depth;
+    __asm__ volatile("sti");
+}
+
 /* For the scheduler: the nesting travels with the task (sys/task.c). */
 int bkl_depth_get(void) { return smp_on ? bkl_depth : 0; }
 void bkl_depth_set(int depth) {
