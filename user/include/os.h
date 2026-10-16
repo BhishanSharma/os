@@ -142,6 +142,9 @@ int wifi_disconnect(void);
 int volume(int set);                          /* 0-100 sets, -1 reads -> the volume */
 int battery(void);                            /* percent | 0x100 charging, SYSERR_NOENT none */
 int power(int restart);                       /* 0 shut down, 1 restart: returns only on failure */
+int setup_needed(void);                       /* 1: no accounts yet (first start) */
+int setup_accounts(const char *name, const char *password);   /* 0; -2 bad name, -3 bad password */
+void setup_text(void);                        /* the first-start questions on the console */
 void console_echo(int on);                   /* off: read(0) does not show the typing */
 
 /* Console */

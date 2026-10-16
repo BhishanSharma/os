@@ -461,17 +461,56 @@ static void best_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop) {
     if (best != gop->Mode->Mode) ((gop_set_t)gop->SetMode)(gop, best);
 }
 
+/* ---- The boot screen ----------------------------------------------------------
+ * Black, the logo (a terminal window with ">_") and a progress bar: the same
+ * picture the kernel draws (print_splash_begin), so starting up is one screen. */
+typedef EFI_STATUS (EFIAPI *gop_blt_t)(EFI_GRAPHICS_OUTPUT_PROTOCOL *, uint32_t *, uint32_t, uint64_t, uint64_t,
+                                       uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+#define SPLASH_STEPS 22
+static EFI_GRAPHICS_OUTPUT_PROTOCOL *screen;
+
+static void fill(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t rgb) {
+    if (!screen || !w || !h) return;
+    uint32_t px = rgb;
+    ((gop_blt_t)screen->Blt)(screen, &px, 0 /* video fill */, 0, 0, x, y, w, h, 0);
+}
+
+static void boot_screen(int step) {
+    if (!screen || !screen->Mode || !screen->Mode->Info) return;
+    uint32_t w = screen->Mode->Info->HorizontalResolution, h = screen->Mode->Info->VerticalResolution;
+    uint32_t L = h / 6, iw = L * 5 / 4, ih = L, x = (w - iw) / 2, y = h / 2 - ih, t = L / 18 + 1;
+    if (step == 0) {
+        fill(0, 0, w, h, 0);
+        fill(x + t, y, iw - 2 * t, ih, 0xFFFFFF);
+        fill(x, y + t, iw, ih - 2 * t, 0xFFFFFF);
+        fill(x + t, y + L / 5, iw - 2 * t, ih - L / 5 - t, 0x111114);
+        uint32_t u = L / 48 + 1, px = x + L / 6, py = y + L / 5 + L / 7;
+        for (uint32_t i = 0; i < 8; i++) {                  /* ">" in small steps, then "_" */
+            fill(px + i * u, py + i * u, 3 * u, 3 * u, 0xFFFFFF);
+            fill(px + i * u, py + (14 - i) * u, 3 * u, 3 * u, 0xFFFFFF);
+        }
+        fill(px + 13 * u, py + 14 * u, 11 * u, 3 * u, 0xFFFFFF);
+    }
+    uint32_t bw = L * 3 / 2, bh = h / 270 + 2, bx = (w - bw) / 2, by = y + ih + L / 2;
+    fill(bx, by, bw, bh, 0x3A3A3C);
+    fill(bx, by, bw * (uint32_t)step / SPLASH_STEPS, bh, 0xFFFFFF);
+}
+
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     ST = st;
     BS = st->BootServices;
     self = image;
     BS->SetWatchdogTimer(0, 0, 0, 0);
     ST->ConOut->ClearScreen(ST->ConOut);
-    ST->ConOut->SetAttribute(ST->ConOut, 0x0D);             /* light magenta */
-    print("Terminal OS\n");
-    ST->ConOut->SetAttribute(ST->ConOut, 0x07);
 
     static const EFI_GUID li_guid = LOADED_IMAGE_GUID, fs_guid = SIMPLE_FS_GUID, gop_guid = GOP_GUID;
+    if (!EFI_ERROR(BS->LocateProtocol(&gop_guid, 0, (void **)&screen)) && screen->Mode) {
+        best_mode(screen);                                  /* the screen's own size, then the logo */
+        boot_screen(0);
+    } else {
+        screen = 0;
+        print("Terminal OS\n");
+    }
     static const EFI_GUID acpi20 = ACPI20_GUID, acpi10 = ACPI10_GUID;
     EFI_LOADED_IMAGE_PROTOCOL *li;
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs;
@@ -497,7 +536,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     if (!free_after_exit(k.base, (k.base + k.size > 6 * MIB ? k.base + k.size : 6 * MIB)))
         return fail("the firmware keeps memory at 1-6 MiB, where the kernel goes", 0);
 
-    print("Unpacking the system files...\n");
+    boot_screen(1);
     uint32_t rd_len = gzip_size(gz, gz_len);
     uint8_t *ramdisk = rd_len ? alloc_high(rd_len) : 0;
     if (!ramdisk) return fail("no memory for the RAM disk", 0);
@@ -516,13 +555,12 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     /* Options: S within a second boots on one core. */
     char cmdline[160];
     boot_device(li, cmdline, sizeof(cmdline) - 8);
-    print("Press S for safe mode (one CPU core)...\n");
+    boot_screen(2);
     for (int i = 0; i < 10; i++) {
         EFI_INPUT_KEY key;
         if (!EFI_ERROR(ST->ConIn->ReadKeyStroke(ST->ConIn, &key)) && (key.UnicodeChar | 0x20) == 's') {
             size_t n = cstrlen(cmdline);
             memcpy(cmdline + n, "nosmp", 6);
-            print("Safe mode.\n");
             break;
         }
         BS->Stall(100000);

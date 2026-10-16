@@ -21,6 +21,7 @@
 #include "drivers/rtc.h"
 #include "drivers/heap.h"
 #include "lib/print.h"
+#include "lib/fbcon.h"
 #include "lib/string.h"
 #include "bearssl_hash.h"
 
@@ -155,6 +156,7 @@ static void set_password(account_t *a, const char *password) {
  * Returns the length, or -1 on Ctrl+C. */
 static int read_input(char *buf, int size, int echo) {
     int len = 0;
+    print_splash_end();
     while (1) {
         int c = get_char();
         if (!c) {
@@ -469,17 +471,38 @@ static void first_start(void) {
     }
 }
 
+/* With a graphical screen the first start waits for loginwindow's Setup
+ * Assistant (users_setup); the text login asks on the console instead. */
 void users_init(void) {
     fat32_set_write_guard(write_guard);
     fat32_set_read_guard(read_guard);
     session_depth = 0;
     load_accounts();
+    if (!find_account("root") && !fbcon_active()) first_start();
+}
+
+int users_setup_needed(void) { return !find_account("root"); }
+
+void users_setup_text(void) {
     if (!find_account("root")) first_start();
+}
+
+int users_setup(const char *name, const char *password) {
+    if (find_account("root")) return USERS_SETUP_DONE;
+    if (!valid_name(name) || !strcmp(name, "root")) return USERS_SETUP_BAD_NAME;
+    if (!password[0]) return USERS_SETUP_BAD_PASSWORD;
+    add_account("root", 0, password);                 /* the first user is the administrator */
+    add_account(name, FIRST_UID, password);
+    make_dirs("TMP", 0);
+    save_accounts();
+    kprintf("users: created %s (and root, with the same password)\n", name);
+    return 0;
 }
 
 void users_login(void) {
     char name[32], password[64];
     session_depth = 0;
+    users_setup_text();
     print_str("\n  ");
     print_accent(OS_NAME " " OS_VERSION);
     print_str(" (" OS_HOSTNAME ")\n\n");

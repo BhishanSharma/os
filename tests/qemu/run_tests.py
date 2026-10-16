@@ -149,31 +149,34 @@ def check(cond, what, output=""):
         raise TestError(what + ("\n" + tail(output) if output else ""))
 
 
-def text_login_prompt(m, timeout=60):
-    """The graphical login comes up: ask for the text login (as on a Mac,
-    the user name >console), and wait for its prompt."""
-    seen = m.expect(r"loginwindow: ready|login: ", timeout)
-    if seen.group(0).startswith("loginwindow"):
-        time.sleep(0.5)
-        m.type(">console")
-        m.expect(r"login: ", 30)
+def text_login_prompt(m, timeout=120, user="", password=None):
+    """To the text login's prompt: the graphical login asks for it (as on a
+    Mac, the user name >console); a first start asks root's password and an
+    everyday account (`user`, none if "") on the way."""
+    while True:
+        seen = m.expect(r"loginwindow: ready|login: |New password: ", timeout).group(0)
+        if seen.startswith("loginwindow"):
+            time.sleep(0.5)
+            m.type(">console")
+        elif seen.startswith("New"):
+            m.type(PASSWORD)
+            m.expect(r"Retype new password: ")
+            m.type(PASSWORD)
+            m.expect(r"User name: ")
+            m.type(user)
+            if user:
+                m.expect(r"New password: ")
+                m.type(password)
+                m.expect(r"Retype new password: ")
+                m.type(password)
+        else:
+            return
 
 
 def login(m, timeout=120):
     """From power-on to the shell prompt as root (creating the accounts on a
     first start)."""
-    first = m.expect(r"New password: |login: |loginwindow: ready", timeout)
-    if first.group(0).startswith("New"):
-        m.type(PASSWORD)
-        m.expect(r"Retype new password: ")
-        m.type(PASSWORD)
-        m.expect(r"User name: ")
-        m.type("")                              # no everyday account
-        text_login_prompt(m)
-    elif first.group(0).startswith("loginwindow"):
-        time.sleep(0.5)
-        m.type(">console")
-        m.expect(r"login: ", 30)
+    text_login_prompt(m, timeout)
     m.type("root")
     m.expect(r"Password: ")
     m.type(PASSWORD)
@@ -182,17 +185,7 @@ def login(m, timeout=120):
 
 def login_user(m, name, password, timeout=120):
     """First start: root's password, then an everyday account `name`; log in as it."""
-    m.expect(r"New password: ", timeout)
-    m.type(PASSWORD)
-    m.expect(r"Retype new password: ")
-    m.type(PASSWORD)
-    m.expect(r"User name: ")
-    m.type(name)
-    m.expect(r"New password: ")
-    m.type(password)
-    m.expect(r"Retype new password: ")
-    m.type(password)
-    text_login_prompt(m)
+    text_login_prompt(m, timeout, name, password)
     m.type(name)
     m.expect(r"Password: ")
     m.type(password)
@@ -475,13 +468,20 @@ def test_desktop():
         m.keys("esc")                                # that click opened the Terminal OS menu
         time.sleep(0.3)
         cw, ch = int(ws.group(4)), int(ws.group(5))
-        dx = (int(button.group(1)) - int(corner.group(1))) * 8 // cw
-        dy = (int(button.group(2)) - int(corner.group(2))) * 16 // ch
-        move_mouse(m, dx, dy, step=4)
-        time.sleep(0.5)
-        m.monitor("mouse_button 1")
-        time.sleep(0.3)
-        m.monitor("mouse_button 0")
+        at = (int(corner.group(1)), int(corner.group(2)))
+        for _ in range(4):                           # the pointer accelerates: aim, click, correct
+            dx = (int(button.group(1)) - at[0]) * 8 // cw
+            dy = (int(button.group(2)) - at[1]) * 16 // ch
+            move_mouse(m, dx, dy, step=4)
+            time.sleep(0.5)
+            m.monitor("mouse_button 1")
+            time.sleep(0.3)
+            m.monitor("mouse_button 0")
+            time.sleep(0.5)
+            if "about: OK clicked" in m.text():
+                break
+            clicks = re.findall(r"click at (\d+),(\d+)", m.text())
+            at = (int(clicks[-1][0]), int(clicks[-1][1]))
         m.expect(r"about: OK clicked", 10)
         m.keys("ctrl-q")                             # Ctrl+Q leaves the desktop
         m.expect(PROMPT, 10)
@@ -490,26 +490,25 @@ def test_desktop():
 
 
 def test_gui():
-    """The graphical login: an everyday user logs in, gets the desktop, logs out."""
+    """All graphical: the boot screen, the Setup Assistant makes an account and
+    opens the desktop; Log Out; a wrong and then the right password."""
     m = Machine("gui", usb_stick())
     try:
-        m.expect(r"New password: ", 120)
-        m.type(PASSWORD)
-        m.expect(r"Retype new password: ")
-        m.type(PASSWORD)
-        m.expect(r"User name: ")
-        m.type("anna")
-        m.expect(r"New password: ")
-        m.type("pw1")
-        m.expect(r"Retype new password: ")
-        m.type("pw1")
-        m.expect(r"loginwindow: ready", 60)
+        m.expect(r"\] Timer", 120)
+        time.sleep(0.3)
+        m.screenshot("boot")                         # the boot screen, not the boot text
+        m.expect(r"loginwindow: setup", 120)
+        m.expect(r"loginwindow: ready", 30)
         time.sleep(1)
+        m.screenshot("setup")
         m.type("anna")
-        m.type("wrong")
-        time.sleep(0.5)
-        check("anna logged in" not in m.text(), "a wrong password was accepted")
         m.type("pw1")
+        m.type("nope")                               # the passwords differ: asked again
+        time.sleep(0.5)
+        check("created anna" not in m.text(), "different passwords were accepted")
+        m.type("pw1")
+        m.type("pw1")
+        m.expect(r"loginwindow: created anna", 20)
         m.expect(r"loginwindow: anna logged in", 20)
         m.expect(r"windowserver: \d+x\d+", 30)
         time.sleep(2)
@@ -517,6 +516,13 @@ def test_gui():
         m.keys("ctrl-q")                             # Log Out: a fresh login screen
         start = len(m.text())
         m.expect(r"loginwindow: ready", 30, since=start)
+        time.sleep(1)
+        m.type("anna")
+        m.type("wrong")
+        time.sleep(0.5)
+        check(m.text().count("anna logged in") == 1, "a wrong password was accepted")
+        m.type("pw1")
+        m.expect(r"loginwindow: anna logged in", 20)
     finally:
         m.stop()
 
@@ -532,13 +538,21 @@ def test_apps():
         m.expect(r"windowserver: \d+x\d+", 30)
         time.sleep(6)
         m.screenshot("apps")
+        m.type("ls")                                 # into Terminal, the front window: a kernel command
+        time.sleep(2)
+        m.type("passwd")                             # asks in the window (input hidden), then Ctrl+C
+        time.sleep(1)
+        m.keys("ctrl-c")
+        time.sleep(1)
+        m.screenshot("terminal")
         out = m.text()[start:]
         check("[ERROR]" not in out and "KERNEL PANIC" not in out, "an app crashed", out)
         m.keys("ctrl-q")
         m.expect(PROMPT, 20)
         out = m.run("ps")
         for name in ("settings", "activity", "paint", "textedit"):
-            check(name not in out, name + " kept running after Log Out", out)
+            alive = [l for l in out.splitlines() if l.endswith(name) and " done " not in l]
+            check(not alive, name + " kept running after Log Out", out)
     finally:
         m.stop()
 

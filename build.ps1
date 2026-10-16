@@ -8,6 +8,12 @@
 #   .\build.ps1 -Gdb         debug symbols; QEMU waits for gdb on localhost:1234
 #   .\build.ps1 -Serial      mirror kernel output to this console
 #   .\build.ps1 -Log         run QEMU with -no-reboot and CPU reset logging
+#   .\build.ps1 -Usb         build, then write the USB stick (instead of QEMU)
+#   .\build.ps1 -UsbOnly     write the last build to the USB stick, no build
+#       with -Usb/-UsbOnly:  -Disk <n>  that USB disk if more than one is plugged in
+#                            -Yes       no "type the disk number" question
+#   (scripts\write-usb.ps1 does the writing: USB disks only, at most 64 GB,
+#    never the Windows disk, and the stick is read back and checked.)
 #
 # First run only: if PowerShell blocks the script, run:
 #   Unblock-File .\build.ps1
@@ -18,7 +24,11 @@ param(
     [switch]$NewDisk,
     [switch]$Gdb,
     [switch]$Serial,
-    [switch]$Log
+    [switch]$Log,
+    [switch]$Usb,
+    [switch]$UsbOnly,
+    [int]$Disk = -1,
+    [switch]$Yes
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,6 +36,15 @@ Set-Location $PSScriptRoot
 
 function Fail($msg) { Write-Host $msg -ForegroundColor Red; exit 1 }
 function Step($msg) { Write-Host $msg -ForegroundColor Cyan }
+
+function Write-Usb {
+    $usbArgs = @{ Disk = $Disk }
+    if ($Yes) { $usbArgs.Yes = $true }
+    & (Join-Path $PSScriptRoot "scripts\write-usb.ps1") @usbArgs
+    exit $LASTEXITCODE
+}
+
+if ($UsbOnly) { Write-Usb }
 
 # ---- Prerequisites ---------------------------------------------------------
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -65,6 +84,7 @@ docker run --rm -v "${PWD}:/root/env" myos-buildenv sh -c $makeCommand
 if ($LASTEXITCODE -ne 0) { Fail "Build failed." }
 Write-Host "Build OK: dist\x86_64\terminalos.img" -ForegroundColor Green
 
+if ($Usb) { Write-Usb }
 if ($NoRun) { exit 0 }
 
 # ---- Run in QEMU (UEFI) ----------------------------------------------------
@@ -75,7 +95,6 @@ if (-not $qemuCommand) {
 
 $qemuDir = Split-Path $qemuCommand.Source
 $ovmfCandidates = @(
-    (Join-Path $qemuDir "share\edk2-x86_64-code.fd"),
     (Join-Path $qemuDir "share\edk2-x86_64-code.fd"),
     (Join-Path $qemuDir "share\OVMF\OVMF_CODE.fd")
 )

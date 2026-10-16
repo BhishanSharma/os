@@ -16,6 +16,15 @@ typedef struct {
  * ask for a root password first (first start). Call once the disk is mounted. */
 void users_init(void);
 
+/* First start from the graphical Setup Assistant: `name` (with a home
+ * folder) and root, both with `password`. 0, or one of these: */
+#define USERS_SETUP_DONE          -1   /* there are accounts already */
+#define USERS_SETUP_BAD_NAME      -2
+#define USERS_SETUP_BAD_PASSWORD  -3
+int users_setup_needed(void);
+int users_setup(const char *name, const char *password);
+void users_setup_text(void);           /* the console questions, if still needed */
+
 /* Ask for a user name and password until they match an account, then start
  * that user's session (current directory = home). */
 void users_login(void);

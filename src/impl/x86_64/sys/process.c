@@ -90,6 +90,10 @@ typedef struct {
     uint32_t line_len, line_pos;
     char cwd[256];                    // its own current directory
     int ctrlc_mode;                   // CTRLC_END / CTRLC_KEY
+    pipe_t *tap_out, *tap_in;         // a kernel command run from a Terminal window: its pipes
+    char tap_buf[128];
+    int tap_len;
+    const char *tap_echo;             // the echo of the key just read: the window showed it
 } process_t;
 
 static int graphics_owner;            // pid drawing pixels (gfx), 0: the console
@@ -617,6 +621,7 @@ static int scroll_key(int c) {
 
 static void read_keyboard_line(process_t *p) {
     p->line_len = p->line_pos = 0;
+    print_splash_end();                             /* a text login: show the console */
     while (1) {
         wait_for_foreground();
         check_killed();
@@ -1463,12 +1468,80 @@ static int64_t sys_getcwd(uint64_t buf, uint64_t size) {
 
 /* kcommand(line): one of the kernel's built-in commands (ls, cat, ping, ...),
  * run in the caller's directory, as the caller's user. */
+/* A kernel command run by a program whose output is a pipe (the shell in a
+ * Terminal window) prints into that pipe and reads its keys from the input
+ * pipe, not the console under the desktop. */
+static process_t *tapped(void) {
+    uint64_t flags;
+    __asm__ volatile("pushfq; pop %0" : "=r"(flags));
+    if (!(flags & 0x200)) return 0;                     /* an interrupt, or a lock held */
+    process_t *p = task_current()->process ? P() : 0;
+    return p && p->tap_out ? p : 0;
+}
+
+static void tap_flush(process_t *p) {
+    if (p->tap_len) pipe_write(p->tap_out, p->tap_buf, (uint64_t)p->tap_len);
+    p->tap_len = 0;
+}
+
+static int tap_print(char c) {
+    process_t *p = tapped();
+    if (!p) return 0;
+    if (p->tap_echo && *p->tap_echo == c) {             /* the Terminal window echoes keys */
+        p->tap_echo++;
+        if (!*p->tap_echo) p->tap_echo = 0;
+        return 1;
+    }
+    p->tap_echo = 0;
+    p->tap_buf[p->tap_len++] = c;
+    if (c == '\n' || p->tap_len == (int)sizeof(p->tap_buf)) tap_flush(p);
+    return 1;
+}
+
+static int tap_key(void) {                             /* -1: not tapped; 0: no key yet */
+    process_t *p = tapped();
+    if (!p || !p->tap_in) return -1;
+    tap_flush(p);                                      /* the prompt first */
+    int c = pipe_getc(p->tap_in);
+    if (c == 3) {                                      /* Ctrl+C in the window: it showed "^C" */
+        (void)pipe_getc(p->tap_in);                    /* and the line end sent with it */
+        p->tap_echo = "^C\n";
+        return KEY_CTRL_C;
+    }
+    if (c == -2 || process_interrupted()) return KEY_CTRL_C;
+    if (c < 0) return 0;
+    if (c == '\r') c = '\n';
+    static char one[2];
+    one[0] = (char)c;
+    p->tap_echo = c == '\b' ? "\b \b" : one;
+    return c;
+}
+
 static int64_t sys_kcommand(uint64_t line_ptr) {
     char line[256], saved[256];
     if (copy_user_string(line, line_ptr, sizeof(line)) != 0) return SYSERR_FAULT;
+    process_t *p = P();
+    file_t *out = fd_get(1), *in = fd_get(0);
+    if (out && out->kind == F_PIPE_W) {
+        if (!strncmp(line, "edit", 4) && (line[4] == ' ' || !line[4])) {   /* full screen: not in a pipe */
+            static const char msg[] = "edit: open the file in TextEdit (textedit <file>)\n";
+            pipe_write(out->pipe, msg, sizeof(msg) - 1);
+            return 1;
+        }
+        p->tap_out = out->pipe;
+        p->tap_in = in && in->kind == F_PIPE_R ? in->pipe : 0;
+        p->tap_len = 0;
+        p->tap_echo = 0;
+        print_set_tap(tap_print);
+        keyboard_set_tap(tap_key);
+    }
     enter_cwd(saved, sizeof(saved));
     int known = shell_kernel_command(line);
     leave_cwd(saved);
+    if (p->tap_out) {
+        tap_flush(p);
+        p->tap_out = p->tap_in = 0;
+    }
     return known;
 }
 
@@ -1932,6 +2005,18 @@ static int64_t sys_system(uint64_t op, uint64_t a, uint64_t b) {
             int charging = 0, p = power_battery(&charging);
             return p < 0 ? SYSERR_NOENT : p | (charging ? 0x100 : 0);
         }
+        case SYSTEM_SETUP: {
+            if (!a) return users_setup_needed();
+            char name[32], password[64];
+            if (copy_user_string(name, a, sizeof(name)) != 0 || copy_user_string(password, b, sizeof(password)) != 0)
+                return SYSERR_FAULT;
+            int r = users_setup(name, password);
+            memset(password, 0, sizeof(password));
+            return r;                                  /* -1 done already, -2 name, -3 password */
+        }
+        case SYSTEM_SETUP_TEXT:
+            users_setup_text();
+            return 0;
         case SYSTEM_POWER:
             print_set_graphics(0);
             if (a == 1) reboot();

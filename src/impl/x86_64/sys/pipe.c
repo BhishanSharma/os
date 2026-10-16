@@ -50,6 +50,15 @@ int64_t pipe_read(pipe_t *p, void *buf, uint64_t len) {
     return (int64_t)n;
 }
 
+int pipe_getc(pipe_t *p) {
+    if (p->count == 0) return p->writers <= 0 ? -2 : -1;
+    int c = p->buf[p->head];
+    p->head = (p->head + 1) % PIPE_SIZE;
+    p->count--;
+    task_wakeup(p);
+    return c;
+}
+
 int64_t pipe_write(pipe_t *p, const void *buf, uint64_t len) {
     const uint8_t *in = buf;
     uint64_t done = 0;

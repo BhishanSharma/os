@@ -22,6 +22,7 @@ static volatile int dirty = 1;
 static int to_shell, from_shell, shell_pid;
 static char line[256];
 static int line_len;
+static int secret;                     /* typing after "Password: ": not shown */
 
 static void scroll(void) {
     memmove(grid[0], grid[1], sizeof(grid) - COLS);
@@ -134,7 +135,7 @@ int main(int argc, char **argv) {
                 put('C');
                 put('\n');
                 line_len = 0;
-                if (interrupt() == 0) send_line("");     /* nothing running: a new prompt */
+                if (interrupt() == 0) send_line("\x03");   /* a kernel command's question, or a new prompt */
             } else if (k == '\n' || k == '\r') {
                 line[line_len] = 0;
                 put('\n');
@@ -143,11 +144,12 @@ int main(int argc, char **argv) {
             } else if (k == '\b') {
                 if (line_len > 0) {
                     line_len--;
-                    put('\b');
+                    if (!secret) put('\b');
                 }
             } else if (k >= ' ' && k < 127 && line_len < (int)sizeof(line) - 1) {
+                if (!line_len) secret = col >= 9 && !memcmp(&grid[row][col - 9], "assword: ", 9);
                 line[line_len++] = (char)k;
-                put((char)k);
+                if (!secret) put((char)k);
             }
             dirty = 1;
             mutex_unlock(&lock);

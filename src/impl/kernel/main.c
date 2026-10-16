@@ -166,6 +166,7 @@ void kernel_main() {
     efi_save_boot_info();                     // the firmware's runtime services (boot menu, reset)
     int no_gpu = mb2_cmdline_has("nogpu");    // `nogpu`: no Intel graphics features (software pointer)
     int no_smp = mb2_cmdline_has("nosmp");    // the `nosmp` boot option (read now, for the same reason)
+    int verbose = mb2_cmdline_has("verbose"); // `verbose`: the boot text instead of the boot screen
     // The memory map is in the multiboot info, which the heap may overwrite.
     int mem_regions = memory_init();
     uint64_t heap_start = HEAP_LOW, heap_size = HEAP_FALLBACK;
@@ -240,6 +241,7 @@ void kernel_main() {
     }
     if (have_fb) {
         if (fbcon_init(&fb) == 0) {
+            if (!verbose) print_splash_begin();          // the boot screen, before any text shows
             boot_info.fb_width = fb.width;
             boot_info.fb_height = fb.height;
             boot_info.fb_bpp = fb.bpp;
@@ -366,6 +368,7 @@ void kernel_main() {
     }
     statusbar_update(1);
     keyboard_set_idle_hook(statusbar_idle);
+    print_splash_step(1);
 
     shell_run();
 }

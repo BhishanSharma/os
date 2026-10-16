@@ -132,3 +132,8 @@ int wifi_disconnect(void)                       { return (int)os_syscall(SYS_SYS
 int volume(int set)                             { return (int)os_syscall(SYS_SYSTEM, SYSTEM_VOLUME, set, 0); }
 int battery(void)                               { return (int)os_syscall(SYS_SYSTEM, SYSTEM_BATTERY, 0, 0); }
 int power(int restart)                          { return (int)os_syscall(SYS_SYSTEM, SYSTEM_POWER, restart, 0); }
+int setup_needed(void)                          { return (int)os_syscall(SYS_SYSTEM, SYSTEM_SETUP, 0, 0); }
+int setup_accounts(const char *name, const char *password) {
+    return (int)os_syscall(SYS_SYSTEM, SYSTEM_SETUP, (long)name, (long)password);
+}
+void setup_text(void)                           { os_syscall(SYS_SYSTEM, SYSTEM_SETUP_TEXT, 0, 0); }

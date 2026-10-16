@@ -26,6 +26,8 @@ void keyboard_handler(void);
 void keyboard_scancode(uint8_t scancode);
 void init_keyboard(void);
 int get_char(void);
+/* tap() -> a key (0: none yet) for this task, or -1: the keyboard as usual. */
+void keyboard_set_tap(int (*tap)(void));
 void get_line(char* buffer, size_t max_len);
 
 // History functions

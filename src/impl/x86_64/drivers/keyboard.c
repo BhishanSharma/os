@@ -199,7 +199,14 @@ int keyboard_inject(int key) {
     return ok;
 }
 
+static int (*key_tap)(void);
+void keyboard_set_tap(int (*tap)(void)) { key_tap = tap; }
+
 int get_char() {
+    if (key_tap) {                        /* a kernel command in a Terminal window: its pipe */
+        int t = key_tap();
+        if (t >= 0) return t;
+    }
     // The keyboard interrupt appends to the same buffer: keep it out meanwhile.
     uint64_t flags;
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");

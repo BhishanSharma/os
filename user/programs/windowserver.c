@@ -141,12 +141,12 @@ typedef struct {
 } dock_app_t;
 
 static dock_app_t apps[] = {
-    { "Files", "finder", "F", "folder", 0x2F7BF5, 0, 0 },
-    { "Terminal", "terminal", ">_", "terminal", 0x30323A, 0, 0 },
-    { "TextEdit", "textedit", "T", "textedit", 0xF2F2F2, 0, 0 },
-    { "Paint", "paint", "P", "paint", 0xFF9500, 0, 0 },
-    { "Activity Monitor", "activity", "A", "activity", 0x34C759, 0, 0 },
-    { "System Settings", "settings", "S", "gear", 0x8E8E93, 0, 0 },
+    { "Files", "finder", "F", "folder", 0x2F7BF5, 0, 0, { 0, 0 }, 0, 0, 0, 0 },
+    { "Terminal", "terminal", ">_", "terminal", 0x30323A, 0, 0, { 0, 0 }, 0, 0, 0, 0 },
+    { "TextEdit", "textedit", "T", "textedit", 0xF2F2F2, 0, 0, { 0, 0 }, 0, 0, 0, 0 },
+    { "Paint", "paint", "P", "paint", 0xFF9500, 0, 0, { 0, 0 }, 0, 0, 0, 0 },
+    { "Activity Monitor", "activity", "A", "activity", 0x34C759, 0, 0, { 0, 0 }, 0, 0, 0, 0 },
+    { "System Settings", "settings", "S", "gear", 0x8E8E93, 0, 0, { 0, 0 }, 0, 0, 0, 0 },
 };
 #define DOCK_APPS ((int)(sizeof(apps) / sizeof(apps[0])))
 

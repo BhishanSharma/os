@@ -13,6 +13,8 @@ void pipe_end_closed(pipe_t *p, int writer);   /* the last end frees it */
 /* Read up to `len` bytes, waiting for some. 0: every writer closed it (end of
  * file); -1: interrupted (Ctrl+C, a signal). */
 int64_t pipe_read(pipe_t *p, void *buf, uint64_t len);
+/* The next byte without waiting: -1 none yet, -2 every writer closed it. */
+int pipe_getc(pipe_t *p);
 /* Write all of it, waiting for room. -2: no reader any more; -1: interrupted. */
 int64_t pipe_write(pipe_t *p, const void *buf, uint64_t len);
 

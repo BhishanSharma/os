@@ -39,6 +39,8 @@ typedef enum {
 
 void print_clear(void);
 void print_char(char character);
+/* tap(c) -> 1: it took the character (a kernel command in a Terminal window). */
+void print_set_tap(int (*tap)(char));
 void print_str(const char* str);
 void print_set_color(uint8_t foreground, uint8_t background);
 void print_int(int value);
@@ -67,6 +69,10 @@ size_t print_selection_text(char *out, size_t size);
 /* Graphics mode: a program draws pixels below the status bar, so the console
  * stops drawing its text area; switching it off redraws the whole screen. */
 void print_set_graphics(int on);
+/* The graphical boot screen (logo, progress bar) over the boot text. */
+void print_splash_begin(void);
+void print_splash_step(int last);      /* 1: the bar full */
+void print_splash_end(void);           /* the text console back */
 int print_graphics_mode(void);
 size_t print_status_rows(void);
 void print_hide_cursor(void);   /* framebuffer console: stop drawing the cursor (panic screen) */

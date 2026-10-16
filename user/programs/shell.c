@@ -107,6 +107,7 @@ static int read_piped_line(char *buf, int size) {
     while (len < size - 1) {
         if (read(0, &c, 1) <= 0) exit(0);             /* Terminal closed */
         if (c == '\n') break;
+        if (c == 3) continue;                          /* Ctrl+C with nothing to stop */
         buf[len++] = c;
     }
     buf[len] = 0;

@@ -72,6 +72,7 @@ static void out_reg(const char* name, uint64_t v) {
 }
 
 static void screen_begin(void) {
+    print_set_graphics(0);                       // over the boot screen or the desktop
     print_hide_cursor();
     for (int i = 0; i < COLS * ROWS; i++) VGA[i] = (uint16_t)((ATTR_PANIC << 8) | ' ');
     cur_row = 0; cur_col = 0;

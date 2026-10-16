@@ -116,6 +116,7 @@ volatile uint16_t* print_text_cells(void) {
 /* Mouse pointer and selection (whole-grid cell indexes, status row included):
  * drawn with foreground and background swapped. */
 static int pointer_cell = -1;
+static int splash;               /* the boot screen is up (print_splash_begin) */
 static int graphics_mode;        /* a program draws pixels: leave the text area alone (2: and the status bar) */
 static int select_from = -1, select_to = -1;
 
@@ -291,9 +292,13 @@ void print_newLine() {
     }
 }
 
+static int (*print_tap)(char);
+void print_set_tap(int (*tap)(char)) { print_tap = tap; }
+
 void print_char(char character) {
     serial_putc(character);   // mirror everything to COM1 (survives crashes)
     if (bootlog_on && bootlog_len < BOOTLOG_SIZE) bootlog[bootlog_len++] = character;
+    if (print_tap && print_tap(character)) return;     /* into a Terminal window's pipe */
     if (console_muted) return;
     if (scrollback_view_offset) scroll_to_bottom();   // new output: back to the live screen
     select_from = select_to = -1;                      // the selection would point at old text
@@ -910,6 +915,7 @@ void print_boot_status(boot_state_t state, const char *label, const char *fmt, .
     flush_deferred--;
     console_muted = was_muted;
     move_cursor();
+    print_splash_step(0);
 }
 
 void print_set_theme_colors(void) {
@@ -1053,6 +1059,7 @@ size_t print_selection_text(char *out, size_t size) {
 /* ---- Graphics mode (a program draws images) ------------------------------ */
 
 void print_set_graphics(int on) {
+    if (on) splash = 0;                          // a program has the screen now
     if (screen != shadow || !fbcon_active() || graphics_mode == on) return;
     graphics_mode = on;
     if (!on) {                                   // give the screen back: redraw it all
@@ -1063,6 +1070,60 @@ void print_set_graphics(int on) {
         drawn_cursor = -1;
     }
     print_flush();
+}
+
+/* ---- The boot screen -------------------------------------------------------
+ * Like a Mac starting up: black, the logo, a progress bar that moves with each
+ * boot step. The text goes on underneath (graphics mode 2 leaves it alone) and
+ * comes back when a program gives up the screen, a text login asks for
+ * something, or the kernel panics. `verbose` on the boot line skips it. */
+#define SPLASH_STEPS 22
+static int splash_step;
+static uint32_t splash_x, splash_y, splash_w, splash_h;
+
+static void splash_bar(void) {
+    uint32_t done = splash_w * (uint32_t)splash_step / SPLASH_STEPS;
+    if (done > splash_w) done = splash_w;
+    fbcon_fill(splash_x, splash_y, splash_w, splash_h, 0x3A3A3C);
+    fbcon_fill(splash_x, splash_y, done, splash_h, 0xFFFFFF);
+}
+
+void print_splash_begin(void) {
+    if (screen != shadow || !fbcon_active() || graphics_mode) return;
+    uint32_t w, h, cw, ch, gx, gy;
+    fbcon_geometry(&w, &h, &cw, &ch, &gx, &gy);
+    graphics_mode = 2;
+    splash = 1;
+    splash_step = 3;                             /* the boot loader drew the first part */
+    fbcon_fill(0, 0, w, h, 0);
+    /* The logo: a terminal window with ">_" in it. */
+    uint32_t L = h / 6, iw = L * 5 / 4, ih = L, x = (w - iw) / 2, y = h / 2 - ih, t = L / 18 + 1;
+    fbcon_fill(x + t, y, iw - 2 * t, ih, 0xFFFFFF);            /* rounded a little: the corners cut */
+    fbcon_fill(x, y + t, iw, ih - 2 * t, 0xFFFFFF);
+    fbcon_fill(x + t, y + L / 5, iw - 2 * t, ih - L / 5 - t, 0x111114);
+    uint32_t u = L / 48 + 1, px = x + L / 6, py = y + L / 5 + L / 7;
+    for (uint32_t i = 0; i < 8; i++) {                         /* ">" in small steps (as the loader) */
+        fbcon_fill(px + i * u, py + i * u, 3 * u, 3 * u, 0xFFFFFF);
+        fbcon_fill(px + i * u, py + (14 - i) * u, 3 * u, 3 * u, 0xFFFFFF);
+    }
+    fbcon_fill(px + 13 * u, py + 14 * u, 11 * u, 3 * u, 0xFFFFFF);   /* "_" */
+    splash_w = L * 3 / 2;
+    splash_h = h / 270 + 2;
+    splash_x = (w - splash_w) / 2;
+    splash_y = y + ih + L / 2;
+    splash_bar();
+}
+
+void print_splash_step(int last) {
+    if (!splash) return;
+    splash_step = last ? SPLASH_STEPS : splash_step + 1;
+    splash_bar();
+}
+
+void print_splash_end(void) {
+    if (!splash) return;
+    splash = 0;
+    if (graphics_mode == 2) print_set_graphics(0);
 }
 
 int print_graphics_mode(void) {

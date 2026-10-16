@@ -22,3 +22,4 @@ disk.img
 !.vscode/tasks.json
 __pycache__/
 !targets/x86_64/ramdisk/UIFONT.BIN
+!targets/x86_64/ramdisk/ICONS.BIN

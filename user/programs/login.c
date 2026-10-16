@@ -15,6 +15,7 @@ static int read_word(char *buf, int size) {
 int main(void) {
     struct os_uname sys;
     uname(&sys);
+    setup_text();                                    /* first start: no accounts yet */
     for (;;) {
         printf("\n  ");
         set_theme_color(THEME_ACCENT);
