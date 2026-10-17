@@ -22,6 +22,8 @@ typedef struct {
     uint32_t cache_sector;                /* one FAT sector, cached (write-through) */
     int cache_valid;
     uint8_t cache[512];
+    uint32_t map_first, map_n;            /* every 64th cluster of the file read last: seeks are short */
+    uint32_t *map;
 } fatvol_t;
 
 /* A folder entry and where it lives (so it can be updated in place). */

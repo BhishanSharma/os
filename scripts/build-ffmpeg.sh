@@ -5,7 +5,8 @@
 # Only what playing needs: the MP4/MOV, Matroska/WebM, AVI, MP3, AAC, FLAC,
 # Ogg and WAV readers and the H.264, HEVC, MPEG-4, VP8, VP9, AAC, MP3, MP2,
 # Opus, Vorbis, FLAC and ALAC decoders, with FFmpeg's x86 assembly (SSE/AVX2,
-# chosen at run time). No threads, files or network: the program does those.
+# chosen at run time), decoding on several threads (the C library's pthreads).
+# No files or network: the program does those.
 # It is compiled against the OS's own C library (user/include, libc.a), so
 # build that first (make user). LGPL 2.1: see SRC/COPYING.LGPLv2.1.
 set -eu
@@ -20,7 +21,7 @@ cd "$OUT/build"
   --cc=x86_64-elf-gcc --ar=x86_64-elf-ar --ranlib=x86_64-elf-ranlib --nm=x86_64-elf-nm \
   --x86asmexe=nasm --pkg-config=false \
   --disable-autodetect --disable-everything --disable-programs --disable-doc \
-  --disable-network --disable-pthreads --disable-w32threads --disable-os2threads \
+  --disable-network --disable-w32threads --disable-os2threads \
   --disable-avdevice --disable-avfilter --disable-swscale --disable-postproc \
   --disable-debug --disable-hwaccels --enable-static --disable-shared \
   --enable-decoder=h264,hevc,mpeg4,vp8,vp9,aac,aac_latm,mp3float,mp2float,opus,vorbis,flac,alac,pcm_s16le,pcm_s24le,pcm_f32le \

@@ -740,7 +740,13 @@ static int64_t sys_seek(uint64_t fd, int64_t offset, uint64_t whence) {
 
 
 static int64_t sys_sound(uint64_t op, uint64_t a, uint64_t b) {
-    int pid = task_current()->pid;
+    task_t *t = task_current();                     /* the program's: any of its threads may use it */
+    for (int hops = 0; t->is_thread && hops < 8; hops++) {
+        task_t *p = task_by_pid(t->parent);
+        if (!p) break;
+        t = p;
+    }
+    int pid = t->pid;
     if (op == SOUND_OPEN) {
         if (sound_owner && sound_owner != pid) return SYSERR_INUSE;
         if (sound_owner == pid) return 0;

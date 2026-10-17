@@ -29,7 +29,7 @@ static void split(block_t *b, size_t size) {
     }
 }
 
-void *malloc(size_t size) {
+static void *raw_malloc(size_t size) {
     if (size == 0) size = 1;
     size = ALIGN16(size);
     for (block_t *b = heap_head; b; b = b->next) {
@@ -51,7 +51,7 @@ void *malloc(size_t size) {
     return (char *)b + HEADER;
 }
 
-void free(void *ptr) {
+static void raw_free(void *ptr) {
     if (!ptr) return;
     block_t *b = (block_t *)((char *)ptr - HEADER);
     b->free = 1;
@@ -65,10 +65,10 @@ void free(void *ptr) {
 
 /* Memory at a multiple of `align` (a power of two): a block with room to
  * spare, whose front part becomes a free block of its own. free() takes it. */
-void *memalign(size_t align, size_t size) {
-    if (align <= 16) return malloc(size);
+static void *raw_memalign(size_t align, size_t size) {
+    if (align <= 16) return raw_malloc(size);
     size = ALIGN16(size ? size : 1);
-    char *p = malloc(size + align + HEADER + 32);
+    char *p = raw_malloc(size + align + HEADER + 32);
     if (!p || ((size_t)p & (align - 1)) == 0) return p;
     block_t *b = (block_t *)(p - HEADER);
     char *a = (char *)(((size_t)p + HEADER + 32 + align - 1) & ~(align - 1));
@@ -79,8 +79,32 @@ void *memalign(size_t align, size_t size) {
     b->next = n;
     b->size = (size_t)((char *)n - p);
     if (heap_tail == b) heap_tail = n;
-    free(p);                                  /* the front part: free (merges with what follows only) */
+    raw_free(p);                                  /* the front part: free (merges with what follows only) */
     return a;
+}
+
+/* The allocator is shared by a program's threads: one at a time. */
+static mutex_t heap_lock;
+
+void *malloc(size_t size) {
+    mutex_lock(&heap_lock);
+    void *p = raw_malloc(size);
+    mutex_unlock(&heap_lock);
+    return p;
+}
+
+void free(void *ptr) {
+    if (!ptr) return;
+    mutex_lock(&heap_lock);
+    raw_free(ptr);
+    mutex_unlock(&heap_lock);
+}
+
+void *memalign(size_t align, size_t size) {
+    mutex_lock(&heap_lock);
+    void *p = raw_memalign(align, size);
+    mutex_unlock(&heap_lock);
+    return p;
 }
 
 int posix_memalign(void **out, size_t align, size_t size) {
@@ -92,22 +116,22 @@ int posix_memalign(void **out, size_t align, size_t size) {
 
 void *aligned_alloc(size_t align, size_t size) { return memalign(align, size); }
 
-void *calloc(size_t count, size_t size) {
+static void *raw_calloc(size_t count, size_t size) {
     size_t total = count * size;
     if (size && total / size != count) return 0;
-    void *p = malloc(total);
+    void *p = raw_malloc(total);
     if (p) memset(p, 0, total);
     return p;
 }
 
-void *realloc(void *ptr, size_t size) {
-    if (!ptr) return malloc(size);
+static void *raw_realloc(void *ptr, size_t size) {
+    if (!ptr) return raw_malloc(size);
     block_t *b = (block_t *)((char *)ptr - HEADER);
     if (b->size >= size) return ptr;
-    void *p = malloc(size);
+    void *p = raw_malloc(size);
     if (p) {
         memcpy(p, ptr, b->size);
-        free(ptr);
+        raw_free(ptr);
     }
     return p;
 }
@@ -131,4 +155,18 @@ void srand(unsigned int seed) { rand_state = seed; }
 int rand(void) {
     rand_state = rand_state * 6364136223846793005UL + 1442695040888963407UL;
     return (int)((rand_state >> 33) & RAND_MAX);
+}
+
+void *calloc(size_t count, size_t size) {
+    mutex_lock(&heap_lock);
+    void *p = raw_calloc(count, size);
+    mutex_unlock(&heap_lock);
+    return p;
+}
+
+void *realloc(void *ptr, size_t size) {
+    mutex_lock(&heap_lock);
+    void *p = raw_realloc(ptr, size);
+    mutex_unlock(&heap_lock);
+    return p;
 }

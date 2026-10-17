@@ -71,9 +71,7 @@ static void on_video(plm_t *plm, plm_frame_t *frame, void *user) {
 }
 
 static void show_frame(void) {
-    if (use_ff) {
-        ff_picture(scaled, dw, dh, xmap);
-    } else {
+    if (!use_ff) {                        /* (FFmpeg's are already in `scaled`, at its size) */
         plm_frame_to_bgra(latest, (uint8_t *)frame_rgb, vw * 4);   /* bytes B,G,R,A = 0xAARRGGBB */
         for (int y = 0; y < dh; y++) {
             const unsigned int *src = frame_rgb + (long)(y * vh / dh) * vw;
@@ -202,6 +200,7 @@ static void do_key(int key) {
     if (key == 'q' || key == 'Q' || key == 27) quit = 1;
     else if (key == ' ') {
         paused = !paused;
+        if (use_ff) ff_pause(paused);
         last_bar = 0;
     } else if (key == KEY_SEEK && duration > 0) {
         seek_to(duration * seek_permille / 1000.0);
@@ -223,8 +222,9 @@ static int play_step(void) {
     if (elapsed > 0.25) elapsed = 0.25;   /* after a stall: slow down instead of skipping */
     int shown;
     if (use_ff) {
-        if (!paused && !ff_decode(elapsed)) ff_over = 1;
-        shown = ff_picture_ready();
+        int r = ff_next(scaled);          /* the decoder thread made it ready */
+        if (r < 0) ff_over = 1;
+        shown = r > 0;
     } else {
         if (!paused) plm_decode(plm, elapsed);
         shown = latest != 0;
@@ -378,6 +378,10 @@ int main(int argc, char **argv) {
     for (int x = 0; x < dw; x++) xmap[x] = x * vw / dw;
 
     last = uptime_ms();
+    if (use_ff && ff_start(dw, dh, xmap) != 0) {
+        printf("video: not enough memory\n");
+        return 1;
+    }
     if (windowed) {
         view_t *root = v_box(0, V_COLUMN);
         root->pad = root->gap = 0;
@@ -408,6 +412,12 @@ int main(int argc, char **argv) {
         plm_destroy(plm);
         close(fd);
     }
-    printf("Stopped at %s, %ld frames shown.\n", at, frames_shown);
+    if (use_ff) {
+        long ready, late;
+        ff_stats(&ready, &late);
+        printf("Stopped at %s, %ld frames shown (%ld decoded in time, %ld too late).\n", at, frames_shown, ready, late);
+    } else {
+        printf("Stopped at %s, %ld frames shown.\n", at, frames_shown);
+    }
     return 0;
 }

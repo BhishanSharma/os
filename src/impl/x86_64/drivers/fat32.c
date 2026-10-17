@@ -49,6 +49,7 @@ static int fat_set(fatvol_t *v, uint32_t c, uint32_t value) {
     if (r) return r;
     uint32_t *e = (uint32_t *)(v->cache + off % 512);
     *e = (*e & 0xF0000000u) | (value & 0x0FFFFFFF);
+    v->map_first = 0;                                       /* a chain changed: the seek map may be wrong */
     for (uint32_t i = 0; i < v->num_fats; i++) {
         r = dev_write(v, sector + i * v->fat_size, 1, v->cache);
         if (r) {
@@ -765,37 +766,81 @@ int fatvol_format(const blockdev_t *dev, uint64_t hidden, const char *label) {
 
 /* ---- Reading part of a file ------------------------------------------------------- */
 
+#define MAP_STEP 64                                         /* clusters between the seek map's entries */
+#define RUN_MAX  (64 * 1024)                                /* bytes read from the disk at once */
+
+/* Every 64th cluster of file `first`'s chain, so a jump backwards (a video
+ * reader does many) walks at most 63 links, not the whole chain again. */
+static int build_map(fatvol_t *v, uint32_t first, uint32_t size) {
+    uint32_t n = (size + v->bpc - 1) / v->bpc / MAP_STEP + 1;
+    if (v->map && v->map_n < n) {
+        kfree(v->map);
+        v->map = 0;
+    }
+    if (!v->map) {
+        v->map = kmalloc(n * sizeof(uint32_t));
+        if (!v->map) return FATV_IO;
+    }
+    uint32_t c = first, i = 0, steps = v->clusters;
+    for (uint32_t k = 0; k < n && valid_cluster(v, c) && steps; k++) {
+        v->map[k] = c;
+        i = k + 1;
+        for (int s = 0; s < MAP_STEP && valid_cluster(v, c) && steps; s++, steps--) c = fat_get(v, c);
+    }
+    v->map_n = i;
+    v->map_first = first;
+    return 0;
+}
+
 int fatvol_read_at(fatvol_t *v, const fatent_t *f, uint32_t offset, uint8_t *dst, uint32_t len, fatpos_t *pos) {
     uint32_t size = f->e.file_size;
     if (offset >= size || !len) return 0;
     if (len > size - offset) len = size - offset;
-    uint32_t want = offset / v->bpc, index = 0, c = fatent_cluster(f);
-    if (pos->cluster && pos->index <= want) {               /* go on from the last read */
+    uint32_t first = fatent_cluster(f), want = offset / v->bpc, index = 0, c = first;
+    if (pos->cluster && pos->index <= want && want - pos->index < MAP_STEP) {   /* go on from the last read */
         index = pos->index;
         c = pos->cluster;
+    } else if (want >= MAP_STEP) {                          /* far: from the seek map */
+        if (v->map_first != first && build_map(v, first, size) != 0) return FATV_IO;
+        uint32_t k = want / MAP_STEP;
+        if (k >= v->map_n) k = v->map_n ? v->map_n - 1 : 0;
+        if (v->map_n) {
+            index = k * MAP_STEP;
+            c = v->map[k];
+        }
     }
     while (index < want) {
         c = fat_get(v, c);
         index++;
         if (!valid_cluster(v, c)) return FATV_IO;
     }
-    uint8_t *buf = kmalloc(v->bpc);
+    uint32_t cap = v->bpc > RUN_MAX ? v->bpc : RUN_MAX;
+    uint8_t *buf = kmalloc(cap);
     if (!buf) return FATV_IO;
     uint32_t done = 0, in = offset % v->bpc;
     while (done < len) {
-        if (!valid_cluster(v, c) || read_cluster(v, c, buf) != 0) {
+        /* A run of clusters that follow each other on the disk: one read. */
+        uint32_t run = 1, last = c, need = (in + len - done + v->bpc - 1) / v->bpc;
+        while (run < need && (run + 1) * v->bpc <= cap) {
+            uint32_t next = fat_get(v, last);
+            if (next != last + 1) break;
+            last = next;
+            run++;
+        }
+        if (!valid_cluster(v, c) || dev_read(v, cluster_lba(v, c), run * v->spc, buf) != 0) {
             kfree(buf);
             return done ? (int)done : FATV_IO;
         }
-        uint32_t n = v->bpc - in;
+        uint32_t n = run * v->bpc - in;
         if (n > len - done) n = len - done;
         memcpy(dst + done, buf + in, n);
         done += n;
         in = 0;
+        index += run - 1;
         pos->index = index;
-        pos->cluster = c;
+        pos->cluster = last;
         if (done < len) {
-            c = fat_get(v, c);
+            c = fat_get(v, last);
             index++;
         }
     }
