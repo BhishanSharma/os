@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/utsname.h>
@@ -266,11 +267,18 @@ static const char *shm_name(const char *path) {
 
 int Sysdeps<VmMap>::operator()(void *hint, size_t size, int prot, int flags, int fd, off_t offset, void **window) {
 	(void)hint;
-	if (flags & MAP_FIXED)
-		return ENOMEM;                              // (the kernel picks the address)
 	if (!size)
 		return EINVAL;
 	long kprot = (prot & PROT_READ ? 1 : 0) | (prot & PROT_WRITE ? 2 : 0);
+	if (flags & MAP_FIXED) {                        // in place of what is there: zeroed, or shared memory
+		if (offset || !(flags & MAP_ANONYMOUS || fd < 0 || shm_fd(fd)))
+			return ENOTSUP;
+		long a = sc(TOS_MMAPAT, (long)hint, (long)size, kprot ? kprot : 1, flags & MAP_ANONYMOUS ? -1 : fd);
+		if (a <= 0)
+			return a == TOS_ERR_BADCALL ? EINVAL : ENOMEM;
+		*window = (void *)a;
+		return 0;
+	}
 	if (flags & MAP_ANONYMOUS || fd < 0) {
 		long a = sc(TOS_MMAP, (long)size, kprot ? kprot : 1, -1);
 		if (a <= 0)
@@ -318,6 +326,25 @@ int Sysdeps<VmMap>::operator()(void *hint, size_t size, int prot, int flags, int
 int Sysdeps<VmUnmap>::operator()(void *pointer, size_t size) {
 	long r = sc(TOS_MUNMAP, (long)pointer, (long)size);
 	return r < 0 ? EINVAL : 0;
+}
+
+// Limits: open descriptors are the kernel's table and the sockets after it;
+// nothing else has one.
+int Sysdeps<GetRlimit>::operator()(int resource, struct rlimit *limit) {
+	rlim_t n = resource == RLIMIT_NOFILE ? tos::SOCK_BASE + tos::MAX_SOCKS : RLIM_INFINITY;
+	limit->rlim_cur = limit->rlim_max = n;
+	return 0;
+}
+
+int Sysdeps<SetRlimit>::operator()(int resource, const struct rlimit *limit) {
+	if (resource == RLIMIT_NOFILE && limit->rlim_cur > (rlim_t)(tos::SOCK_BASE + tos::MAX_SOCKS))
+		return EINVAL;
+	return 0;
+}
+
+// Thread names are for debuggers; Terminal OS keeps none.
+int Sysdeps<ThreadSetname>::operator()(void *, const char *) {
+	return 0;
 }
 
 int Sysdeps<Madvise>::operator()(void *, size_t, int) {
@@ -540,11 +567,27 @@ int Sysdeps<Stat>::operator()(fsfd_target target, int fd, const char *path, int,
 		}
 		if (OpenDirectory *d = directory(fd))
 			return fill_stat(d->path, st);
+		if (long fl = fd >= 0 && fd < tos::SOCK_BASE ? sc(TOS_FDINFO, fd) : -1; fl >= 0 && (fl & TOS_SOCK_LOCAL)) {
+			memset(st, 0, sizeof(*st));                 // a local socket
+			st->st_mode = S_IFSOCK | 0600;
+			st->st_nlink = 1;
+			st->st_blksize = 4096;
+			return 0;
+		}
 		if (fd >= 0 && fd < MAX_FDS && fd_path[fd])
 			return fill_stat(fd_path[fd], st);
+		if (char path[512]; fd >= 0 && fd < tos::SOCK_BASE && sc(TOS_FDPATH, fd, (long)path, sizeof(path)) > 0)
+			return fill_stat(path, st);                 // a file from another program (passed over a socket)
 		if (fd >= 0 && fd <= 2) {                   // the console (or a pipe)
 			memset(st, 0, sizeof(*st));
 			st->st_mode = S_IFCHR | 0620;
+			st->st_nlink = 1;
+			st->st_blksize = 4096;
+			return 0;
+		}
+		if (fd >= 0 && fd < tos::SOCK_BASE && sc(TOS_FDINFO, fd) >= 0) {
+			memset(st, 0, sizeof(*st));                 // a pipe
+			st->st_mode = S_IFIFO | 0600;
 			st->st_nlink = 1;
 			st->st_blksize = 4096;
 			return 0;
@@ -683,6 +726,22 @@ int Sysdeps<Dup>::operator()(int fd, int flags, int *newfd) {
 }
 
 int Sysdeps<Dup2>::operator()(int fd, int, int newfd) {
+	// A built-in file (/dev/null) onto a kernel descriptor (a child's stdin):
+	// a pipe nobody writes to, so reading it ends at once, as /dev/null's does.
+	if (tos::is_vfile(fd) && newfd >= 0 && newfd < tos::SOCK_BASE) {
+		int p[2];
+		long r = sc(TOS_PIPE, (long)p);
+		if (r < 0)
+			return to_errno(r);
+		sc(TOS_CLOSE, p[1]);
+		r = p[0] == newfd ? newfd : sc(TOS_DUP2, p[0], newfd);
+		if (p[0] != newfd)
+			sc(TOS_CLOSE, p[0]);
+		if (r < 0)
+			return to_errno(r);
+		forget(newfd);
+		return 0;
+	}
 	long r = sc(TOS_DUP2, fd, newfd);
 	if (r < 0)
 		return to_errno(r);
@@ -754,8 +813,8 @@ int Sysdeps<Fork>::operator()(pid_t *child) {
 	return 0;
 }
 
-int Sysdeps<Execve>::operator()(const char *path, char *const argv[], char *const[]) {
-	long r = sc(TOS_EXEC, (long)path, (long)argv);
+int Sysdeps<Execve>::operator()(const char *path, char *const argv[], char *const envp[]) {
+	long r = sc(TOS_EXEC, (long)path, (long)argv, (long)envp);
 	return to_errno(r);
 }
 
@@ -874,6 +933,12 @@ int Sysdeps<Sysconf>::operator()(int num, long *ret) {
 	case _SC_PAGESIZE:
 		*ret = 4096;
 		return 0;
+	case _SC_PHYS_PAGES:
+	case _SC_AVPHYS_PAGES: {
+		long n = sc(TOS_SYSTEM, TOS_SYSTEM_PAGES, num == _SC_AVPHYS_PAGES);
+		*ret = n > 0 ? n : 1024;
+		return 0;
+	}
 	default:
 		return EINVAL;                              // mlibc's table answers the rest
 	}

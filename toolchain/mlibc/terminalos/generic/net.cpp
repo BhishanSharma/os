@@ -900,6 +900,10 @@ int Sysdeps<Fcntl>::operator()(int fd, int request, va_list args, int *result) {
 	case F_SETLKW:
 		*result = 0;                                // (one program per file: locks always succeed)
 		return 0;
+	case F_ADD_SEALS:
+	case F_GET_SEALS:
+		*result = 0;                                // (accepted, not enforced: no seals are kept)
+		return 0;
 	default:
 		return EINVAL;
 	}

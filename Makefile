@@ -55,6 +55,11 @@ RAMDISK_DIR := targets/x86_64/ramdisk
 RAMDISK_MB  ?= 96
 RAMDISK_GZ  := $(BUILD)/ramdisk.img.gz
 RAMDISK_STAGE := $(BUILD)/ramdisk-files
+# Ladybird, laid out by toolchain/ladybird/install.sh: make LADYBIRD=build/ladybird
+# puts it on the RAM disk as /ladybird (bin/Ladybird) and makes room for it.
+LADYBIRD    ?=
+LADYBIRD_MB ?= 224
+RAMDISK_SIZE = $(if $(LADYBIRD),$(shell echo $$(($(RAMDISK_MB) + $(LADYBIRD_MB)))),$(RAMDISK_MB))
 
 # ---- User programs (ring 3) -------------------------------------------------
 # Static ELF executables linked at 1 GiB against the small C library in
@@ -268,12 +273,13 @@ $(KERNEL_BIN): $(objects) $(BEARSSL_LIB) $(LINKER_LD)
 # ---- ISO ------------------------------------------------------------------
 
 $(RAMDISK_GZ): scripts/mkramdisk.sh scripts/mkdock.sh $(wildcard $(RAMDISK_DIR)/*) $(USER_ELFS) $(APP_ELFS) $(PORT_ELFS) \
-               $(wildcard apps/*/app.cfg) $(THIS_MAKEFILE)
+               $(wildcard apps/*/app.cfg) $(THIS_MAKEFILE) $(if $(LADYBIRD),$(LADYBIRD)/bin/Ladybird)
 	rm -rf $(RAMDISK_STAGE)
 	mkdir -p $(RAMDISK_STAGE)
 	cp $(RAMDISK_DIR)/* $(USER_ELFS) $(APP_ELFS) $(PORT_ELFS) $(RAMDISK_STAGE)/
 	sh scripts/mkdock.sh apps > $(RAMDISK_STAGE)/DOCK.CFG
-	sh scripts/mkramdisk.sh $(RAMDISK_STAGE) $(RAMDISK_MB) $@
+	$(if $(LADYBIRD),cp -r $(LADYBIRD) $(RAMDISK_STAGE)/ladybird)
+	sh scripts/mkramdisk.sh $(RAMDISK_STAGE) $(RAMDISK_SIZE) $@
 
 
 # ---- User programs ----------------------------------------------------------

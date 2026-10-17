@@ -12,7 +12,10 @@
 # Usage: mkusbimg.sh <image> <loader.efi> <kernel.bin> <ramdisk.gz>
 set -e
 OUT=$1 LOADER=$2 KERNEL=$3 RAMDISK=$4
-SIZE_MB=64
+# 64 MiB, or more when the files need it (the RAM disk with Ladybird): their
+# size, twice over for the loader's copy, plus 32 MiB.
+FILES_MB=$(( ($(wc -c < "$LOADER") + $(wc -c < "$KERNEL") + $(wc -c < "$RAMDISK")) / 1048576 ))
+SIZE_MB=$(( FILES_MB + 32 > 64 ? FILES_MB + 32 : 64 ))
 START=2048
 
 rm -f "$OUT"

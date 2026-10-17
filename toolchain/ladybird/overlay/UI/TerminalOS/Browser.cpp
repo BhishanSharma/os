@@ -11,7 +11,6 @@
 
 namespace Ladybird {
 
-Application::Application() = default;
 
 ErrorOr<int> browser_main(Main::Arguments arguments)
 {

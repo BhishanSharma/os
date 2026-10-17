@@ -46,9 +46,10 @@
 #include "drivers/registry.h"
 
 #define USER_STACK_SIZE  (8ULL << 20)      /* the stack region; pages appear as it grows */
+#define USER_MMAP_LOW    0x100000000ULL     /* mmapat: never below 4 GiB (the program is there) */
 #define USER_HEAP_MAX    (64ULL << 30)     /* in practice: as much as RAM gives */
-#define MAX_ARGS         16
-#define MAX_FDS          64
+#define MAX_ARGS         64   /* argv and environment strings together */
+#define MAX_FDS          256
 #define MAX_PATH         256              /* FAT32_MAX_PATH: long names */
 #define PAGE_UP(x)       (((x) + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1))
 #define PAGE_DOWN(x)     ((x) & ~(uint64_t)(PAGE_SIZE - 1))
@@ -983,6 +984,12 @@ static int64_t sys_write(uint64_t fd, uint64_t buf, uint64_t len) {
         }
         return n < 0 ? SYSERR_TIMEOUT : n;
     }
+    if (f->kind == F_SHM) {                             /* into the memory, at the position */
+        int64_t n = vm_shm_copy(f->shm, f->pos, (void *)src, len, 1);
+        if (n < 0) return SYSERR_NOMEM;
+        f->pos += (uint32_t)n;
+        return n;
+    }
     if (f->kind != F_FILE || f->mode == OPEN_READ) return SYSERR_BADFD;
     if (len > 64 * 1024 * 1024 || file_grow(f, f->size + (uint32_t)len) != 0) return SYSERR_NOMEM;
     memcpy(f->data + f->size, src, len);
@@ -1005,6 +1012,12 @@ static int64_t sys_read(uint64_t fd, uint64_t buf, uint64_t len) {
     }
     if (f->kind == F_PIPE_R) return stream_read(f, f->pipe, dst, len);
     if (f->kind == F_USOCK) return f->us ? stream_read(f, f->us->pipe[f->side], dst, len) : SYSERR_BADFD;
+    if (f->kind == F_SHM) {
+        int64_t n = vm_shm_copy(f->shm, f->pos, dst, len, 0);
+        if (n < 0) return SYSERR_NOMEM;
+        f->pos += (uint32_t)n;
+        return n;
+    }
     if (f->kind != F_FILE || f->mode != OPEN_READ) return SYSERR_BADFD;
     uint64_t n = f->size - f->pos;
     if (n > len) n = len;
@@ -1021,6 +1034,13 @@ static int64_t sys_read(uint64_t fd, uint64_t buf, uint64_t len) {
 
 static int64_t sys_seek(uint64_t fd, int64_t offset, uint64_t whence) {
     file_t *f = fd_get(fd);
+    if (f && f->kind == F_SHM) {                        /* (the end is the memory's size) */
+        int64_t end = (int64_t)vm_object_size(f->shm);
+        int64_t at = (whence == SEEK_SET ? 0 : whence == SEEK_CUR ? (int64_t)f->pos : end) + offset;
+        if (whence > SEEK_END || at < 0) return SYSERR_BADCALL;
+        f->pos = (uint32_t)(at < end ? at : end);
+        return f->pos;
+    }
     if (!f || f->kind != F_FILE) return SYSERR_BADFD;
     int64_t base = whence == SEEK_SET ? 0 : whence == SEEK_CUR ? (int64_t)f->pos : whence == SEEK_END ? (int64_t)f->size : -1;
     if (base < 0) return SYSERR_BADCALL;
@@ -1276,11 +1296,12 @@ static int64_t sys_uname(uint64_t ptr);
 static int64_t sys_mouse(uint64_t ptr);
 static int64_t sys_gfx(uint64_t op, uint64_t arg);
 static int64_t sys_fork(struct exc_frame *f);
-static int64_t sys_exec(struct exc_frame *f, uint64_t path_ptr, uint64_t argv_ptr);
+static int64_t sys_exec(struct exc_frame *f, uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr);
 static int64_t sys_thread(uint64_t entry, uint64_t arg, uint64_t stack);
 static int64_t sys_futex(uint64_t op, uint64_t addr, uint64_t value);
 static int64_t sys_mmap(uint64_t len, uint64_t prot, int64_t fd);
 static int64_t sys_mmap2(uint64_t len, uint64_t prot, int64_t fd, uint64_t offset);
+static int64_t sys_mmapat(uint64_t addr, uint64_t len, uint64_t prot, int64_t fd);
 static int64_t sys_shmfd(uint64_t op, uint64_t a, uint64_t b);
 static int64_t sys_shmmap(uint64_t name_ptr, uint64_t size);
 static int64_t sys_port(struct exc_frame *f);
@@ -1403,9 +1424,10 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
             break;
         case SYS_SHMMAP:  r = sys_shmmap(f->rdi, f->rsi); break;
         case SYS_MMAP2:   r = sys_mmap2(f->rdi, f->rsi, (int64_t)f->rdx, f->r10); break;
+        case SYS_MMAPAT:  r = sys_mmapat(f->rdi, f->rsi, f->rdx, (int64_t)f->r10); break;
         case SYS_SHMFD:   r = sys_shmfd(f->rdi, f->rsi, f->rdx); break;
         case SYS_FORK:    r = sys_fork(f); break;
-        case SYS_EXEC:    r = sys_exec(f, f->rdi, f->rsi); if (r == 0) return; break;
+        case SYS_EXEC:    r = sys_exec(f, f->rdi, f->rsi, f->rdx); if (r == 0) return; break;
         case SYS_THREAD:  r = sys_thread(f->rdi, f->rsi, f->rdx); break;
         case SYS_THREAD_EXIT: finish((int)(int32_t)f->rdi, 0);
         case SYS_FUTEX:   r = sys_futex(f->rdi, f->rsi, f->rdx); break;
@@ -1428,6 +1450,16 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
             if (!user_range_ok(f->rdi, f->rsi, 1)) { r = SYSERR_FAULT; break; }
             if (n >= f->rsi) n = f->rsi ? f->rsi - 1 : 0;
             if (f->rsi) { memcpy((char *)f->rdi, p->exe, n); ((char *)f->rdi)[n] = 0; }
+            r = (int64_t)n;
+            break;
+        }
+        case SYS_FDPATH: {                              /* the file an open file descriptor reads */
+            file_t *fl = fd_get(f->rdi);
+            if (!fl || fl->kind != F_FILE) { r = SYSERR_BADFD; break; }
+            uint64_t n = strlen(fl->path);
+            if (!user_range_ok(f->rsi, f->rdx, 1)) { r = SYSERR_FAULT; break; }
+            if (n >= f->rdx) n = f->rdx ? f->rdx - 1 : 0;
+            if (f->rdx) { memcpy((char *)f->rsi, fl->path, n); ((char *)f->rsi)[n] = 0; }
             r = (int64_t)n;
             break;
         }
@@ -1533,32 +1565,40 @@ static uint64_t load_elf(uint64_t root, vm_space_t *vm, const uint8_t *data, uin
 /* argc, argv[], NULL and the strings at the top of the stack, as the SysV ABI
  * has it for _start. Built in a kernel copy of the top page, then copied in.
  * Returns the initial stack pointer, or 0 if the arguments do not fit. */
-static uint64_t build_stack(uint64_t root, int argc, char **argv, uint64_t entry_at) {
+/* The new program's stack, as Linux lays it out: argc, argv..NULL, the
+ * environment..NULL, the auxiliary vector; the strings above them, all in the
+ * top page. args holds argc arguments and then envc environment strings. */
+static uint64_t build_stack(uint64_t root, int argc, int envc, char **args, uint64_t entry_at) {
     static uint8_t page[PAGE_SIZE];
     uint64_t base = USER_TOP - PAGE_SIZE;
     uint64_t sp = USER_TOP, ptrs[MAX_ARGS];
+    int n = argc + envc;
     sp -= 16;                                   /* AT_RANDOM's 16 bytes */
     uint64_t random = sp;
     for (int i = 0; i < 16; i++) page[sp - base + i] = (uint8_t)(timer_ms() * 2654435761u >> (i % 4 * 8)) ^ (uint8_t)i;
-    for (int i = argc - 1; i >= 0; i--) {
-        size_t len = strlen(argv[i]) + 1;
-        if (sp - len < base + 512) return 0;
+    for (int i = n - 1; i >= 0; i--) {
+        size_t len = strlen(args[i]) + 1;
+        if (sp - len < base + 1024) return 0;
         sp -= len;
-        memcpy(page + (sp - base), argv[i], len);
+        memcpy(page + (sp - base), args[i], len);
         ptrs[i] = sp;
     }
     sp &= ~(uint64_t)15;
-    /* Under argv: no environment (NULL), then the auxiliary vector, as Linux:
-     * AT_PHDR 3, AT_PHENT 4, AT_PHNUM 5, AT_PAGESZ 6, AT_ENTRY 9, AT_RANDOM 25, AT_NULL. */
+    /* The auxiliary vector: AT_PHDR 3, AT_PHENT 4, AT_PHNUM 5, AT_PAGESZ 6,
+     * AT_ENTRY 9, AT_RANDOM 25, AT_NULL. */
     uint64_t aux[] = { 3, phdr_at, 4, 56, 5, phdr_num, 6, PAGE_SIZE, 9, entry_at, 25, random, 0, 0 };
-    int words = argc + 2 + 1 + (int)(sizeof(aux) / 8);   /* argc, argv..NULL, envp NULL, auxv */
+    int words = n + 2 + 1 + (int)(sizeof(aux) / 8);   /* argc, argv..NULL, envp..NULL, auxv */
     if (words % 2) sp -= 8;               // keep the final rsp 16-byte aligned
     for (int i = (int)(sizeof(aux) / 8) - 1; i >= 0; i--) {
         sp -= 8;
         *(uint64_t *)(page + (sp - base)) = aux[i];
     }
     sp -= 8;
-    *(uint64_t *)(page + (sp - base)) = 0;   /* envp */
+    *(uint64_t *)(page + (sp - base)) = 0;   /* the environment's NULL */
+    for (int i = n - 1; i >= argc; i--) {
+        sp -= 8;
+        *(uint64_t *)(page + (sp - base)) = ptrs[i];
+    }
     sp -= 8;
     *(uint64_t *)(page + (sp - base)) = 0;   /* argv's NULL */
     for (int i = argc - 1; i >= 0; i--) {
@@ -1596,7 +1636,7 @@ static int spawn_as(const uint8_t *data, uint32_t size, const char *path, int ar
                  !vm_add(&p->vm, image_end, image_end, VM_READ | VM_WRITE, VM_ANON, 0) ||
                  map_user_range(root, USER_TOP - PAGE_SIZE, USER_TOP) != 0))
         err = PROC_ERR_NO_MEMORY;
-    if (!err && !(sp = build_stack(root, argc, argv, entry))) err = PROC_ERR_NO_MEMORY;
+    if (!err && !(sp = build_stack(root, argc, 0, argv, entry))) err = PROC_ERR_NO_MEMORY;
     if (err) {
         vm_free(&p->vm);
         paging_free_address_space(root);
@@ -2220,6 +2260,31 @@ static int64_t sys_mmap2(uint64_t len, uint64_t prot, int64_t fd, uint64_t offse
     return (int64_t)a;
 }
 
+/* mmapat(addr, len, prot, fd): memory at addr exactly (MAP_FIXED), in place
+ * of whatever was mapped there: zeroed memory (fd -1) or shared memory from
+ * its start. Programs reserve a range first and then fill parts of it. */
+static int64_t sys_mmapat(uint64_t addr, uint64_t len, uint64_t prot, int64_t fd) {
+    process_t *p = P();
+    len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    if ((addr & (PAGE_SIZE - 1)) || !len || addr < USER_MMAP_LOW || addr + len > USER_TOP - USER_STACK_SIZE ||
+        addr + len < addr)
+        return SYSERR_BADCALL;
+    int vp = VM_READ | ((prot & PROT_WRITE) ? VM_WRITE : 0);
+    vm_object_t *o = 0;
+    if (fd >= 0) {
+        file_t *f = fd_get((uint64_t)fd);
+        if (!f || f->kind != F_SHM) return SYSERR_BADFD;
+        o = f->shm;
+        vm_object_get(o);
+    }
+    vm_unmap_range(p->root, &p->vm, addr, len);         /* (nothing there is fine) */
+    if (!vm_add(&p->vm, addr, addr + len, vp, o ? VM_SHM : VM_ANON, o)) {
+        if (o) vm_object_put(o);
+        return SYSERR_NOMEM;
+    }
+    return (int64_t)addr;
+}
+
 static int64_t sys_shmfd(uint64_t op, uint64_t a, uint64_t b) {
     char name[32];
     name[0] = 0;
@@ -2307,29 +2372,39 @@ static int64_t sys_fork(struct exc_frame *f) {
 
 /* Replace this program with another; its descriptors and folder stay. On
  * success the frame starts the new program (0 is returned, and not used). */
-static int64_t sys_exec(struct exc_frame *f, uint64_t path_ptr, uint64_t argv_ptr) {
+/* Copy a NULL-ended array of user strings into strings (STRINGS bytes,
+ * used so far) and out[at...]: how many, or -1. */
+#define STRINGS 3072
+static int copy_user_strings(uint64_t array, char *strings, size_t *used, char **out, int at) {
+    int n = 0;
+    for (; array && at + n < MAX_ARGS; n++) {
+        uint64_t slot = array + (uint64_t)n * 8;
+        if (!user_range_ok(slot, 8, 0)) return -1;
+        uint64_t s = *(const uint64_t *)slot;
+        if (!s) break;
+        if (*used >= STRINGS || copy_user_string(strings + *used, s, STRINGS - *used) != 0) return -1;
+        out[at + n] = strings + *used;
+        *used += strlen(out[at + n]) + 1;
+    }
+    return n;
+}
+
+static int64_t sys_exec(struct exc_frame *f, uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr) {
     process_t *p = P();
     task_t *me = task_current();
     if (p->threads > 1) return SYSERR_AGAIN;
     char path[MAX_PATH];
     if (copy_user_string(path, path_ptr, sizeof(path)) != 0) return SYSERR_FAULT;
-    char *strings = kmalloc(1024), *argv[MAX_ARGS];
+    char *strings = kmalloc(STRINGS), *argv[MAX_ARGS];     /* the arguments, then the environment */
     if (!strings) return SYSERR_NOMEM;
-    int argc = 0;
     size_t used = 0;
-    for (; argv_ptr && argc < MAX_ARGS; argc++) {
-        uint64_t slot = argv_ptr + (uint64_t)argc * 8;
-        if (!user_range_ok(slot, 8, 0)) { kfree(strings); return SYSERR_FAULT; }
-        uint64_t s = *(const uint64_t *)slot;
-        if (!s) break;
-        if (used >= 1024 || copy_user_string(strings + used, s, 1024 - used) != 0) {
-            kfree(strings);
-            return SYSERR_FAULT;
-        }
-        argv[argc] = strings + used;
-        used += strlen(argv[argc]) + 1;
-    }
+    int argc = copy_user_strings(argv_ptr, strings, &used, argv, 0);
     if (argc == 0) argv[argc++] = path;
+    int envc = argc < 0 ? -1 : copy_user_strings(envp_ptr, strings, &used, argv, argc);
+    if (argc < 0 || envc < 0) {
+        kfree(strings);
+        return SYSERR_FAULT;
+    }
     uint32_t size = 0;
     char big[MAX_PATH];
     uint8_t *image = find_program_from(user_cwd(), path, &size, big);
@@ -2346,7 +2421,7 @@ static int64_t sys_exec(struct exc_frame *f, uint64_t path_ptr, uint64_t argv_pt
     int ok = entry && vm_add(&vm, stack_lo, USER_TOP, VM_READ | VM_WRITE, VM_ANON, 0) &&
              vm_add(&vm, image_end, image_end, VM_READ | VM_WRITE, VM_ANON, 0) &&
              map_user_range(root, USER_TOP - PAGE_SIZE, USER_TOP) == 0 &&
-             (sp = build_stack(root, argc, argv, entry)) != 0;
+             (sp = build_stack(root, argc, envc, argv, entry)) != 0;
     kfree(image);
     kfree(strings);
     if (!ok) {
@@ -2632,6 +2707,8 @@ static int64_t sys_system(uint64_t op, uint64_t a, uint64_t b) {
         }
         case SYSTEM_CPUS:
             return smp_cpu_count();
+        case SYSTEM_PAGES:
+            return (long)((a ? physmem_total() - physmem_used() : physmem_total()) / 4096);
         case SYSTEM_POINTER: {
             if (!user_range_ok(a, sizeof(struct os_pointer), b ? 0 : 1)) return SYSERR_FAULT;
             if (b) mouse_set_settings((const struct os_pointer *)a);

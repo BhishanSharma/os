@@ -60,7 +60,7 @@
 
 /* Programs (stage 4) */
 #define SYS_FORK      43 /* fork(): a copy (copy-on-write) of this program -> child pid, 0 in the child */
-#define SYS_EXEC      44 /* exec(path, argv): replace this program        -> only on error */
+#define SYS_EXEC      44 /* exec(path, argv, envp): replace this program (envp 0: none) -> only on error */
 
 /* Threads (stage 2) */
 #define SYS_THREAD    45 /* thread(entry, arg, stack_top)                  -> thread id (wait() joins it) */
@@ -94,6 +94,8 @@
                             (shared), offset page aligned -> address */
 #define SYS_FDFLAGS   70 /* fdflags(fd, set): -1 reads; else FD_CLOEXEC (1) on/off -> the flags */
 #define SYS_EXEPATH   71 /* exepath(buf, size): this program's file (/proc/self/exe) -> length */
+#define SYS_FDPATH    73 /* fdpath(fd, buf, size): the path of an open file (one received from another program too) -> length */
+#define SYS_MMAPAT    72 /* mmapat(addr, len, prot, fd): MAP_FIXED; fd -1 zeroed, or shared memory -> addr */
 #define SYS_POLLWAIT  67 /* pollwait(gen, ms, net): gen -1 -> the I/O counter; else sleep until it is
                             not gen (a pipe or local socket changed), the next interrupt (net = 1:
                             TCP sockets are watched too) or ms pass -> the counter */
@@ -111,6 +113,7 @@
 #define SYSTEM_LOG          9  /* a = struct os_log *: the system log         -> bytes copied */
 #define SYSTEM_CPUS        10  /* -> how many cores run programs */
 #define SYSTEM_POINTER     11  /* a = struct os_pointer *, b = 1 set, 0 read -> 0 */
+#define SYSTEM_PAGES       12  /* a = 0 all, 1 free: memory in 4 KiB pages */
 
 /* The mouse and the touchpad (System Settings). Speeds 0..100, 50 = normal. */
 struct os_pointer {

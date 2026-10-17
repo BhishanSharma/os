@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include "sys/users.h"
 
-#define MAX_TASKS   64
+#define MAX_TASKS   256       /* threads count: a browser has dozens */
 #define TASK_SLICE  5         /* timer ticks (50 ms) a program runs before the next one */
 
 typedef enum { TASK_FREE, TASK_READY, TASK_SLEEPING, TASK_ZOMBIE, TASK_BLOCKED } task_state_t;

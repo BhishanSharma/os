@@ -64,6 +64,8 @@ private:
 };
 
 class BrowserWindow {
+    AK_ALLOC_WITH_KMALLOC;
+
 public:
     static ErrorOr<NonnullOwnPtr<BrowserWindow>> create(Vector<URL::URL> const& urls)
     {
@@ -116,7 +118,8 @@ private:
         m_event_timer = Core::Timer::create_repeating(8, [this] { pump_events(); });
         m_event_timer->start();
 
-        auto start = urls.is_empty() ? URL::URL {} : urls.first();
+        // (On a first run Ladybird puts about:welcome before the URL asked for: open the latter.)
+        auto start = urls.is_empty() ? URL::URL {} : urls.last();
         if (urls.is_empty()) {
             m_editing = true;
             m_address = {};
@@ -262,7 +265,7 @@ private:
     void pump_events()
     {
         bool toolbar_changed = false;
-        while (auto event = m_window.next_event()) {
+        for (Optional<WindowEvent> event; (event = m_window.next_event()).has_value();) {
             switch (event->type) {
             case WindowEvent::Key:
                 toolbar_changed |= handle_key(event->key);
@@ -322,7 +325,14 @@ private:
                 m_click_count = 1;
         }
         m_buttons = buttons;
-        Web::MouseEvent mouse { type, position, position, button, buttons, Web::UIEvents::KeyModifier::Mod_None, dx, dy };
+        Web::MouseEvent mouse {};
+        mouse.type = type;
+        mouse.position = position;
+        mouse.screen_position = position;
+        mouse.button = button;
+        mouse.buttons = buttons;
+        mouse.wheel_delta_x = dx;
+        mouse.wheel_delta_y = dy;
         mouse.click_count = m_click_count;
         m_view->enqueue_input_event(move(mouse));
     }
@@ -372,7 +382,7 @@ private:
     {
         if (m_editing) {
             if (key == '\n' || key == '\r') {
-                if (auto url = WebView::sanitize_url(m_address, WebView::Application::settings().search_engine()); url.has_value()) {
+                if (auto url = WebView::sanitize_url(m_address, WebView::Application::settings().search_engine_settings().engine); url.has_value()) {
                     m_editing = false;
                     m_address = url->serialize().to_byte_string();
                     m_view->load(*url);
@@ -382,8 +392,7 @@ private:
                     m_address = m_address.substring(0, utf8_start_of_last(m_address));
             } else if (key == 27) {
                 m_editing = false;
-                if (auto url = m_view->url(); url.has_value())
-                    m_address = url->serialize().to_byte_string();
+                m_address = m_view->url().serialize().to_byte_string();
             } else if (key == 21) {                     // Ctrl+U: clear
                 m_address = {};
             } else if (key >= 32 && key < 0x100 && key != 127) {
@@ -471,6 +480,7 @@ private:
     int m_click_count { 0 };
 };
 
+Application::Application() = default;
 Application::~Application() = default;
 
 ErrorOr<void> Application::open_window()

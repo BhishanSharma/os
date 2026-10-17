@@ -9,6 +9,8 @@
 
 #include <AK/LexicalPath.h>
 #include <LibMain/Main.h>
+#include <sys/stat.h>
+#include <unicode/putil.h>
 
 #define HELPER(name) ErrorOr<int> name##_main(Main::Arguments);
 HELPER(AudioServer)
@@ -26,6 +28,11 @@ ErrorOr<int> browser_main(Main::Arguments);
 
 ErrorOr<int> ladybird_main(Main::Arguments arguments)
 {
+    // ICU's data is one file the whole system shares (icudt78l.dat): in /SYS
+    // on an installed system, else at the top of the RAM disk.
+    struct stat st;
+    u_setDataDirectory(stat("/SYS/ICUDT78L.DAT", &st) == 0 ? "/SYS" : "/");
+
     struct Helper {
         StringView name;
         ErrorOr<int> (*main)(Main::Arguments);

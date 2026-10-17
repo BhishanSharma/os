@@ -130,7 +130,7 @@ int vm_fault(uint64_t root, vm_space_t *s, uint64_t addr, int write) {
 
 uint64_t vm_map(vm_space_t *s, uint64_t len, int prot, int kind, vm_object_t *obj) {
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-    if (!len || len > (1ULL << 40)) return 0;
+    if (!len || len > (1ULL << 46)) return 0;           /* 64 TiB: reservations (JavaScript cages) */
     uint64_t start = s->mmap_next - len - PAGE_SIZE;         /* a gap between mappings */
     if (!vm_add(s, start, start + len, prot, kind, obj)) return 0;
     s->mmap_next = start;
@@ -140,7 +140,11 @@ uint64_t vm_map(vm_space_t *s, uint64_t len, int prot, int kind, vm_object_t *ob
 static void drop_range(uint64_t root, uint64_t lo, uint64_t hi) {
     for (uint64_t v = lo; v < hi; v += PAGE_SIZE) {
         uint64_t *pte = paging_user_pte(root, v, 0);
-        if (pte && (*pte & PAGE_PRESENT)) {
+        if (!pte) {                                   /* no page table: 2 MiB with nothing mapped */
+            v = (v | 0x1FFFFFULL) + 1 - PAGE_SIZE;
+            continue;
+        }
+        if (*pte & PAGE_PRESENT) {
             drop_page(*pte & 0x000FFFFFFFFFF000ULL);
             *pte = 0;
             __asm__ volatile("invlpg (%0)" :: "r"(v) : "memory");
@@ -290,6 +294,21 @@ int vm_shm_resize(vm_object_t *o, uint64_t size) {
     o->pages = pages;
     o->size = size;
     return 0;
+}
+
+int64_t vm_shm_copy(vm_object_t *o, uint64_t offset, void *buf, uint64_t len, int write) {
+    if (offset >= o->size) return 0;
+    if (len > o->size - offset) len = o->size - offset;
+    for (uint64_t done = 0; done < len;) {
+        uint64_t i = (offset + done) / PAGE_SIZE, in = (offset + done) % PAGE_SIZE;
+        uint64_t n = PAGE_SIZE - in < len - done ? PAGE_SIZE - in : len - done;
+        if (!o->pages[i] && !(o->pages[i] = new_page(1))) return done ? (int64_t)done : -1;
+        uint8_t *page = (uint8_t *)page_address(o->pages[i]) + in;
+        if (write) memcpy(page, (const uint8_t *)buf + done, n);
+        else memcpy((uint8_t *)buf + done, page, n);
+        done += n;
+    }
+    return (int64_t)len;
 }
 
 void vm_shm_unlink(const char *name) {

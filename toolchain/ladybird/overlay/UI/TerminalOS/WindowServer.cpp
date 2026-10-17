@@ -100,7 +100,7 @@ ErrorOr<TOSWindow> TOSWindow::open(StringView title, int width, int height)
     request.w = width;
     request.h = height;
     request.pid = getpid();
-    title.copy_characters_to_buffer(request.title, sizeof(request.title));
+    (void)title.copy_characters_to_buffer(request.title, sizeof(request.title));
     WS::Reply reply {};
     int n = call(request, reply);
     if (n < (int)sizeof(reply) || reply.id < 0)
@@ -139,12 +139,12 @@ Optional<WindowEvent> TOSWindow::next_event()
     if (s->ev_tail == s->ev_head)
         return {};
     WindowEvent event = s->ev[s->ev_tail % WS::EVENTS];
-    s->ev_tail++;
+    s->ev_tail = s->ev_tail + 1;
     // Moves with no button down: only the latest matters.
     while (event.type == WindowEvent::MouseMove && !event.buttons && s->ev_tail != s->ev_head
         && s->ev[s->ev_tail % WS::EVENTS].type == WindowEvent::MouseMove && !s->ev[s->ev_tail % WS::EVENTS].buttons) {
         event = s->ev[s->ev_tail % WS::EVENTS];
-        s->ev_tail++;
+        s->ev_tail = s->ev_tail + 1;
     }
     return event;
 }
@@ -155,7 +155,7 @@ void TOSWindow::set_title(StringView title)
     request.op = WS::TITLE;
     request.id = m_id;
     request.pid = getpid();
-    title.copy_characters_to_buffer(request.title, sizeof(request.title));
+    (void)title.copy_characters_to_buffer(request.title, sizeof(request.title));
     send(request);
 }
 
@@ -181,7 +181,8 @@ void TOSWindow::damage(int x, int y, int w, int h)
 void TOSWindow::present()
 {
     auto* s = (WS::Surface*)m_surface;
-    unsigned frame = ++s->damage;
+    unsigned frame = s->damage + 1;
+    s->damage = frame;
     // Wait (50 ms at most) until the server has read the frame.
     timespec start;
     clock_gettime(CLOCK_MONOTONIC, &start);

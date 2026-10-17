@@ -12,7 +12,11 @@ img="$tmp/ramdisk.img"
 dd if=/dev/zero of="$img" bs=1M count="$mb" 2>/dev/null
 mformat -i "$img" -F -c 1 -v RAMDISK ::
 for f in "$dir"/*; do
-    [ -f "$f" ] && mcopy -i "$img" "$f" "::$(basename "$f")"
+    if [ -f "$f" ]; then
+        mcopy -i "$img" "$f" "::$(basename "$f")"
+    elif [ -d "$f" ]; then              # a folder, with everything in it
+        mcopy -s -i "$img" "$f" "::$(basename "$f")"
+    fi
 done
 mkdir -p "$(dirname "$out")"
 gzip -9 -n -c "$img" > "$out"

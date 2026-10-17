@@ -1,0 +1,9 @@
+prefix=/usr
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: libtommath
+Description: Multiple-precision integer library
+Version: 1.3.0
+Libs: -L${libdir} -ltommath
+Cflags: -I${includedir}

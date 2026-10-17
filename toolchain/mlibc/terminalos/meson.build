@@ -17,6 +17,7 @@ if not headers_only
 		'generic/entry.cpp',
 		'generic/sysdeps.cpp',
 		'generic/net.cpp',
+		'generic/glibc_compat.cpp',
 		'threading/thread-entry.S',
 	)
 endif

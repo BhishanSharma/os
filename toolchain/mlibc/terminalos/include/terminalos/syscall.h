@@ -54,6 +54,8 @@
 #define TOS_MMAP2      69
 #define TOS_FDFLAGS    70
 #define TOS_EXEPATH    71
+#define TOS_MMAPAT     72
+#define TOS_FDPATH     73
 
 #define TOS_SOCK_READABLE  1
 #define TOS_SOCK_WRITABLE  2
@@ -82,6 +84,7 @@
 #define TOS_USOCK_MAX_FDS 16
 
 #define TOS_SYSTEM_CPUS 10
+#define TOS_SYSTEM_PAGES 12
 
 #define TOS_OPEN_READ   0
 #define TOS_OPEN_WRITE  1

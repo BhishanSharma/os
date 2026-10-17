@@ -58,6 +58,8 @@ vm_object_t *vm_shm_new(const char *name, uint64_t size);   /* size may be 0 (re
 int vm_shm_resize(vm_object_t *o, uint64_t size);          /* grow or shrink -> 0 */
 void vm_shm_unlink(const char *name);                      /* the name only; mappings stay */
 uint64_t vm_object_size(vm_object_t *o);
+/* read()/write() on a shared memory descriptor: bytes copied (to its size) or -1. */
+int64_t vm_shm_copy(vm_object_t *o, uint64_t offset, void *buf, uint64_t len, int write);
 void vm_object_get(vm_object_t *o);
 void vm_object_put(vm_object_t *o);
 

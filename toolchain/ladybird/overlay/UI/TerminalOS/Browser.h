@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/OwnPtr.h>
+#include <LibMain/Main.h>
 #include <LibWebView/Application.h>
 
 namespace Ladybird {
@@ -31,5 +32,7 @@ private:
 
     OwnPtr<BrowserWindow> m_window;
 };
+
+ErrorOr<int> browser_main(Main::Arguments);
 
 }

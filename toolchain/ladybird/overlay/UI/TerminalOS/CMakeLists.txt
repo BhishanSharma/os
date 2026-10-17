@@ -29,6 +29,6 @@ target_link_libraries(ladybird PRIVATE
     LibWebView LibWeb LibCore LibGfx LibIPC LibMain LibURL LibSandbox LibThreading LibFileSystem
     webcontentservice requestserverservice imagedecoderservice compositorservice
     audioserverservice mediaserverservice webworkerservice
-    LibAudio LibMedia OpenSSL::Crypto OpenSSL::SSL)
+    LibAudio LibMedia OpenSSL::Crypto OpenSSL::SSL skia ICU::uc)
 set_target_properties(ladybird PROPERTIES OUTPUT_NAME "Ladybird")
 create_ladybird_bundle(ladybird)
