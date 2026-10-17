@@ -1,0 +1,1 @@
+-lcurl -lnghttp2 -lssl -lcrypto -lharfbuzz -lfreetype -lpng16 -ljpeg -licui18n -licuuc -licudata -lz -pthread

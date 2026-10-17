@@ -48,6 +48,7 @@ vm_region_t *vm_add(vm_space_t *s, uint64_t start, uint64_t end, int prot, int k
     r->kind = kind;
     r->obj = obj;
     r->offset = 0;
+    r->limit = 0;
     r->next = s->regions;
     s->regions = r;
     return r;
@@ -107,8 +108,9 @@ int vm_fault(uint64_t root, vm_space_t *s, uint64_t addr, int write) {
         if (!(phys = new_page(0))) return -1;
         if (r->kind == VM_FILE) {
             uint64_t off = r->offset + page - r->start;
-            if (off < r->obj->size) {
-                uint64_t n = r->obj->size - off < PAGE_SIZE ? r->obj->size - off : PAGE_SIZE;
+            uint64_t end = r->limit && r->limit < r->obj->size ? r->limit : r->obj->size;
+            if (off < end) {
+                uint64_t n = end - off < PAGE_SIZE ? end - off : PAGE_SIZE;
                 kmutex_lock(&vfs_lock);
                 int got = vfs_read_at(&r->obj->file, (uint32_t)off, phys_to_virt(phys), (uint32_t)n);
                 kmutex_unlock(&vfs_lock);
@@ -174,6 +176,7 @@ int vm_unmap_range(uint64_t root, vm_space_t *s, uint64_t addr, uint64_t len) {
             if (!tail) return -1;
             if (r->obj) r->obj->refs++;
             tail->offset = r->offset + (hi - r->start);
+            tail->limit = r->limit;
             r->end = lo;
         }
         p = &r->next;
@@ -244,6 +247,65 @@ vm_object_t *vm_shm_object(const char *name, uint64_t size) {
     return o;
 }
 
+vm_object_t *vm_shm_find(const char *name) {
+    for (vm_object_t *o = shm_list; o; o = o->next_shm)
+        if (!strcmp(o->name, name)) {
+            o->refs++;
+            return o;
+        }
+    return 0;
+}
+
+vm_object_t *vm_shm_new(const char *name, uint64_t size) {
+    vm_object_t *o = kmalloc(sizeof(*o));
+    if (!o) return 0;
+    memset(o, 0, sizeof(*o));
+    o->kind = VM_SHM;
+    o->refs = 1;
+    if (vm_shm_resize(o, size) != 0) {
+        kfree(o);
+        return 0;
+    }
+    if (name && name[0]) {
+        kstrncpy(o->name, name, sizeof(o->name));
+        o->next_shm = shm_list;
+        shm_list = o;
+    }
+    return o;
+}
+
+int vm_shm_resize(vm_object_t *o, uint64_t size) {
+    size = (size + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    if (size > (1ULL << 32)) return -1;
+    uint64_t old = o->size / PAGE_SIZE, now = size / PAGE_SIZE;
+    if (now == old && o->pages) return 0;
+    uint64_t *pages = kmalloc((now ? now : 1) * sizeof(uint64_t));
+    if (!pages) return -1;
+    memset(pages, 0, (now ? now : 1) * sizeof(uint64_t));
+    for (uint64_t i = 0; i < old; i++) {
+        if (i < now) pages[i] = o->pages[i];
+        else if (o->pages[i]) page_free(o->pages[i]);   /* (a mapping keeps its own reference) */
+    }
+    kfree(o->pages);
+    o->pages = pages;
+    o->size = size;
+    return 0;
+}
+
+void vm_shm_unlink(const char *name) {
+    for (vm_object_t **p = &shm_list; *p; p = &(*p)->next_shm)
+        if (!strcmp((*p)->name, name)) {
+            vm_object_t *o = *p;
+            *p = o->next_shm;
+            o->name[0] = 0;
+            return;
+        }
+}
+
+uint64_t vm_object_size(vm_object_t *o) { return o->size; }
+void vm_object_get(vm_object_t *o) { if (o) o->refs++; }
+void vm_object_put(vm_object_t *o) { obj_put(o); }
+
 struct fork_ctx { uint64_t dst; vm_space_t *src; int failed; };
 
 static void fork_page(uint64_t virt, uint64_t *pte, void *arg) {
@@ -280,6 +342,7 @@ int vm_fork(uint64_t src_root, vm_space_t *src, uint64_t dst_root, vm_space_t *d
         vm_region_t *copy = vm_add(dst, r->start, r->end, r->prot, r->kind, r->obj);
         if (!copy) return -1;
         copy->offset = r->offset;
+        copy->limit = r->limit;
     }
     struct fork_ctx c = { dst_root, src, 0 };
     paging_walk_user(src_root, fork_page, &c);

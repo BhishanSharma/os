@@ -36,16 +36,24 @@ inline int to_errno(long r) {
 	case TOS_ERR_CLOSED: return EPIPE;
 	case TOS_ERR_NOROUTE: return ENETUNREACH;
 	case TOS_ERR_INUSE: return EADDRINUSE;
+	case TOS_ERR_PIPE: return EPIPE;
+	case TOS_ERR_WOULDBLOCK: return EAGAIN;
 	default: return EIO;
 	}
 }
 
-// File descriptors: the kernel's are below 32; the port's are above.
+// File descriptors: the kernel's are below 64 (files, pipes, local sockets);
+// the port's are above.
 constexpr int SOCK_BASE = 64, MAX_SOCKS = 64;     // 64..127: sockets
 constexpr int VF_BASE = 128, MAX_VFILES = 32;     // 128..159: /dev/null, /etc/services...
 constexpr int DIR_BASE = 4096;                    // open directories (never in select())
 
 bool is_socket(int fd);
+// FD_CLOEXEC of a kernel descriptor (exec closes it there).
+inline void set_cloexec(int fd, bool on) {
+	if (fd >= 0 && fd < SOCK_BASE)
+		sc(TOS_FDFLAGS, fd, on ? 1 : 0);
+}
 bool is_vfile(int fd);
 
 // Sockets and built-in files (net.cpp).

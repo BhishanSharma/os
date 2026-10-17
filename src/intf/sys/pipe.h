@@ -20,4 +20,10 @@ int64_t pipe_write(pipe_t *p, const void *buf, uint64_t len);
 /* For poll(): bytes waiting, free room, and whether the other side is gone. */
 void pipe_state(pipe_t *p, uint32_t *waiting, uint32_t *room, int *no_writers, int *no_readers);
 
+/* poll(): a counter that grows whenever a pipe or local socket changes.
+ * io_wait sleeps until it differs from `gen` or `ms` pass -> 1 it changed. */
+void io_event(void);
+uint64_t io_generation(void);
+int io_wait(uint64_t gen, uint32_t ms);
+
 #endif

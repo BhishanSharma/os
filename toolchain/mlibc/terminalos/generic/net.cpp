@@ -4,7 +4,9 @@
 // sockinfo); here they get file descriptors, O_NONBLOCK, poll() and the BSD
 // calls. There is no UDP for programs: a datagram socket can only ask DNS
 // questions (port 53), and the answer comes from the kernel's resolver, so
-// mlibc's getaddrinfo works unchanged. /etc/services, /etc/hosts,
+// mlibc's getaddrinfo works unchanged. Local (Unix-domain) stream sockets are
+// the kernel's own descriptors, passing files with SCM_RIGHTS.
+// /etc/services, /etc/hosts,
 // /etc/resolv.conf, /dev/null, /dev/zero and /dev/urandom are built in.
 
 #include "common.hpp"
@@ -19,6 +21,7 @@
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <time.h>
 
 namespace tos {
@@ -56,6 +59,61 @@ int new_socket(int type, bool nonblock, int k, int *fd) {
 			return 0;
 		}
 	return EMFILE;
+}
+
+// ---- Local (Unix-domain) sockets: the kernel's descriptors -------------------------
+
+bool local(int fd) {
+	if (fd < 0 || fd >= SOCK_BASE)
+		return false;
+	long fl = sc(TOS_FDINFO, fd);
+	return fl >= 0 && (fl & TOS_SOCK_LOCAL);
+}
+
+bool knonblock[SOCK_BASE];                          // O_NONBLOCK of the kernel's descriptors
+
+// Pipes and local sockets: the kernel answers EAGAIN instead of waiting.
+int set_nonblock(int fd, bool on) {
+	long r = sc(TOS_USOCK, TOS_USOCK_NONBLOCK, fd, on);
+	if (r < 0 && r != TOS_ERR_BADFD)
+		return to_errno(r);
+	knonblock[fd] = on;                             // (files never wait anyway)
+	return 0;
+}
+
+int local_name(const struct sockaddr *addr, socklen_t len, char *out) {
+	size_t base = offsetof(sockaddr_un, sun_path);
+	if (!addr || len <= base || addr->sa_family != AF_UNIX)
+		return EINVAL;
+	const sockaddr_un *un = (const sockaddr_un *)addr;
+	size_t n = len - base < sizeof(un->sun_path) ? len - base : sizeof(un->sun_path);
+	if (!un->sun_path[0])
+		return EINVAL;                              // (no abstract names)
+	memcpy(out, un->sun_path, n);
+	out[n] = 0;
+	return 0;
+}
+
+void fill_local(const char *name, struct sockaddr *addr, socklen_t *len) {
+	if (!addr || !len)
+		return;
+	sockaddr_un un = {};
+	un.sun_family = AF_UNIX;
+	strncpy(un.sun_path, name, sizeof(un.sun_path) - 1);
+	socklen_t full = offsetof(sockaddr_un, sun_path) + strlen(un.sun_path) + 1;
+	memcpy(addr, &un, *len < full ? *len : full);
+	*len = full;
+}
+
+int local_io(int fd, bool write, void *buf, size_t len, int flags, ssize_t *done) {
+	if ((flags & MSG_DONTWAIT) && !knonblock[fd] &&
+	    !(sc(TOS_FDINFO, fd) & (write ? TOS_SOCK_WRITABLE : TOS_SOCK_READABLE)))
+		return EAGAIN;
+	long r = sc(write ? TOS_WRITE : TOS_READ, fd, (long)buf, (long)len);
+	if (r < 0)
+		return to_errno(r);
+	*done = r;
+	return 0;
 }
 
 int sockinfo(Sock *s, tos_sockinfo *si) {
@@ -242,7 +300,12 @@ short ready(int fd, short events) {
 
 int poll_ms(struct pollfd *fds, nfds_t count, long timeout, int *num) {
 	long start = now_ms();
+	bool net = false;                               // TCP: packets come without waking anyone
+	for (nfds_t i = 0; i < count; i++)
+		if (Sock *s = sock(fds[i].fd); s && s->type == SOCK_STREAM)
+			net = true;
 	for (;;) {
+		long gen = sc(TOS_POLLWAIT, -1);
 		int n = 0;
 		for (nfds_t i = 0; i < count; i++) {
 			fds[i].revents = fds[i].fd < 0 ? 0 : ready(fds[i].fd, fds[i].events);
@@ -253,7 +316,8 @@ int poll_ms(struct pollfd *fds, nfds_t count, long timeout, int *num) {
 			*num = n;
 			return 0;
 		}
-		sc(TOS_SLEEP, 2);                           // (no kernel wait yet: look again soon)
+		long left = timeout < 0 ? 0x7FFFFFF : timeout - (now_ms() - start);
+		sc(TOS_POLLWAIT, gen, left > 0 ? left : 1, net);   // until a pipe or local socket changes
 	}
 }
 
@@ -403,16 +467,58 @@ using namespace tos;
 namespace mlibc {
 
 int Sysdeps<Socket>::operator()(int family, int type, int, int *fd) {
+	bool nonblock = type & SOCK_NONBLOCK, cloexec = type & SOCK_CLOEXEC;
+	type &= ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
+	if (family == AF_UNIX) {
+		if (type != SOCK_STREAM)
+			return EPROTONOSUPPORT;
+		long r = sc(TOS_USOCK, TOS_USOCK_NEW);
+		if (r < 0)
+			return to_errno(r);
+		*fd = (int)r;
+		set_cloexec(*fd, cloexec);
+		return set_nonblock(*fd, nonblock);
+	}
 	if (family != AF_INET)
 		return EAFNOSUPPORT;
-	bool nonblock = type & SOCK_NONBLOCK;
-	type &= ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
 	if (type != SOCK_STREAM && type != SOCK_DGRAM)
 		return EPROTONOSUPPORT;
 	return new_socket(type, nonblock, -1, fd);
 }
 
+int Sysdeps<Socketpair>::operator()(int domain, int type, int, int *fds) {
+	bool nonblock = type & SOCK_NONBLOCK, cloexec = type & SOCK_CLOEXEC;
+	type &= ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
+	if (domain != AF_UNIX)
+		return EAFNOSUPPORT;
+	if (type != SOCK_STREAM)
+		return EPROTONOSUPPORT;
+	int pair[2];
+	long r = sc(TOS_USOCK, TOS_USOCK_PAIR, (long)pair);
+	if (r < 0)
+		return to_errno(r);
+	fds[0] = pair[0];
+	fds[1] = pair[1];
+	set_cloexec(pair[0], cloexec);
+	set_cloexec(pair[1], cloexec);
+	set_nonblock(pair[0], nonblock);
+	return set_nonblock(pair[1], nonblock);
+}
+
+// Local sockets: bind, listen, connect and accept by name.
+static int local_call(int op, int fd, const struct sockaddr *addr, socklen_t len) {
+	char name[sizeof(sockaddr_un::sun_path) + 1];
+	if (addr) {
+		if (int e = local_name(addr, len, name))
+			return e;
+	}
+	long r = sc(TOS_USOCK, op, fd, addr ? (long)name : 0);
+	return r < 0 ? to_errno(r) : 0;
+}
+
 int Sysdeps<Connect>::operator()(int fd, const struct sockaddr *addr, socklen_t len) {
+	if (local(fd))
+		return local_call(TOS_USOCK_CONNECT, fd, addr, len);
 	Sock *s = sock(fd);
 	if (!s)
 		return ENOTSOCK;
@@ -434,6 +540,8 @@ int Sysdeps<Connect>::operator()(int fd, const struct sockaddr *addr, socklen_t 
 }
 
 int Sysdeps<Bind>::operator()(int fd, const struct sockaddr *addr, socklen_t len) {
+	if (local(fd))
+		return local_call(TOS_USOCK_BIND, fd, addr, len);
 	Sock *s = sock(fd);
 	if (!s)
 		return ENOTSOCK;
@@ -444,6 +552,8 @@ int Sysdeps<Bind>::operator()(int fd, const struct sockaddr *addr, socklen_t len
 }
 
 int Sysdeps<Listen>::operator()(int fd, int) {
+	if (local(fd))
+		return local_call(TOS_USOCK_LISTEN, fd, nullptr, 0);
 	Sock *s = sock(fd);
 	if (!s || s->type != SOCK_STREAM)
 		return ENOTSOCK;
@@ -469,6 +579,15 @@ static void fill_addr(const unsigned char ip[4], uint16_t port, struct sockaddr 
 }
 
 int Sysdeps<Accept>::operator()(int fd, int *newfd, struct sockaddr *addr, socklen_t *len, int flags) {
+	if (local(fd)) {
+		long r = sc(TOS_USOCK, TOS_USOCK_ACCEPT, fd);
+		if (r < 0)
+			return to_errno(r);
+		*newfd = (int)r;
+		set_cloexec(*newfd, flags & SOCK_CLOEXEC);
+		fill_local("", addr, len);
+		return set_nonblock(*newfd, flags & SOCK_NONBLOCK);
+	}
 	Sock *s = sock(fd);
 	if (!s || s->k < 0)
 		return EINVAL;
@@ -489,6 +608,8 @@ int Sysdeps<Accept>::operator()(int fd, int *newfd, struct sockaddr *addr, sockl
 
 int Sysdeps<Sendto>::operator()(int fd, const void *buf, size_t size, int, const struct sockaddr *to,
                                 socklen_t, ssize_t *length) {
+	if (local(fd))
+		return local_io(fd, true, (void *)buf, size, 0, length);
 	Sock *s = sock(fd);
 	if (!s)
 		return ENOTSOCK;
@@ -497,6 +618,10 @@ int Sysdeps<Sendto>::operator()(int fd, const void *buf, size_t size, int, const
 
 int Sysdeps<Recvfrom>::operator()(int fd, void *buf, size_t size, int flags, struct sockaddr *from,
                                   socklen_t *fromlen, ssize_t *length) {
+	if (local(fd)) {
+		fill_local("", from, fromlen);
+		return local_io(fd, false, buf, size, flags, length);
+	}
 	Sock *s = sock(fd);
 	if (!s)
 		return ENOTSOCK;
@@ -514,7 +639,71 @@ int Sysdeps<Recvfrom>::operator()(int fd, void *buf, size_t size, int flags, str
 	return e;
 }
 
+// Local sockets: SCM_RIGHTS files go first, so they are there when the data is.
+static int local_sendmsg(int fd, const struct msghdr *hdr, int flags, ssize_t *length) {
+	bool has_fds = false;
+	for (cmsghdr *c = CMSG_FIRSTHDR(hdr); c; c = CMSG_NXTHDR((msghdr *)hdr, c))
+		if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS)
+			has_fds = true;
+	if (has_fds && (knonblock[fd] || (flags & MSG_DONTWAIT)) && !(sc(TOS_FDINFO, fd) & TOS_SOCK_WRITABLE))
+		return EAGAIN;                              // (not the files without the data)
+	for (cmsghdr *c = CMSG_FIRSTHDR(hdr); c; c = CMSG_NXTHDR((msghdr *)hdr, c))
+		if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS) {
+			long n = (long)((c->cmsg_len - CMSG_LEN(0)) / sizeof(int));
+			long r = sc(TOS_USOCK, TOS_USOCK_SENDFDS, fd, (long)CMSG_DATA(c), n);
+			if (r < 0)
+				return to_errno(r);
+		}
+	ssize_t total = 0;
+	for (int i = 0; i < (int)hdr->msg_iovlen; i++) {
+		ssize_t n = 0;
+		size_t want = hdr->msg_iov[i].iov_len;
+		if (!want)
+			continue;
+		int e = local_io(fd, true, hdr->msg_iov[i].iov_base, want, flags, &n);
+		if (e)
+			return total ? (*length = total, 0) : e;
+		total += n;
+		if ((size_t)n < want)
+			break;
+	}
+	*length = total;
+	return 0;
+}
+
+static int local_recvmsg(int fd, struct msghdr *hdr, int flags, ssize_t *length) {
+	*length = 0;
+	hdr->msg_flags = 0;
+	for (int i = 0; i < (int)hdr->msg_iovlen; i++)          // (into the first buffer with room)
+		if (hdr->msg_iov[i].iov_len) {
+			if (int e = local_io(fd, false, hdr->msg_iov[i].iov_base, hdr->msg_iov[i].iov_len, flags, length))
+				return e;
+			break;
+		}
+	size_t room = hdr->msg_control && hdr->msg_controllen > CMSG_LEN(0)
+	                  ? (hdr->msg_controllen - CMSG_LEN(0)) / sizeof(int) : 0;
+	if (room > TOS_USOCK_MAX_FDS)
+		room = TOS_USOCK_MAX_FDS;
+	long n = room ? sc(TOS_USOCK, TOS_USOCK_RECVFDS, fd, (long)CMSG_DATA((cmsghdr *)hdr->msg_control), (long)room) : 0;
+	if (n > 0) {
+		cmsghdr *c = (cmsghdr *)hdr->msg_control;
+		c->cmsg_level = SOL_SOCKET;
+		c->cmsg_type = SCM_RIGHTS;
+		c->cmsg_len = CMSG_LEN(n * sizeof(int));
+		hdr->msg_controllen = CMSG_SPACE(n * sizeof(int));
+		for (long i = 0; i < n; i++)
+			knonblock[((int *)CMSG_DATA(c))[i]] = false;
+	} else {
+		hdr->msg_controllen = 0;
+	}
+	if (hdr->msg_name && hdr->msg_namelen)
+		fill_local("", (struct sockaddr *)hdr->msg_name, &hdr->msg_namelen);
+	return 0;
+}
+
 int Sysdeps<MsgSend>::operator()(int fd, const struct msghdr *hdr, int flags, ssize_t *length) {
+	if (local(fd))
+		return local_sendmsg(fd, hdr, flags, length);
 	Sock *s = sock(fd);
 	if (!s)
 		return ENOTSOCK;
@@ -535,6 +724,8 @@ int Sysdeps<MsgSend>::operator()(int fd, const struct msghdr *hdr, int flags, ss
 }
 
 int Sysdeps<MsgRecv>::operator()(int fd, struct msghdr *hdr, int flags, ssize_t *length) {
+	if (local(fd))
+		return local_recvmsg(fd, hdr, flags, length);
 	Sock *s = sock(fd);
 	if (!s)
 		return ENOTSOCK;
@@ -549,20 +740,25 @@ int Sysdeps<MsgRecv>::operator()(int fd, struct msghdr *hdr, int flags, ssize_t 
 }
 
 int Sysdeps<Shutdown>::operator()(int fd, int) {
-	return sock(fd) ? 0 : ENOTSOCK;                 // (no half-close: the data still flows)
+	return sock(fd) || local(fd) ? 0 : ENOTSOCK;    // (no half-close: the data still flows)
 }
 
 int Sysdeps<SetSockopt>::operator()(int fd, int, int, const void *, socklen_t) {
-	return sock(fd) ? 0 : ENOTSOCK;                 // accepted and ignored
+	return sock(fd) || local(fd) ? 0 : ENOTSOCK;    // accepted and ignored
 }
 
 int Sysdeps<GetSockopt>::operator()(int fd, int layer, int number, void *__restrict buffer,
                                     socklen_t *__restrict size) {
 	Sock *s = sock(fd);
-	if (!s)
+	if (!s && !local(fd))
 		return ENOTSOCK;
 	int value = 0;
-	if (layer == SOL_SOCKET && number == SO_ERROR && s->k >= 0 && s->type == SOCK_STREAM) {
+	if (!s) {
+		if (layer == SOL_SOCKET && number == SO_TYPE)
+			value = SOCK_STREAM;
+		else if (layer == SOL_SOCKET && (number == SO_RCVBUF || number == SO_SNDBUF))
+			value = 16384;
+	} else if (layer == SOL_SOCKET && number == SO_ERROR && s->k >= 0 && s->type == SOCK_STREAM) {
 		tos_sockinfo si;
 		if (sockinfo(s, &si) & TOS_SOCK_ERROR)
 			value = ECONNRESET;
@@ -577,7 +773,20 @@ int Sysdeps<GetSockopt>::operator()(int fd, int layer, int number, void *__restr
 	return 0;
 }
 
+static int local_sockname(int fd, struct sockaddr *addr, socklen_t max, socklen_t *actual) {
+	char name[108];
+	long r = sc(TOS_USOCK, TOS_USOCK_NAME, fd, (long)name);
+	if (r < 0)
+		return to_errno(r);
+	socklen_t len = max;
+	fill_local(name, addr, &len);
+	*actual = len;
+	return 0;
+}
+
 int Sysdeps<Sockname>::operator()(int fd, struct sockaddr *addr, socklen_t max, socklen_t *actual) {
+	if (local(fd))
+		return local_sockname(fd, addr, max, actual);
 	Sock *s = sock(fd);
 	if (!s)
 		return ENOTSOCK;
@@ -595,6 +804,8 @@ int Sysdeps<Sockname>::operator()(int fd, struct sockaddr *addr, socklen_t max, 
 }
 
 int Sysdeps<Peername>::operator()(int fd, struct sockaddr *addr, socklen_t max, socklen_t *actual) {
+	if (local(fd))
+		return local_sockname(fd, addr, max, actual);
 	Sock *s = sock(fd);
 	if (!s)
 		return ENOTSOCK;
@@ -655,18 +866,24 @@ int Sysdeps<Fcntl>::operator()(int fd, int request, va_list args, int *result) {
 	Sock *s = sock(fd);
 	switch (request) {
 	case F_GETFL:
-		*result = O_RDWR | (s && s->nonblock ? O_NONBLOCK : 0);
+		*result = O_RDWR | ((s ? s->nonblock : fd >= 0 && fd < SOCK_BASE && knonblock[fd]) ? O_NONBLOCK : 0);
 		return 0;
 	case F_SETFL: {
 		int flags = va_arg(args, int);
 		if (s)
 			s->nonblock = flags & O_NONBLOCK;
+		else if (fd >= 0 && fd < SOCK_BASE)
+			if (int e = set_nonblock(fd, flags & O_NONBLOCK))
+				return e;
 		*result = 0;
 		return 0;
 	}
 	case F_GETFD:
+		*result = fd >= 0 && fd < SOCK_BASE && sc(TOS_FDFLAGS, fd, -1) == 1 ? FD_CLOEXEC : 0;
+		return 0;
 	case F_SETFD:
-		*result = 0;                                // (no exec yet keeps descriptors anyway)
+		set_cloexec(fd, va_arg(args, int) & FD_CLOEXEC);
+		*result = 0;
 		return 0;
 	case F_DUPFD:
 	case F_DUPFD_CLOEXEC: {
@@ -692,6 +909,8 @@ int Sysdeps<Ioctl>::operator()(int fd, unsigned long request, void *arg, int *re
 	Sock *s = sock(fd);
 	*result = 0;
 	if (request == FIONBIO) {
+		if (!s && fd >= 0 && fd < SOCK_BASE)
+			return set_nonblock(fd, *(int *)arg != 0);
 		if (!s)
 			return ENOTTY;
 		s->nonblock = *(int *)arg != 0;

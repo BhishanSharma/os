@@ -87,7 +87,16 @@
 #define SYS_AUTH      61 /* auth(name, password, struct os_user *): root only (login) -> 0 */
 #define SYS_TCB_SET   63 /* tcb_set(pointer): this thread's FS base (thread-local storage) -> 0 */
 #define SYS_SOCKINFO  64 /* sockinfo(socket, struct os_sockinfo *): for poll() -> flags (SOCK_*) */
-#define SYS_FDINFO    65 /* fdinfo(fd): for poll() -> SOCK_READABLE | SOCK_WRITABLE | SOCK_HANGUP */
+#define SYS_FDINFO    65 /* fdinfo(fd): for poll() -> SOCK_READABLE | SOCK_WRITABLE | SOCK_HANGUP (| SOCK_LOCAL) */
+#define SYS_USOCK     66 /* usock(op, a, b, c): local (Unix-domain) sockets, op = USOCK_* */
+#define SYS_SHMFD     68 /* shmfd(op, a, b): shared memory as a file descriptor, op = SHMFD_* */
+#define SYS_MMAP2     69 /* mmap2(len, prot, fd, offset): as SYS_MMAP; fd may be a shared memory fd
+                            (shared), offset page aligned -> address */
+#define SYS_FDFLAGS   70 /* fdflags(fd, set): -1 reads; else FD_CLOEXEC (1) on/off -> the flags */
+#define SYS_EXEPATH   71 /* exepath(buf, size): this program's file (/proc/self/exe) -> length */
+#define SYS_POLLWAIT  67 /* pollwait(gen, ms, net): gen -1 -> the I/O counter; else sleep until it is
+                            not gen (a pipe or local socket changed), the next interrupt (net = 1:
+                            TCP sockets are watched too) or ms pass -> the counter */
 #define SYS_SYSTEM    62 /* system(op, a, b): Wi-Fi, volume, battery, power, op = SYSTEM_* */
 
 #define SYSTEM_WIFI_STATUS  0  /* a = struct os_wifi * (the network joined)  -> 1 connected, 0 not, SYSERR_NOENT no card */
@@ -222,6 +231,7 @@ struct os_wifi {
 #define SYSERR_ROFS    -26   /* read-only volume */
 #define SYSERR_DEAD    -27   /* the port's receiver is gone */
 #define SYSERR_PIPE    -28   /* nobody reads the pipe any more */
+#define SYSERR_WOULDBLOCK -29 /* non-blocking: nothing to read, no room, nobody to accept */
 
 struct os_time {
     int year, month, day, hour, minute, second;
@@ -337,6 +347,30 @@ struct os_regnode {
 #define SOCK_HANGUP    4   /* the peer closed */
 #define SOCK_ERROR     8   /* reset, refused */
 #define SOCK_LISTENING 16
+#define SOCK_LOCAL     32   /* (fdinfo) a local socket, not a pipe or file */
+#define SOCK_SHM       64   /* (fdinfo) shared memory (SYS_SHMFD) */
+
+/* Shared memory descriptors (memfd_create, shm_open): mmap2 maps them shared;
+ * they pass to other programs like any descriptor. */
+#define SHMFD_NEW      0   /* a = name (0: anonymous; else opened if it exists), b = size -> fd */
+#define SHMFD_RESIZE   1   /* a = fd, b = size (ftruncate) -> 0 */
+#define SHMFD_SIZE     2   /* a = fd -> size */
+#define SHMFD_UNLINK   3   /* a = name -> 0, SYSERR_NOENT */
+#define SHMFD_EXISTS   4   /* a = name -> 1 or 0 */
+
+/* Local sockets: kernel descriptors; data with read()/write(). A name is only
+ * a key in the kernel's table, not a file. */
+#define USOCK_NEW      0   /* -> fd, not connected yet */
+#define USOCK_PAIR     1   /* a = int fds[2], connected to each other -> 0 */
+#define USOCK_BIND     2   /* a = fd, b = name -> 0 */
+#define USOCK_LISTEN   3   /* a = fd (bound) -> 0, SYSERR_INUSE */
+#define USOCK_CONNECT  4   /* a = fd, b = name -> 0, SYSERR_REFUSED */
+#define USOCK_ACCEPT   5   /* a = listening fd -> new fd, SYSERR_WOULDBLOCK */
+#define USOCK_SENDFDS  6   /* a = fd, b = const int *fds, c = count: they arrive with the next data -> 0 */
+#define USOCK_RECVFDS  7   /* a = fd, b = int *fds, c = room -> count received */
+#define USOCK_NONBLOCK 8   /* a = fd (any pipe or local socket), b = 1 on / 0 off -> 0 */
+#define USOCK_NAME     9   /* a = fd, b = char[108]: its name, or the listener it connected to -> 0 */
+#define USOCK_MAX_FDS 16   /* passed files waiting, each way */
 
 struct os_sockinfo {
     unsigned int available;    /* bytes waiting to be read */

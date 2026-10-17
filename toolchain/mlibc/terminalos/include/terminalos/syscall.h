@@ -48,12 +48,38 @@
 #define TOS_TCB_SET    63
 #define TOS_SOCKINFO   64
 #define TOS_FDINFO     65
+#define TOS_USOCK      66
+#define TOS_POLLWAIT   67
+#define TOS_SHMFD      68
+#define TOS_MMAP2      69
+#define TOS_FDFLAGS    70
+#define TOS_EXEPATH    71
 
 #define TOS_SOCK_READABLE  1
 #define TOS_SOCK_WRITABLE  2
 #define TOS_SOCK_HANGUP    4
 #define TOS_SOCK_ERROR     8
 #define TOS_SOCK_LISTENING 16
+#define TOS_SOCK_LOCAL     32
+#define TOS_SOCK_SHM       64
+
+#define TOS_SHMFD_NEW      0
+#define TOS_SHMFD_RESIZE   1
+#define TOS_SHMFD_SIZE     2
+#define TOS_SHMFD_UNLINK   3
+#define TOS_SHMFD_EXISTS   4
+
+#define TOS_USOCK_NEW      0
+#define TOS_USOCK_PAIR     1
+#define TOS_USOCK_BIND     2
+#define TOS_USOCK_LISTEN   3
+#define TOS_USOCK_CONNECT  4
+#define TOS_USOCK_ACCEPT   5
+#define TOS_USOCK_SENDFDS  6
+#define TOS_USOCK_RECVFDS  7
+#define TOS_USOCK_NONBLOCK 8
+#define TOS_USOCK_NAME     9
+#define TOS_USOCK_MAX_FDS 16
 
 #define TOS_SYSTEM_CPUS 10
 
@@ -84,6 +110,8 @@
 #define TOS_ERR_CLOSED  -18
 #define TOS_ERR_NOROUTE -19
 #define TOS_ERR_INUSE   -20
+#define TOS_ERR_PIPE    -28
+#define TOS_ERR_WOULDBLOCK -29
 
 struct tos_sockinfo { unsigned int available; unsigned short lport, rport; unsigned char rip[4]; };
 

@@ -1,0 +1,20 @@
+# Meson cross file for libraries and programs built against the sysroot.
+[binaries]
+c = 'x86_64-pc-terminalos-gcc'
+cpp = 'x86_64-pc-terminalos-g++'
+ar = 'x86_64-pc-terminalos-ar'
+strip = 'x86_64-pc-terminalos-strip'
+pkg-config = 'pkg-config'
+
+[properties]
+sys_root = '/opt/terminalos/sysroot'
+pkg_config_libdir = '/opt/terminalos/sysroot/usr/lib/pkgconfig'
+
+[built-in options]
+default_library = 'static'
+
+[host_machine]
+system = 'terminalos'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'

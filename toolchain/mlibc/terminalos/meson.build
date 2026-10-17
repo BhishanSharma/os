@@ -2,7 +2,7 @@
 # toolchain's Dockerfile; include/abi-bits is made there from Linux's ABI).
 sysdep_supported_options = {
 	'posix': true,
-	'linux': false,
+	'linux': true,
 	'glibc': true,
 	'bsd': true,
 }

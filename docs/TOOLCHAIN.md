@@ -57,7 +57,15 @@ TCP (`socket`, `connect`, `bind`/`listen`/`accept`, `send`/`recv`,
 `fcntl` (`O_NONBLOCK`) and `ioctl` (`FIONBIO`, `FIONREAD`). There is no UDP
 for programs: a datagram socket only asks DNS questions, answered by the
 kernel's resolver, so `getaddrinfo` works unchanged (IPv4, A records).
-`poll` looks at each descriptor about every 2 ms (no kernel wait yet).
+`poll` sleeps in the kernel (`SYS_POLLWAIT`) until a pipe or local socket
+changes; with TCP sockets in the set it also wakes at every interrupt.
+
+Local (Unix-domain) stream sockets are kernel descriptors (`SYS_USOCK`):
+`socket(AF_UNIX)`, `socketpair`, `bind`/`listen`/`connect`/`accept` by name
+(a name is a key in the kernel's table, not a file), `O_NONBLOCK`, and files
+passed with `SCM_RIGHTS` (up to 16 waiting each way). There is no half-close
+and no datagram mode. Writing to a closed one gives `EPIPE`, not SIGPIPE.
+`ipccheck` checks all of it: run it on the OS.
 
 Built-in files: `/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/random`,
 `/etc/services`, `/etc/hosts`, `/etc/resolv.conf`. The usual names of the
@@ -68,6 +76,27 @@ CA bundle (`/etc/ssl/cert.pem`, `/etc/ssl/certs/ca-certificates.crt`...) open
 The image also builds **OpenSSL 3.5** (static, `/etc/ssl`, randomness from
 `/dev/urandom`) and **curl 8.23** (HTTP/1.1 over TLS); `curl.elf` and
 `CACERT.PEM` go on the RAM disk. On the OS: `curl -I https://www.wikipedia.org/`.
+
+## Libraries: `myos-libs`
+
+```sh
+docker build -t myos-libs -f toolchain/libs/Dockerfile toolchain
+```
+
+`toolchain/libs/Dockerfile` builds, on top of `myos-toolchain`, static
+libraries in the sysroot: zlib 1.3.2, libpng 1.6.59, libjpeg-turbo 3.2.0,
+FreeType 2.15.0, HarfBuzz 14.6.0, nghttp2 1.70.0, ICU 78.3, and curl again
+with HTTP/2 and gzip. CMake projects use `toolchain/cmake/TerminalOS.cmake`
+and Meson projects use `libs/meson-cross.txt`. Build the OS in this image to
+get the ports that need them. A port lists its link flags in
+`ports/NAME/LIBS`, e.g. `-lharfbuzz -lfreetype -lpng16 -lz`.
+The image's last step rebuilds the mlibc port, so a change to the port only
+reruns that step, not every library.
+
+ICU's data is not linked into programs. It is one file, `ICUDT78L.DAT`
+(33 MB) on the RAM disk, which is why the RAM disk is 96 MB. Programs call
+`u_setDataDirectory("/SYS")` or set `ICU_DATA`. `libcheck` checks every
+library: run it on the OS.
 
 ## Kernel support it relies on
 

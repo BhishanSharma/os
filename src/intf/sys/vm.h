@@ -24,6 +24,7 @@ typedef struct vm_region {
     int kind;                     /* VM_ANON, VM_FILE, VM_SHM */
     vm_object_t *obj;             /* the file or shared memory (counted reference) */
     uint64_t offset;              /* bytes into obj at `start` (after a partial unmap) */
+    uint64_t limit;               /* VM_FILE: obj's bytes end here (0: its size), zeros after */
     struct vm_region *next;
 } vm_region_t;
 
@@ -51,6 +52,14 @@ int vm_unmap_range(uint64_t root, vm_space_t *s, uint64_t addr, uint64_t len);
 
 vm_object_t *vm_file_object(const char *abs_path);           /* 0 if it cannot be opened */
 vm_object_t *vm_shm_object(const char *name, uint64_t size); /* new, or the existing one */
+/* Shared memory for a file descriptor (memfd, shm_open); a 0 or "" name: anonymous. */
+vm_object_t *vm_shm_find(const char *name);                 /* counted, 0 if none */
+vm_object_t *vm_shm_new(const char *name, uint64_t size);   /* size may be 0 (resize later) */
+int vm_shm_resize(vm_object_t *o, uint64_t size);          /* grow or shrink -> 0 */
+void vm_shm_unlink(const char *name);                      /* the name only; mappings stay */
+uint64_t vm_object_size(vm_object_t *o);
+void vm_object_get(vm_object_t *o);
+void vm_object_put(vm_object_t *o);
 
 /* fork: copy the regions and share every page copy-on-write. 0 on success. */
 int vm_fork(uint64_t src_root, vm_space_t *src, uint64_t dst_root, vm_space_t *dst);

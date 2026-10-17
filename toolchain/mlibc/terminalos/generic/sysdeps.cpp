@@ -249,6 +249,21 @@ int Sysdeps<FutexWake>::operator()(int *pointer, bool) {
 
 // ---- Memory ----------------------------------------------------------------------
 
+// Shared memory: a kernel descriptor (fdinfo says so), or /dev/shm/NAME.
+static bool shm_fd(int fd) {
+	if (fd < 0 || fd >= tos::SOCK_BASE)
+		return false;
+	long fl = sc(TOS_FDINFO, fd);
+	return fl >= 0 && (fl & TOS_SOCK_SHM);
+}
+
+static const char *shm_name(const char *path) {
+	static const char prefix[] = "/dev/shm/";
+	if (strncmp(path, prefix, sizeof(prefix) - 1) || !path[sizeof(prefix) - 1])
+		return nullptr;
+	return path + sizeof(prefix) - 1;
+}
+
 int Sysdeps<VmMap>::operator()(void *hint, size_t size, int prot, int flags, int fd, off_t offset, void **window) {
 	(void)hint;
 	if (flags & MAP_FIXED)
@@ -263,8 +278,22 @@ int Sysdeps<VmMap>::operator()(void *hint, size_t size, int prot, int flags, int
 		*window = (void *)a;
 		return 0;
 	}
+	if (shm_fd(fd)) {
+		long a = sc(TOS_MMAP2, (long)size, kprot ? kprot : 1, fd, offset);
+		if (a <= 0)
+			return a == TOS_ERR_BADCALL ? EINVAL : ENOMEM;
+		*window = (void *)a;
+		return 0;
+	}
 	if (flags & MAP_SHARED && prot & PROT_WRITE)
 		return ENOTSUP;                             // no writing back to the file
+	if (!tos::is_socket(fd) && !tos::is_vfile(fd) && !directory(fd) && !(offset & 4095)) {
+		long a = sc(TOS_MMAP2, (long)size, kprot ? kprot | 2 : 3, fd, offset);   // (a private copy)
+		if (a > 0) {
+			*window = (void *)a;
+			return 0;
+		}
+	}
 	// A private copy of the file: zeroed memory, then the bytes read in.
 	long a = sc(TOS_MMAP, (long)size, 3, -1);
 	if (a <= 0)
@@ -289,6 +318,27 @@ int Sysdeps<VmMap>::operator()(void *hint, size_t size, int prot, int flags, int
 int Sysdeps<VmUnmap>::operator()(void *pointer, size_t size) {
 	long r = sc(TOS_MUNMAP, (long)pointer, (long)size);
 	return r < 0 ? EINVAL : 0;
+}
+
+int Sysdeps<Madvise>::operator()(void *, size_t, int) {
+	return 0;                                       // (advice only)
+}
+
+// Shared memory as a descriptor: memfd_create, and shm_open (/dev/shm/NAME).
+int Sysdeps<MemfdCreate>::operator()(const char *, int, int *fd) {
+	long r = sc(TOS_SHMFD, TOS_SHMFD_NEW, 0, 0);
+	if (r < 0)
+		return to_errno(r);
+	*fd = (int)r;
+	return 0;
+}
+
+int Sysdeps<Ftruncate>::operator()(int fd, size_t size) {
+	if (shm_fd(fd)) {
+		long r = sc(TOS_SHMFD, TOS_SHMFD_RESIZE, fd, (long)size);
+		return r < 0 ? to_errno(r) : 0;
+	}
+	return 0;                                       // (files: the kernel keeps their length)
 }
 
 int Sysdeps<VmProtect>::operator()(void *, size_t, int) {
@@ -340,6 +390,18 @@ int Sysdeps<Clone>::operator()(void *, pid_t *pid_out, void *stack) {
 // ---- Files -------------------------------------------------------------------------
 
 int Sysdeps<Open>::operator()(const char *path, int flags, mode_t, int *fd) {
+	if (const char *name = shm_name(path)) {
+		bool exists = sc(TOS_SHMFD, TOS_SHMFD_EXISTS, (long)name) == 1;
+		if (exists && (flags & O_CREAT) && (flags & O_EXCL))
+			return EEXIST;
+		if (!exists && !(flags & O_CREAT))
+			return ENOENT;
+		long r = sc(TOS_SHMFD, TOS_SHMFD_NEW, (long)name, 0);
+		if (r < 0)
+			return to_errno(r);
+		*fd = (int)r;
+		return 0;
+	}
 	int err;
 	if (tos::open_builtin(path, flags, fd, &err))
 		return err;
@@ -373,6 +435,8 @@ int Sysdeps<Open>::operator()(const char *path, int flags, mode_t, int *fd) {
 		return to_errno(r);
 	*fd = (int)r;
 	remember(*fd, path);
+	if (flags & O_CLOEXEC)
+		tos::set_cloexec(*fd, true);
 	return 0;
 }
 
@@ -466,6 +530,14 @@ int Sysdeps<Stat>::operator()(fsfd_target target, int fd, const char *path, int,
 	case fsfd_target::fd:
 		if (tos::is_socket(fd) || tos::is_vfile(fd))
 			return tos::special_stat(fd, st);
+		if (shm_fd(fd)) {
+			memset(st, 0, sizeof(*st));
+			st->st_mode = S_IFREG | 0600;
+			st->st_nlink = 1;
+			st->st_blksize = 4096;
+			st->st_size = sc(TOS_SHMFD, TOS_SHMFD_SIZE, fd);
+			return 0;
+		}
 		if (OpenDirectory *d = directory(fd))
 			return fill_stat(d->path, st);
 		if (fd >= 0 && fd < MAX_FDS && fd_path[fd])
@@ -557,18 +629,46 @@ int Sysdeps<Rmdir>::operator()(const char *path) {
 }
 
 int Sysdeps<Unlinkat>::operator()(int dirfd, const char *path, int) {
+	if (const char *name = shm_name(path)) {
+		long r = sc(TOS_SHMFD, TOS_SHMFD_UNLINK, (long)name);
+		return r < 0 ? to_errno(r) : 0;
+	}
 	if (dirfd != AT_FDCWD && path[0] != '/')
 		return ENOSYS;
 	long r = sc(TOS_UNLINK, (long)path);
 	return r < 0 ? to_errno(r) : 0;
 }
 
-int Sysdeps<Pipe>::operator()(int *fds, int) {
+int Sysdeps<Pipe>::operator()(int *fds, int flags) {
 	long r = sc(TOS_PIPE, (long)fds);
-	return r < 0 ? to_errno(r) : 0;
+	if (r < 0)
+		return to_errno(r);
+	if (flags & O_CLOEXEC) {
+		tos::set_cloexec(fds[0], true);
+		tos::set_cloexec(fds[1], true);
+	}
+	if (flags & O_NONBLOCK) {
+		sc(TOS_USOCK, TOS_USOCK_NONBLOCK, fds[0], 1);
+		sc(TOS_USOCK, TOS_USOCK_NONBLOCK, fds[1], 1);
+	}
+	return 0;
 }
 
-int Sysdeps<Dup>::operator()(int fd, int, int *newfd) {
+// /proc/self/exe: the program's file; other links do not exist.
+int Sysdeps<Readlink>::operator()(const char *path, void *buffer, size_t max_size, ssize_t *length) {
+	if (strcmp(path, "/proc/self/exe"))
+		return EINVAL;                              // (no symbolic links)
+	char exe[512];
+	long n = sc(TOS_EXEPATH, (long)exe, sizeof(exe));
+	if (n < 0)
+		return to_errno(n);
+	size_t len = (size_t)n < max_size ? (size_t)n : max_size;
+	memcpy(buffer, exe, len);
+	*length = (ssize_t)len;
+	return 0;
+}
+
+int Sysdeps<Dup>::operator()(int fd, int flags, int *newfd) {
 	if (tos::is_socket(fd) || tos::is_vfile(fd) || directory(fd))
 		return EINVAL;                              // (only the kernel's own descriptors)
 	long r = sc(TOS_DUP, fd);
@@ -577,6 +677,8 @@ int Sysdeps<Dup>::operator()(int fd, int, int *newfd) {
 	*newfd = (int)r;
 	if (fd >= 0 && fd < MAX_FDS && fd_path[fd])
 		remember(*newfd, fd_path[fd]);
+	if (flags & O_CLOEXEC)
+		tos::set_cloexec(*newfd, true);
 	return 0;
 }
 

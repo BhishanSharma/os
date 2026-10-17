@@ -1,17 +1,38 @@
-// pipe.c - pipes: a 4 KiB ring, readers and writers wait on it (sys/pipe.h)
+// pipe.c - pipes: a 16 KiB ring, readers and writers wait on it (sys/pipe.h)
 #include "sys/pipe.h"
 #include "sys/task.h"
 #include "sys/process.h"
 #include "drivers/heap.h"
 #include "lib/string.h"
 
-#define PIPE_SIZE 4096
+#define PIPE_SIZE 16384
 
 struct pipe {
     uint8_t buf[PIPE_SIZE];
     uint32_t head, count;                 /* read position, bytes in it */
     int readers, writers;
 };
+
+static volatile uint64_t io_gen;
+
+void io_event(void) {
+    io_gen++;
+    task_wakeup((const void *)&io_gen);
+}
+
+uint64_t io_generation(void) { return io_gen; }
+
+int io_wait(uint64_t gen, uint32_t ms) {
+    if (io_gen != gen) return 1;
+    task_block((const void *)&io_gen, ms);
+    return io_gen != gen;
+}
+
+/* Wake whoever waits on the pipe, and every poll(). */
+static void wake(pipe_t *p) {
+    task_wakeup(p);
+    io_event();
+}
 
 pipe_t *pipe_new(void) {
     pipe_t *p = kmalloc(sizeof(*p));
@@ -29,7 +50,7 @@ void pipe_end_added(pipe_t *p, int writer) {
 void pipe_end_closed(pipe_t *p, int writer) {
     if (writer) p->writers--;
     else p->readers--;
-    task_wakeup(p);
+    wake(p);
     if (p->readers <= 0 && p->writers <= 0) kfree(p);
 }
 
@@ -53,7 +74,7 @@ int64_t pipe_read(pipe_t *p, void *buf, uint64_t len) {
         p->head = (p->head + 1) % PIPE_SIZE;
         p->count--;
     }
-    task_wakeup(p);                       /* room for the writer */
+    wake(p);                       /* room for the writer */
     return (int64_t)n;
 }
 
@@ -62,7 +83,7 @@ int pipe_getc(pipe_t *p) {
     int c = p->buf[p->head];
     p->head = (p->head + 1) % PIPE_SIZE;
     p->count--;
-    task_wakeup(p);
+    wake(p);
     return c;
 }
 
@@ -80,7 +101,7 @@ int64_t pipe_write(pipe_t *p, const void *buf, uint64_t len) {
             p->buf[(p->head + p->count) % PIPE_SIZE] = in[done++];
             p->count++;
         }
-        task_wakeup(p);                   /* data for the reader */
+        wake(p);                   /* data for the reader */
     }
     return (int64_t)done;
 }

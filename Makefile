@@ -52,7 +52,7 @@ DISK_IMG   ?= disk.img
 
 # FAT32 image GRUB loads into RAM at boot (files for PCs without an IDE disk).
 RAMDISK_DIR := targets/x86_64/ramdisk
-RAMDISK_MB  ?= 40
+RAMDISK_MB  ?= 96
 RAMDISK_GZ  := $(BUILD)/ramdisk.img.gz
 RAMDISK_STAGE := $(BUILD)/ramdisk-files
 
@@ -89,7 +89,16 @@ TOS_SYSROOT := /opt/terminalos/sysroot
 ifneq ($(wildcard $(TOS_SYSROOT)/usr/bin/curl),)
 PORT_ELFS  += $(USER_BUILD)/curl.elf $(USER_BUILD)/CACERT.PEM
 endif
-PORT_FLAGS := -O2 -g0 -Wall -Wextra -Wno-unused-parameter
+# ICU's data (Unicode tables, locales), shared by every program that uses ICU.
+ICU_DAT    := $(firstword $(wildcard $(TOS_SYSROOT)/usr/share/icu/*/icudt*l.dat))
+ifneq ($(ICU_DAT),)
+PORT_ELFS  += $(USER_BUILD)/ICUDT78L.DAT
+endif
+# Fonts for programs that draw text with FreeType (third_party/fonts).
+ifneq ($(TOS_CXX),)
+PORT_ELFS  += $(USER_BUILD)/INTER.TTF
+endif
+PORT_FLAGS := -O2 -g0 -Wall -Wextra -Wno-unused-parameter -isystem =/usr/include/freetype2
 port_objs   = $(patsubst ports/$(1)/%,$(USER_BUILD)/ports/$(1)/%.o,$(wildcard ports/$(1)/*.c ports/$(1)/*.cpp))
 
 # ---- Flags ----------------------------------------------------------------
@@ -337,9 +346,10 @@ $(USER_BUILD)/ports/%.c.o: ports/%.c
 	@mkdir -p $(dir $@)
 	x86_64-pc-terminalos-gcc $(PORT_FLAGS) -MMD -MP -c $< -o $@
 
+# ports/NAME/LIBS: the libraries it links, as linker flags (-lfreetype -lz...).
 define PORT_RULE
-$(USER_BUILD)/$(1).elf: $(call port_objs,$(1))
-	x86_64-pc-terminalos-g++ -o $$@ $$^
+$(USER_BUILD)/$(1).elf: $(call port_objs,$(1)) $(wildcard ports/$(1)/LIBS)
+	x86_64-pc-terminalos-g++ -o $$@ $(call port_objs,$(1)) $$(shell cat ports/$(1)/LIBS 2>/dev/null)
 	x86_64-pc-terminalos-strip $$@
 endef
 $(foreach p,$(port_names),$(eval $(call PORT_RULE,$(p))))
@@ -347,6 +357,14 @@ $(foreach p,$(port_names),$(eval $(call PORT_RULE,$(p))))
 $(USER_BUILD)/curl.elf: $(TOS_SYSROOT)/usr/bin/curl
 	@mkdir -p $(dir $@)
 	x86_64-pc-terminalos-strip -o $@ $<
+
+$(USER_BUILD)/ICUDT78L.DAT: $(ICU_DAT)
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+$(USER_BUILD)/INTER.TTF: third_party/fonts/Inter.ttf
+	@mkdir -p $(dir $@)
+	cp $< $@
 
 $(USER_BUILD)/CACERT.PEM: /opt/terminalos/share/cacert.pem
 	@mkdir -p $(dir $@)
