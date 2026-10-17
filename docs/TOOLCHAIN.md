@@ -49,6 +49,26 @@ Linux's. Where the kernel has less than POSIX, the port fills in: `fstat` uses
 the path the file was opened with, directories are listed at `opendir`,
 `O_RDWR` on an existing file reads only. Missing pieces return `ENOSYS`.
 
+## Networking, TLS, curl
+
+`generic/net.cpp` in the port gives programs BSD sockets over the kernel's
+TCP (`socket`, `connect`, `bind`/`listen`/`accept`, `send`/`recv`,
+`sendmsg`/`recvmsg`, `getsockopt`, `getpeername`), `poll`/`ppoll`/`select`,
+`fcntl` (`O_NONBLOCK`) and `ioctl` (`FIONBIO`, `FIONREAD`). There is no UDP
+for programs: a datagram socket only asks DNS questions, answered by the
+kernel's resolver, so `getaddrinfo` works unchanged (IPv4, A records).
+`poll` looks at each descriptor about every 2 ms (no kernel wait yet).
+
+Built-in files: `/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/random`,
+`/etc/services`, `/etc/hosts`, `/etc/resolv.conf`. The usual names of the
+CA bundle (`/etc/ssl/cert.pem`, `/etc/ssl/certs/ca-certificates.crt`...) open
+`CACERT.PEM` in the system folder (Mozilla's bundle, from the toolchain image).
+`alarm`/`setitimer` are accepted but never fire (no kernel timers yet).
+
+The image also builds **OpenSSL 3.5** (static, `/etc/ssl`, randomness from
+`/dev/urandom`) and **curl 8.23** (HTTP/1.1 over TLS); `curl.elf` and
+`CACERT.PEM` go on the RAM disk. On the OS: `curl -I https://www.wikipedia.org/`.
+
 ## Kernel support it relies on
 
 - `SYS_TCB_SET`: each thread's FS base (thread-local storage), kept across
@@ -57,3 +77,6 @@ the path the file was opened with, directories are listed at `opendir`,
   `AT_RANDOM`, ...): mlibc finds the TLS template through it.
 - `munmap(addr, len)`: any page range; regions shrink or split.
 - `SYS_UPTIME` in milliseconds (1 ms resolution).
+- `SYS_SOCKINFO` (a TCP socket: data waiting, writable, closed, ports, peer)
+  and `SYS_FDINFO` (a pipe, file or the console: readable, writable) for
+  `poll`; up to 64 TCP sockets.
