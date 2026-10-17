@@ -40,6 +40,7 @@ typedef struct task {
     int pinned;               /* kernel tasks: the only core that may run it */
     int is_idle;
     int bkl_depth;            /* its kernel-lock nesting while switched out */
+    uint64_t fs_base;         /* user programs: the thread pointer (thread-local storage) */
     uint8_t fpu[512] __attribute__((aligned(16)));   /* x87/SSE registers (fxsave) */
 } task_t;
 

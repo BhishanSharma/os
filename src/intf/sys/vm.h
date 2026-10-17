@@ -23,6 +23,7 @@ typedef struct vm_region {
     int prot;                     /* VM_READ | VM_WRITE */
     int kind;                     /* VM_ANON, VM_FILE, VM_SHM */
     vm_object_t *obj;             /* the file or shared memory (counted reference) */
+    uint64_t offset;              /* bytes into obj at `start` (after a partial unmap) */
     struct vm_region *next;
 } vm_region_t;
 
@@ -44,6 +45,9 @@ int vm_fault(uint64_t root, vm_space_t *s, uint64_t addr, int write);
  * Returns the address, 0 if there is no room. Takes over the reference. */
 uint64_t vm_map(vm_space_t *s, uint64_t len, int prot, int kind, vm_object_t *obj);
 int vm_unmap(uint64_t root, vm_space_t *s, uint64_t addr);   /* a whole mapping */
+/* munmap(addr, len): the pages in [addr, addr + len), from any regions (which
+ * shrink or split). 0 on success, -1 if the range is not page aligned. */
+int vm_unmap_range(uint64_t root, vm_space_t *s, uint64_t addr, uint64_t len);
 
 vm_object_t *vm_file_object(const char *abs_path);           /* 0 if it cannot be opened */
 vm_object_t *vm_shm_object(const char *name, uint64_t size); /* new, or the existing one */

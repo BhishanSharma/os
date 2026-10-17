@@ -75,6 +75,23 @@ app_names    := $(patsubst apps/%/app.cfg,%,$(wildcard apps/*/app.cfg))
 APP_ELFS     := $(addprefix $(USER_BUILD)/,$(addsuffix .elf,$(app_names)))
 app_objs      = $(patsubst apps/$(1)/%.c,$(USER_BUILD)/apps/$(1)/%.o,$(wildcard apps/$(1)/*.c))
 
+# Ports: every folder ports/NAME/ is a program for the full toolchain (mlibc,
+# C++; toolchain/, image myos-toolchain). Its .c and .cpp files link into
+# NAME.elf. Without that compiler (the plain build image) they are left out.
+TOS_CXX    := $(shell command -v x86_64-pc-terminalos-g++ 2>/dev/null)
+port_names := $(notdir $(patsubst %/,%,$(wildcard ports/*/)))
+ifneq ($(TOS_CXX),)
+PORT_ELFS  := $(addprefix $(USER_BUILD)/,$(addsuffix .elf,$(port_names)))
+endif
+# Tools the toolchain image built (toolchain/Dockerfile): curl, and the CA
+# certificates TLS checks servers against (CACERT.PEM, found as /etc/ssl/cert.pem).
+TOS_SYSROOT := /opt/terminalos/sysroot
+ifneq ($(wildcard $(TOS_SYSROOT)/usr/bin/curl),)
+PORT_ELFS  += $(USER_BUILD)/curl.elf $(USER_BUILD)/CACERT.PEM
+endif
+PORT_FLAGS := -O2 -g0 -Wall -Wextra -Wno-unused-parameter
+port_objs   = $(patsubst ports/$(1)/%,$(USER_BUILD)/ports/$(1)/%.o,$(wildcard ports/$(1)/*.c ports/$(1)/*.cpp))
+
 # ---- Flags ----------------------------------------------------------------
 #
 # -ffreestanding:
@@ -241,11 +258,11 @@ $(KERNEL_BIN): $(objects) $(BEARSSL_LIB) $(LINKER_LD)
 
 # ---- ISO ------------------------------------------------------------------
 
-$(RAMDISK_GZ): scripts/mkramdisk.sh scripts/mkdock.sh $(wildcard $(RAMDISK_DIR)/*) $(USER_ELFS) $(APP_ELFS) \
+$(RAMDISK_GZ): scripts/mkramdisk.sh scripts/mkdock.sh $(wildcard $(RAMDISK_DIR)/*) $(USER_ELFS) $(APP_ELFS) $(PORT_ELFS) \
                $(wildcard apps/*/app.cfg) $(THIS_MAKEFILE)
 	rm -rf $(RAMDISK_STAGE)
 	mkdir -p $(RAMDISK_STAGE)
-	cp $(RAMDISK_DIR)/* $(USER_ELFS) $(APP_ELFS) $(RAMDISK_STAGE)/
+	cp $(RAMDISK_DIR)/* $(USER_ELFS) $(APP_ELFS) $(PORT_ELFS) $(RAMDISK_STAGE)/
 	sh scripts/mkdock.sh apps > $(RAMDISK_STAGE)/DOCK.CFG
 	sh scripts/mkramdisk.sh $(RAMDISK_STAGE) $(RAMDISK_MB) $@
 
@@ -309,6 +326,31 @@ $(USER_BUILD)/$(1).elf: $(call app_objs,$(1)) $$(APP_LIBS_$(1)) $(USER_BUILD)/cr
 	$$(LD) -T user/user.ld -z max-page-size=4096 -z noexecstack -o $$@ $(USER_BUILD)/crt0.o $(call app_objs,$(1)) $$(APP_LIBS_$(1)) $(USER_BUILD)/libc.a
 endef
 $(foreach a,$(app_names),$(eval $(call APP_RULE,$(a))))
+
+# Ports (ports/NAME/, the full toolchain): see PORT_RULE below.
+
+$(USER_BUILD)/ports/%.cpp.o: ports/%.cpp
+	@mkdir -p $(dir $@)
+	x86_64-pc-terminalos-g++ -std=gnu++23 $(PORT_FLAGS) -MMD -MP -c $< -o $@
+
+$(USER_BUILD)/ports/%.c.o: ports/%.c
+	@mkdir -p $(dir $@)
+	x86_64-pc-terminalos-gcc $(PORT_FLAGS) -MMD -MP -c $< -o $@
+
+define PORT_RULE
+$(USER_BUILD)/$(1).elf: $(call port_objs,$(1))
+	x86_64-pc-terminalos-g++ -o $$@ $$^
+	x86_64-pc-terminalos-strip $$@
+endef
+$(foreach p,$(port_names),$(eval $(call PORT_RULE,$(p))))
+
+$(USER_BUILD)/curl.elf: $(TOS_SYSROOT)/usr/bin/curl
+	@mkdir -p $(dir $@)
+	x86_64-pc-terminalos-strip -o $@ $<
+
+$(USER_BUILD)/CACERT.PEM: /opt/terminalos/share/cacert.pem
+	@mkdir -p $(dir $@)
+	cp $< $@
 
 
 $(KERNEL_ISO): $(KERNEL_BIN) $(RAMDISK_GZ) $(ISO_SRC)/boot/grub/grub.cfg
@@ -440,5 +482,6 @@ clean: ## Remove build/ and dist/
 
 # ---- Header dependency tracking -------------------------------------------
 
+-include $(foreach p,$(port_names),$(patsubst %.o,%.d,$(call port_objs,$(p))))
 -include $(foreach a,$(app_names),$(patsubst %.o,%.d,$(call app_objs,$(a))))
 -include $(objects:.o=.d) $(user_lib_obj:.o=.d) $(patsubst %.elf,%.d,$(subst $(USER_BUILD)/,$(USER_BUILD)/programs/,$(USER_ELFS)))

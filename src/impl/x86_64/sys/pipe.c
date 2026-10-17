@@ -33,6 +33,13 @@ void pipe_end_closed(pipe_t *p, int writer) {
     if (p->readers <= 0 && p->writers <= 0) kfree(p);
 }
 
+void pipe_state(pipe_t *p, uint32_t *waiting, uint32_t *room, int *no_writers, int *no_readers) {
+    *waiting = p->count;
+    *room = PIPE_SIZE - p->count;
+    *no_writers = p->writers <= 0;
+    *no_readers = p->readers <= 0;
+}
+
 int64_t pipe_read(pipe_t *p, void *buf, uint64_t len) {
     while (p->count == 0) {
         if (p->writers <= 0) return 0;

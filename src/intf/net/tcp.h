@@ -11,7 +11,7 @@
 
 #include <stdint.h>
 
-#define TCP_MAX_SOCKETS 16
+#define TCP_MAX_SOCKETS 64
 
 #define TCP_ERR_NOSOCK     (-1)    /* no free socket / bad socket number */
 #define TCP_ERR_TIMEOUT    (-2)
@@ -36,6 +36,15 @@ int tcp_send(int s, const void *buf, uint32_t len);
 int tcp_recv(int s, void *buf, uint32_t len, uint32_t timeout_ms);
 /* Bytes waiting to be read. */
 uint32_t tcp_available(int s);
+
+/* What poll() needs to know about a socket (TCP_READABLE...), its ports and
+ * the peer's address. Returns -1 if `s` is not open. */
+#define TCP_READABLE  1    /* data waiting, the peer closed, or an error */
+#define TCP_WRITABLE  2    /* connected, with room in the send buffer */
+#define TCP_HANGUP    4    /* the peer closed (or the connection ended) */
+#define TCP_ERROR     8    /* reset, refused, timed out */
+#define TCP_LISTENING 16   /* a listening socket */
+int tcp_info(int s, uint32_t *available, uint16_t *lport, uint16_t *rport, uint8_t rip[4]);
 
 /* Close (our data is still delivered, then FIN). The socket number is free
  * to reuse at once; the connection finishes in the background. */

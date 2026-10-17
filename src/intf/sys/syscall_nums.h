@@ -55,7 +55,7 @@
 
 /* Memory (stage 1): regions filled in on first use */
 #define SYS_MMAP      40 /* mmap(len, prot, fd): fd -1 = zeroed memory, else the file (private) -> address */
-#define SYS_MUNMAP    41 /* munmap(addr): a whole mapping                 -> 0          */
+#define SYS_MUNMAP    41 /* munmap(addr, len): those pages; len 0 = the whole mapping at addr -> 0 */
 #define SYS_SHMMAP    42 /* shm_map(name, size): shared memory, by name   -> address    */
 
 /* Programs (stage 4) */
@@ -85,6 +85,9 @@
 
 #define SYS_REGISTRY  60 /* registry(index, struct os_regnode *): the device tree -> 1, 0 past the end */
 #define SYS_AUTH      61 /* auth(name, password, struct os_user *): root only (login) -> 0 */
+#define SYS_TCB_SET   63 /* tcb_set(pointer): this thread's FS base (thread-local storage) -> 0 */
+#define SYS_SOCKINFO  64 /* sockinfo(socket, struct os_sockinfo *): for poll() -> flags (SOCK_*) */
+#define SYS_FDINFO    65 /* fdinfo(fd): for poll() -> SOCK_READABLE | SOCK_WRITABLE | SOCK_HANGUP */
 #define SYS_SYSTEM    62 /* system(op, a, b): Wi-Fi, volume, battery, power, op = SYSTEM_* */
 
 #define SYSTEM_WIFI_STATUS  0  /* a = struct os_wifi * (the network joined)  -> 1 connected, 0 not, SYSERR_NOENT no card */
@@ -327,6 +330,18 @@ struct os_regnode {
     char name[32];         /* "NVMe drive" */
     char cls[16];          /* "storage", "pci", "volume", ... */
     char info[96];         /* details, e.g. the model */
+};
+
+#define SOCK_READABLE  1   /* data waiting, the peer closed, or an error */
+#define SOCK_WRITABLE  2   /* connected, room to send */
+#define SOCK_HANGUP    4   /* the peer closed */
+#define SOCK_ERROR     8   /* reset, refused */
+#define SOCK_LISTENING 16
+
+struct os_sockinfo {
+    unsigned int available;    /* bytes waiting to be read */
+    unsigned short lport, rport;
+    unsigned char rip[4];      /* the peer's address */
 };
 
 struct os_uname {

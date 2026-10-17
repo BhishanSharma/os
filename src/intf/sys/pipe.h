@@ -17,5 +17,7 @@ int64_t pipe_read(pipe_t *p, void *buf, uint64_t len);
 int pipe_getc(pipe_t *p);
 /* Write all of it, waiting for room. -2: no reader any more; -1: interrupted. */
 int64_t pipe_write(pipe_t *p, const void *buf, uint64_t len);
+/* For poll(): bytes waiting, free room, and whether the other side is gone. */
+void pipe_state(pipe_t *p, uint32_t *waiting, uint32_t *room, int *no_writers, int *no_readers);
 
 #endif

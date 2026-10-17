@@ -1,0 +1,95 @@
+#pragma once
+
+#include <mlibc/sysdep-signatures.hpp>
+
+namespace mlibc {
+
+// What Terminal OS implements (generic/sysdeps.cpp); everything else is ENOSYS.
+struct TerminalosSysdepTags :
+	LibcLog,
+	LibcPanic,
+	Exit,
+	ThreadExit,
+	TcbSet,
+	FutexTid,
+	FutexWait,
+	FutexWake,
+	AnonAllocate,
+	AnonFree,
+	VmMap,
+	VmUnmap,
+	VmProtect,
+	PrepareStack,
+	Clone,
+	Open,
+	Openat,
+	Read,
+	Write,
+	Seek,
+	Close,
+	Stat,
+	Isatty,
+	OpenDir,
+	ReadEntries,
+	Access,
+	GetCwd,
+	Chdir,
+	Mkdir,
+	Rmdir,
+	Unlinkat,
+	Pipe,
+	Dup,
+	Dup2,
+	ClockGet,
+	ClockGetres,
+	Sleep,
+	Yield,
+	GetPid,
+	GetTid,
+	GetPpid,
+	GetUid,
+	GetEuid,
+	GetGid,
+	GetEgid,
+	Fork,
+	Execve,
+	Waitpid,
+	Kill,
+	Sigaction,
+	Sigprocmask,
+	Uname,
+	GetHostname,
+	GetEntropy,
+	Sysconf,
+	Socket,
+	Connect,
+	Bind,
+	Listen,
+	Accept,
+	Sendto,
+	Recvfrom,
+	MsgSend,
+	MsgRecv,
+	Shutdown,
+	SetSockopt,
+	GetSockopt,
+	Sockname,
+	Peername,
+	InetConfigured,
+	Poll,
+	Ppoll,
+	Pselect,
+	Fcntl,
+	Ioctl,
+	SetItimer,
+	GetItimer
+{};
+
+template<typename Tag>
+using Sysdeps = SysdepOf<TerminalosSysdepTags, Tag>;
+
+struct SysdepTraits {
+	static constexpr bool usesRtNetlink = false;
+};
+
+} // namespace mlibc

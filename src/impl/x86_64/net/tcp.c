@@ -536,6 +536,35 @@ int tcp_send(int s, const void *buf, uint32_t len) {
     return (int)done;
 }
 
+int tcp_info(int s, uint32_t *available, uint16_t *lport, uint16_t *rport, uint8_t rip[4]) {
+    tcb_t *t = get(s);
+    if (!t) return -1;
+    uint64_t fl = net_irq_save();
+    int flags = 0;
+    uint32_t avail = t->rx ? t->rx_head - t->rx_tail : 0;
+    if (t->state == S_LISTEN) {
+        flags |= TCP_LISTENING;
+        int idx = (int)(t - socks);
+        for (int i = 0; i < TCP_MAX_SOCKETS; i++)
+            if (socks[i].state == S_ESTABLISHED && socks[i].parent == idx && !socks[i].accepted) {
+                flags |= TCP_READABLE;                     /* a connection to accept */
+                break;
+            }
+    } else {
+        int ended = t->peer_fin || t->state == S_CLOSED;
+        if (avail || ended) flags |= TCP_READABLE;
+        if (ended) flags |= TCP_HANGUP;
+        if (t->err && t->err != TCP_ERR_TIMEOUT) flags |= TCP_ERROR | TCP_READABLE;
+        if (can_send_data(t) && !t->fin_queued && t->tx_len < BUF_SIZE) flags |= TCP_WRITABLE;
+    }
+    *available = avail;
+    *lport = t->lport;
+    *rport = t->rport;
+    memcpy(rip, t->rip, 4);
+    net_irq_restore(fl);
+    return flags;
+}
+
 uint32_t tcp_available(int s) {
     tcb_t *t = get(s);
     return t && t->rx ? t->rx_head - t->rx_tail : 0;

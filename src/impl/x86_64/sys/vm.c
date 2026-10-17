@@ -47,6 +47,7 @@ vm_region_t *vm_add(vm_space_t *s, uint64_t start, uint64_t end, int prot, int k
     r->prot = prot;
     r->kind = kind;
     r->obj = obj;
+    r->offset = 0;
     r->next = s->regions;
     s->regions = r;
     return r;
@@ -97,7 +98,7 @@ int vm_fault(uint64_t root, vm_space_t *s, uint64_t addr, int write) {
     if (!r || (write && !(r->prot & VM_WRITE))) return -1;
     uint64_t phys = 0;
     if (r->kind == VM_SHM) {
-        uint64_t i = (page - r->start) / PAGE_SIZE;
+        uint64_t i = (r->offset + page - r->start) / PAGE_SIZE;
         if (i >= r->obj->size / PAGE_SIZE) return -1;
         if (!r->obj->pages[i] && !(r->obj->pages[i] = new_page(1))) return -1;
         phys = r->obj->pages[i];
@@ -105,7 +106,7 @@ int vm_fault(uint64_t root, vm_space_t *s, uint64_t addr, int write) {
     } else {
         if (!(phys = new_page(0))) return -1;
         if (r->kind == VM_FILE) {
-            uint64_t off = page - r->start;
+            uint64_t off = r->offset + page - r->start;
             if (off < r->obj->size) {
                 uint64_t n = r->obj->size - off < PAGE_SIZE ? r->obj->size - off : PAGE_SIZE;
                 kmutex_lock(&vfs_lock);
@@ -132,6 +133,52 @@ uint64_t vm_map(vm_space_t *s, uint64_t len, int prot, int kind, vm_object_t *ob
     if (!vm_add(s, start, start + len, prot, kind, obj)) return 0;
     s->mmap_next = start;
     return start;
+}
+
+static void drop_range(uint64_t root, uint64_t lo, uint64_t hi) {
+    for (uint64_t v = lo; v < hi; v += PAGE_SIZE) {
+        uint64_t *pte = paging_user_pte(root, v, 0);
+        if (pte && (*pte & PAGE_PRESENT)) {
+            drop_page(*pte & 0x000FFFFFFFFFF000ULL);
+            *pte = 0;
+            __asm__ volatile("invlpg (%0)" :: "r"(v) : "memory");
+        }
+    }
+}
+
+int vm_unmap_range(uint64_t root, vm_space_t *s, uint64_t addr, uint64_t len) {
+    if (addr & (PAGE_SIZE - 1)) return -1;
+    uint64_t end = (addr + len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    if (end <= addr) return -1;
+    for (vm_region_t **p = &s->regions; *p;) {
+        vm_region_t *r = *p;
+        if (r->end <= addr || r->start >= end) {
+            p = &r->next;
+            continue;
+        }
+        uint64_t lo = r->start > addr ? r->start : addr, hi = r->end < end ? r->end : end;
+        drop_range(root, lo, hi);
+        if (lo == r->start && hi == r->end) {                 /* all of it */
+            *p = r->next;
+            obj_put(r->obj);
+            kfree(r);
+            continue;
+        }
+        if (lo == r->start) {                                 /* its start */
+            r->offset += hi - r->start;
+            r->start = hi;
+        } else if (hi == r->end) {                            /* its end */
+            r->end = lo;
+        } else {                                              /* the middle: two regions */
+            vm_region_t *tail = vm_add(s, hi, r->end, r->prot, r->kind, r->obj);
+            if (!tail) return -1;
+            if (r->obj) r->obj->refs++;
+            tail->offset = r->offset + (hi - r->start);
+            r->end = lo;
+        }
+        p = &r->next;
+    }
+    return 0;
 }
 
 int vm_unmap(uint64_t root, vm_space_t *s, uint64_t addr) {
@@ -230,7 +277,9 @@ int vm_fork(uint64_t src_root, vm_space_t *src, uint64_t dst_root, vm_space_t *d
     dst->mmap_next = src->mmap_next;
     for (vm_region_t *r = src->regions; r; r = r->next) {
         if (r->obj) r->obj->refs++;
-        if (!vm_add(dst, r->start, r->end, r->prot, r->kind, r->obj)) return -1;
+        vm_region_t *copy = vm_add(dst, r->start, r->end, r->prot, r->kind, r->obj);
+        if (!copy) return -1;
+        copy->offset = r->offset;
     }
     struct fork_ctx c = { dst_root, src, 0 };
     paging_walk_user(src_root, fork_page, &c);

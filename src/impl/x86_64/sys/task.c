@@ -277,6 +277,9 @@ static void schedule(void) {
         /* Its floating point registers go with the task (it may resume on another core). */
         __asm__ volatile("fxsave %0" : "=m"(prev->fpu));
         __asm__ volatile("fxrstor %0" : : "m"(next->fpu));
+        /* And its thread pointer (IA32_FS_BASE): %fs:0 is its thread-local storage. */
+        __asm__ volatile("wrmsr" : : "c"(0xC0000100u), "a"((uint32_t)next->fs_base),
+                         "d"((uint32_t)(next->fs_base >> 32)));
         task_switch(&prev->rsp, next->rsp);
     }
     irq_restore(flags);

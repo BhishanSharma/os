@@ -1018,7 +1018,7 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
         case SYS_CLOSE:   r = sys_close(f->rdi); break;
         case SYS_SBRK:    r = sys_sbrk((int64_t)f->rdi); break;
         case SYS_SLEEP:   r = sys_sleep(f->rdi); break;
-        case SYS_UPTIME:  r = (int64_t)get_tick() * 10; break;
+        case SYS_UPTIME:  r = (int64_t)timer_ms(); break;
         case SYS_TIME:    r = sys_time(f->rdi, f->rsi); break;
         case SYS_GETKEY:  r = sys_getkey(f->rdi); break;
         case SYS_CONSOLE: r = sys_console(f->rdi, f->rsi, f->rdx); break;
@@ -1044,6 +1044,40 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
         case SYS_ACCEPT:  r = sys_accept(f->rdi, f->rsi); break;
         case SYS_SEND:    r = sys_send(f->rdi, f->rsi, f->rdx); break;
         case SYS_RECV:    r = sys_recv(f->rdi, f->rsi, f->rdx, f->r10); break;
+        case SYS_FDINFO: {                                /* what poll() needs of a pipe, file or console */
+            file_t *fl = fd_get(f->rdi);
+            if (!fl) { r = SYSERR_BADFD; break; }
+            if (fl->kind == F_PIPE_R || fl->kind == F_PIPE_W) {
+                uint32_t waiting, room;
+                int no_writers, no_readers;
+                pipe_state(fl->pipe, &waiting, &room, &no_writers, &no_readers);
+                if (fl->kind == F_PIPE_R)
+                    r = (waiting || no_writers ? SOCK_READABLE : 0) | (no_writers ? SOCK_HANGUP : 0);
+                else
+                    r = (room || no_readers ? SOCK_WRITABLE : 0) | (no_readers ? SOCK_HANGUP : 0);
+            } else if (fl->kind == F_CONSOLE) {
+                r = SOCK_WRITABLE;                        /* (the keyboard: read() waits) */
+            } else {
+                r = SOCK_READABLE | SOCK_WRITABLE;        /* files never wait */
+            }
+            break;
+        }
+        case SYS_SOCKINFO: {
+            struct os_sockinfo *si = (struct os_sockinfo *)f->rsi;
+            if (!own_socket((int)f->rdi)) { r = SYSERR_BADFD; break; }
+            if (!user_range_ok(f->rsi, sizeof(*si), 1)) { r = SYSERR_FAULT; break; }
+            uint32_t avail;
+            uint16_t lp, rp;
+            uint8_t ip[4];
+            int fl = tcp_info((int)f->rdi, &avail, &lp, &rp, ip);
+            if (fl < 0) { r = SYSERR_BADFD; break; }
+            si->available = avail;
+            si->lport = lp;
+            si->rport = rp;
+            memcpy(si->rip, ip, 4);
+            r = fl;
+            break;
+        }
         case SYS_SOCKCLOSE: r = own_socket((int)f->rdi) ? (tcp_close((int)f->rdi), 0) : SYSERR_BADFD; break;
         case SYS_SEEK:    r = sys_seek(f->rdi, (int64_t)f->rsi, f->rdx); break;
         case SYS_SOUND:   r = sys_sound(f->rdi, f->rsi, f->rdx); break;
@@ -1052,7 +1086,10 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
         case SYS_LISTDIR: r = sys_listdir(f->rdi, f->rsi, f->rdx); break;
         case SYS_MEMINFO: r = sys_meminfo(f->rdi); break;
         case SYS_MMAP:    r = sys_mmap(f->rdi, f->rsi, (int64_t)f->rdx); break;
-        case SYS_MUNMAP:  r = vm_unmap(P()->root, &P()->vm, f->rdi) == 0 ? 0 : SYSERR_BADCALL; break;
+        case SYS_MUNMAP:                                  /* len 0: the whole mapping at addr */
+            r = (f->rsi ? vm_unmap_range(P()->root, &P()->vm, f->rdi, f->rsi)
+                        : vm_unmap(P()->root, &P()->vm, f->rdi)) == 0 ? 0 : SYSERR_BADCALL;
+            break;
         case SYS_SHMMAP:  r = sys_shmmap(f->rdi, f->rsi); break;
         case SYS_FORK:    r = sys_fork(f); break;
         case SYS_EXEC:    r = sys_exec(f, f->rdi, f->rsi); if (r == 0) return; break;
@@ -1071,6 +1108,12 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
         case SYS_REGISTRY: r = sys_registry(f->rdi, f->rsi); break;
         case SYS_AUTH:    r = sys_auth(f->rdi, f->rsi, f->rdx); break;
         case SYS_SYSTEM:  r = sys_system(f->rdi, f->rsi, f->rdx); break;
+        case SYS_TCB_SET:
+            if (f->rdi >= USER_TOP) { r = SYSERR_FAULT; break; }
+            task_current()->fs_base = f->rdi;
+            __asm__ volatile("wrmsr" : : "c"(0xC0000100u), "a"((uint32_t)f->rdi), "d"((uint32_t)(f->rdi >> 32)));
+            r = 0;
+            break;
         default:          r = SYSERR_BADCALL; break;
     }
     f->rax = (uint64_t)r;
@@ -1091,7 +1134,12 @@ const char *process_error_text(int err) {
 
 /* Map and copy the segments into `root`. Returns the entry point (0 on
  * error) and the end of the image in *image_end. */
+/* The last load_elf: where its program headers are (C libraries find the
+ * thread-local storage template through them: AT_PHDR). */
+static uint64_t phdr_at, phdr_num;
+
 static uint64_t load_elf(uint64_t root, const uint8_t *data, uint32_t size, uint64_t *image_end) {
+    phdr_at = phdr_num = 0;
     const elf64_ehdr_t *eh = (const elf64_ehdr_t *)data;
     if (size < sizeof(*eh) || eh->ident[0] != 0x7F || eh->ident[1] != 'E' || eh->ident[2] != 'L' ||
         eh->ident[3] != 'F' || eh->ident[4] != 2 /* 64-bit */ || eh->ident[5] != 1 /* little endian */ ||
@@ -1111,19 +1159,24 @@ static uint64_t load_elf(uint64_t root, const uint8_t *data, uint32_t size, uint
         if (PAGE_DOWN(ph->vaddr) < lo) lo = PAGE_DOWN(ph->vaddr);
         if (PAGE_UP(ph->vaddr + ph->memsz) > hi) hi = PAGE_UP(ph->vaddr + ph->memsz);
         copy_to_space(root, ph->vaddr, data + ph->offset, ph->filesz);
+        if (ph->offset == 0) phdr_at = ph->vaddr + eh->phoff;      /* the headers are loaded with it */
     }
     if (hi <= lo || eh->entry < lo || eh->entry >= hi) return 0;
     *image_end = hi;
+    phdr_num = eh->phnum;
     return eh->entry;
 }
 
 /* argc, argv[], NULL and the strings at the top of the stack, as the SysV ABI
  * has it for _start. Built in a kernel copy of the top page, then copied in.
  * Returns the initial stack pointer, or 0 if the arguments do not fit. */
-static uint64_t build_stack(uint64_t root, int argc, char **argv) {
+static uint64_t build_stack(uint64_t root, int argc, char **argv, uint64_t entry_at) {
     static uint8_t page[PAGE_SIZE];
     uint64_t base = USER_TOP - PAGE_SIZE;
     uint64_t sp = USER_TOP, ptrs[MAX_ARGS];
+    sp -= 16;                                   /* AT_RANDOM's 16 bytes */
+    uint64_t random = sp;
+    for (int i = 0; i < 16; i++) page[sp - base + i] = (uint8_t)(timer_ms() * 2654435761u >> (i % 4 * 8)) ^ (uint8_t)i;
     for (int i = argc - 1; i >= 0; i--) {
         size_t len = strlen(argv[i]) + 1;
         if (sp - len < base + 512) return 0;
@@ -1132,9 +1185,19 @@ static uint64_t build_stack(uint64_t root, int argc, char **argv) {
         ptrs[i] = sp;
     }
     sp &= ~(uint64_t)15;
-    if ((argc + 2) % 2) sp -= 8;          // keep the final rsp 16-byte aligned
+    /* Under argv: no environment (NULL), then the auxiliary vector, as Linux:
+     * AT_PHDR 3, AT_PHENT 4, AT_PHNUM 5, AT_PAGESZ 6, AT_ENTRY 9, AT_RANDOM 25, AT_NULL. */
+    uint64_t aux[] = { 3, phdr_at, 4, 56, 5, phdr_num, 6, PAGE_SIZE, 9, entry_at, 25, random, 0, 0 };
+    int words = argc + 2 + 1 + (int)(sizeof(aux) / 8);   /* argc, argv..NULL, envp NULL, auxv */
+    if (words % 2) sp -= 8;               // keep the final rsp 16-byte aligned
+    for (int i = (int)(sizeof(aux) / 8) - 1; i >= 0; i--) {
+        sp -= 8;
+        *(uint64_t *)(page + (sp - base)) = aux[i];
+    }
     sp -= 8;
-    *(uint64_t *)(page + (sp - base)) = 0;
+    *(uint64_t *)(page + (sp - base)) = 0;   /* envp */
+    sp -= 8;
+    *(uint64_t *)(page + (sp - base)) = 0;   /* argv's NULL */
     for (int i = argc - 1; i >= 0; i--) {
         sp -= 8;
         *(uint64_t *)(page + (sp - base)) = ptrs[i];
@@ -1168,7 +1231,7 @@ static int spawn_as(const uint8_t *data, uint32_t size, int argc, char **argv, c
                  !vm_add(&p->vm, image_end, image_end, VM_READ | VM_WRITE, VM_ANON, 0) ||
                  map_user_range(root, USER_TOP - PAGE_SIZE, USER_TOP) != 0))
         err = PROC_ERR_NO_MEMORY;
-    if (!err && !(sp = build_stack(root, argc, argv))) err = PROC_ERR_NO_MEMORY;
+    if (!err && !(sp = build_stack(root, argc, argv, entry))) err = PROC_ERR_NO_MEMORY;
     if (err) {
         vm_free(&p->vm);
         paging_free_address_space(root);
@@ -1777,6 +1840,7 @@ static int64_t sys_fork(struct exc_frame *f) {
     }
     t->process = c;
     t->user = me->user;
+    t->fs_base = me->fs_base;
     return t->pid;
 }
 
@@ -1819,7 +1883,7 @@ static int64_t sys_exec(struct exc_frame *f, uint64_t path_ptr, uint64_t argv_pt
     int ok = entry && vm_add(&vm, stack_lo, USER_TOP, VM_READ | VM_WRITE, VM_ANON, 0) &&
              vm_add(&vm, image_end, image_end, VM_READ | VM_WRITE, VM_ANON, 0) &&
              map_user_range(root, USER_TOP - PAGE_SIZE, USER_TOP) == 0 &&
-             (sp = build_stack(root, argc, argv)) != 0;
+             (sp = build_stack(root, argc, argv, entry)) != 0;
     kfree(image);
     kfree(strings);
     if (!ok) {
@@ -1835,6 +1899,8 @@ static int64_t sys_exec(struct exc_frame *f, uint64_t path_ptr, uint64_t argv_pt
     p->stack_lo = stack_lo;
     memset(p->sig_handler, 0, sizeof(p->sig_handler));
     p->sig_pending = 0;
+    me->fs_base = 0;
+    __asm__ volatile("wrmsr" : : "c"(0xC0000100u), "a"(0u), "d"(0u));
     paging_switch(root);
     paging_free_address_space(old);
     memset(f, 0, sizeof(*f));

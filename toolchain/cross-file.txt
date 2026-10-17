@@ -1,0 +1,13 @@
+# Meson cross file for Terminal OS programs (x86_64-pc-terminalos).
+[binaries]
+c = 'x86_64-pc-terminalos-gcc'
+cpp = 'x86_64-pc-terminalos-g++'
+ar = 'x86_64-pc-terminalos-ar'
+strip = 'x86_64-pc-terminalos-strip'
+pkg-config = 'pkg-config'
+
+[host_machine]
+system = 'terminalos'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
