@@ -566,9 +566,10 @@ int image_decode(const unsigned char *data, size_t size, image_t *img, const cha
     if (size >= 8 && !memcmp(data, png_sig, 8)) return decode_png(data, size, img, error);
     if (size >= 2 && data[0] == 'B' && data[1] == 'M') return decode_bmp(data, size, img, error);
     if (size >= 3 && data[0] == 'P' && (data[1] == '6' || data[1] == '5')) return decode_ppm(data, size, img, error);
-    if (size >= 3 && data[0] == 0xFF && data[1] == 0xD8) { *error = "JPEG is not supported yet (use PNG or BMP)"; return -1; }
-    if (size >= 4 && !memcmp(data, "GIF8", 4)) { *error = "GIF is not supported yet (use PNG or BMP)"; return -1; }
-    *error = "not an image this OS can read (PNG, BMP, PPM)";
+    /* JPEG, GIF, PSD and TGA (which has no signature): stbimage.c */
+    if (image_decode_stb(data, size, img, error) == 0) return 0;
+    if (!(size >= 3 && data[0] == 0xFF && data[1] == 0xD8) && memcmp(data, "GIF8", size < 4 ? size : 4))
+        *error = "not an image this OS can read (PNG, JPEG, GIF, BMP, TGA, PSD, PPM)";
     return -1;
 }
 

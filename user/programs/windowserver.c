@@ -100,7 +100,10 @@ static theme_t cur;                                /* the theme in force */
 /* The theme for the current settings. Increase Contrast: rims at full opacity
  * and 1 px, separators and the highlight stronger, secondary text and the
  * accent darker (light) or lighter (dark), a solid menu bar. */
+static unsigned theme_gen;                         /* bumped on each change: window pictures redraw */
+
 static void apply_theme(void) {
+    theme_gen++;
     cur = themes[dark];
     if (!contrast) return;
     cur.hair_alpha = 255;
@@ -172,6 +175,12 @@ typedef struct {
     int resizable, zoomed, gen;        /* zoom: WS_RESIZABLE, filling the screen, surface number */
     int saved_x, saved_y, saved_w, saved_h, want_x, want_y;   /* before zooming; where it goes */
     int gpu_body, gpu_y0, gpu_y1;      /* this frame the GPU copies its content rows [gpu_y0, gpu_y1) */
+    unsigned drawn;                    /* the damage count the last frame was made from */
+    unsigned *lay;                     /* its picture: shadow, rim, title bar (layer_update) */
+    long lay_cap;                      /* pixels allocated */
+    int lay_w, lay_h, lay_focus, lay_hover, lay_ok;
+    unsigned lay_theme;
+    char lay_title[48];
 } window_t;
 
 typedef struct {
@@ -375,7 +384,10 @@ static int anim_ok(const window_t *w) {
 static int icon(void) { return 48 * S; }
 static int pad(void) { return 8 * S; }
 static int dock_h(void) { return icon() + 2 * pad(); }
-static int dock_bottom(void) { return H - 8 * S; }
+/* A maximised window in front fills the screen and the Dock slides below the
+ * bottom edge (0 shown .. 1024 hidden); the pointer at the bottom edge brings it back. */
+static int dock_hide;
+static int dock_bottom(void) { return H - 8 * S + dock_hide * (dock_h() + icon() + 32 * S) / 1024; }
 
 static int dock_w(void) {
     int w = pad();
@@ -414,7 +426,30 @@ static int app_has_window(int i) {
 /* Icons grow towards the pointer on a spring (response ~0.2 s); a launching
  * app bounces until its window appears. Reduce Motion: no spring, no bounce.
  * -> 1 while still moving. */
+static window_t *front(void);
+
+/* Hide the Dock while a maximised window is in front, unless the pointer is
+ * at the bottom edge or on the Dock. -> 1 while it moves. */
+static int slide_dock(int dt) {
+    window_t *f = front();
+    int want = 0;
+    if (f && f->zoomed && !f->minimised && !menu_open) {
+        int on_dock = dock_hide < 1024 && mouse_y >= dock_bottom() - dock_h() - icon() &&
+                      mouse_x >= dock_x() - icon() && mouse_x < dock_x() + dock_w() + icon();
+        want = mouse_y >= H - 2 * S || on_dock ? 0 : 1024;
+    }
+    if (dock_hide == want) return 0;
+    damage_dock();                                     /* where it was */
+    int step = reduce_motion ? 1024 : dt * 1024 / 200; /* 200 ms */
+    if (step < 1) step = 1;
+    dock_hide = want > dock_hide ? (dock_hide + step > want ? want : dock_hide + step)
+                                 : (dock_hide - step < want ? want : dock_hide - step);
+    damage_dock();
+    return 1;
+}
+
 static int animate_dock(int dt) {
+    slide_dock(dt);
     int over = mouse_y >= dock_bottom() - dock_h() - icon() / 2 && mouse_y < dock_bottom() &&
                mouse_x >= dock_x() - icon() && mouse_x < dock_x() + dock_w() + icon();
     int moving = 0;
@@ -643,6 +678,10 @@ static void finish_remove(int k) {
     window_t *w = &wins[k];
     damage_window(w);
     munmap(w->s);
+    if (w->lay) munmap(w->lay);
+    w->lay = 0;
+    w->lay_cap = 0;
+    w->lay_ok = 0;
     w->used = 0;
     w->anim = ANIM_NONE;
     int j = 0;
@@ -787,7 +826,7 @@ static void zoom_window(int k) {
         nx = 1;
         ny = MENU_H + TITLE_H + 1;
         nw = W - 2;
-        nh = dock_bottom() - dock_h() - 8 * S - ny;
+        nh = H - 1 - ny;                               /* to the bottom: the Dock hides (dock_hide) */
     } else {
         nx = w->saved_x;
         ny = w->saved_y;
@@ -1117,7 +1156,7 @@ static void window_shadow(painter_t *p, int x, int y, int ww, int hh, int focuse
 
 /* The window itself (outline, title bar, content), no shadow, onto `cv` with
  * its content at (cx, cy). */
-static void window_body(ui_canvas *cv, window_t *w, int cx, int cy, int focused, int hover) {
+static void window_frame(ui_canvas *cv, window_t *w, int cx, int cy, int focused, int hover) {
     ui_round(cv, cx - 1, cy - TITLE_H - 1, w->w + 2, w->h + TITLE_H + 2, RADIUS,
              focused ? TH.edge_on : TH.edge_off);                                  /* the 1 px rim */
     ui_round_ex(cv, cx, cy - TITLE_H, w->w, TITLE_H, RADIUS - 1, focused ? TH.title_on : TH.title_off,
@@ -1128,6 +1167,9 @@ static void window_body(ui_canvas *cv, window_t *w, int cx, int cy, int focused,
     if (tx < cx + 80 * S) tx = cx + 80 * S;
     ui_text_bold(cv, tx, cy - TITLE_H + (TITLE_H - 16 * S) / 2, w->title,
                  focused ? TH.title_text_on : TH.title_text_off, S);
+}
+
+static void window_content(ui_canvas *cv, window_t *w, int cx, int cy) {
     const unsigned *px = (const unsigned *)((char *)w->s + WS_HEADER);
     if (w->gpu_body && cx == w->x && cy == w->y) {      /* the GPU copies the middle (gfx_copy) */
         int a = w->gpu_y0 - cy, b = w->gpu_y1 - cy;
@@ -1136,6 +1178,102 @@ static void window_body(ui_canvas *cv, window_t *w, int cx, int cy, int focused,
         return;
     }
     ui_copy_round(cv, cx, cy, px, w->w, w->h, w->w, RADIUS - 1, UI_BL | UI_BR);
+}
+
+static void window_body(ui_canvas *cv, window_t *w, int cx, int cy, int focused, int hover) {
+    window_frame(cv, w, cx, cy, focused, hover);
+    window_content(cv, w, cx, cy);
+}
+
+/* ---- Window pictures -----------------------------------------------------
+ * A window's shadow, rim and title bar change rarely (focus, title, size, the
+ * traffic lights' hover, the theme) but were drawn again in every frame that
+ * touched the window: the shadow's maths, the title's glyphs. They are drawn
+ * once into a picture with transparency (drawn on black and on white: the
+ * difference is how transparent each pixel is), which frames then blend. */
+static unsigned *lay_scratch;
+static long lay_scratch_n;
+
+static int lay_margin(void) { return SHADOW + SHADOW / 3 + 2 * S; }
+
+static int layer_current(const window_t *w, int focused, int hover) {
+    int ww = w->w + 2, hh = w->h + TITLE_H + 2, m = lay_margin();
+    return w->lay && w->lay_ok && w->lay_w == ww + 2 * m && w->lay_h == hh + 2 * m && w->lay_focus == focused &&
+           w->lay_hover == hover && w->lay_theme == theme_gen && !strcmp(w->lay_title, w->title);
+}
+
+/* Before the painters start (it allocates, and they share the picture). */
+static void layer_update(painter_t *p, window_t *w, int focused, int hover) {
+    if (layer_current(w, focused, hover)) return;
+    int x, y, ww, hh, m = lay_margin();
+    outer(w, &x, &y, &ww, &hh);
+    int lw = ww + 2 * m, lh = hh + 2 * m;
+    long n = (long)lw * lh;
+    w->lay_ok = 0;
+    if (n > w->lay_cap) {
+        if (w->lay) munmap(w->lay);
+        w->lay = mmap((size_t)n * 4, PROT_READ | PROT_WRITE, -1);
+        w->lay_cap = w->lay ? n : 0;
+        if (!w->lay) return;
+    }
+    if (n > lay_scratch_n) {
+        if (lay_scratch) munmap(lay_scratch);
+        lay_scratch = mmap((size_t)n * 4, PROT_READ | PROT_WRITE, -1);
+        lay_scratch_n = lay_scratch ? n : 0;
+        if (!lay_scratch) return;
+    }
+    painter_t t = *p;
+    for (int pass = 0; pass < 2; pass++) {             /* on black, then on white */
+        unsigned *buf = pass ? lay_scratch : w->lay;
+        unsigned bg = pass ? 0xFFFFFF : 0;
+        for (long i = 0; i < n; i++) buf[i] = bg;
+        ui_canvas_init(&t.c, buf, lw, lh, lw);
+        window_shadow(&t, m, m, ww, hh, focused, 255);
+        window_frame(&t.c, w, w->x - x + m, w->y - y + m, focused, hover);
+    }
+    for (long i = 0; i < n; i++) {                     /* alpha = 255 - (white - black) */
+        unsigned b = w->lay[i], wh = lay_scratch[i];
+        int a = 255 - ((int)((wh >> 8) & 255) - (int)((b >> 8) & 255));
+        if (a < 0) a = 0;
+        if (a > 255) a = 255;
+        w->lay[i] = ((unsigned)a << 24) | (b & 0xFFFFFF);   /* (black's colour is premultiplied) */
+    }
+    w->lay_w = lw;
+    w->lay_h = lh;
+    w->lay_focus = focused;
+    w->lay_hover = hover;
+    w->lay_theme = theme_gen;
+    snprintf(w->lay_title, sizeof(w->lay_title), "%s", w->title);
+    w->lay_ok = 1;
+}
+
+/* The picture onto the frame; the content's rows are left out (the content
+ * covers them) except its rounded bottom, whose corners need the rim behind. */
+static void layer_blit(ui_canvas *c, const window_t *w) {
+    int m = lay_margin(), lx = w->x - 1 - m, ly = w->y - TITLE_H - 1 - m;
+    int x0 = lx < c->cx0 ? c->cx0 : lx, x1 = lx + w->lay_w > c->cx1 ? c->cx1 : lx + w->lay_w;
+    int y0 = ly < c->cy0 ? c->cy0 : ly, y1 = ly + w->lay_h > c->cy1 ? c->cy1 : ly + w->lay_h;
+    int hole_y1 = w->y + w->h - RADIUS;
+    for (int py = y0; py < y1; py++) {
+        unsigned *row = c->px + (long)py * c->stride;
+        const unsigned *src = w->lay + (long)(py - ly) * w->lay_w - lx;
+        int hole = py >= w->y && py < hole_y1;
+        for (int px = x0; px < x1; px++) {
+            if (hole && px == w->x) {                  /* skip the content */
+                px = w->x + w->w - 1;
+                continue;
+            }
+            unsigned v = src[px], a = v >> 24;
+            if (a == 255) row[px] = v & 0xFFFFFF;
+            else if (a) {
+                unsigned d = row[px], k = 255 - a;
+                unsigned r = ((v >> 16) & 255) + ((d >> 16) & 255) * k / 255;
+                unsigned g = ((v >> 8) & 255) + ((d >> 8) & 255) * k / 255;
+                unsigned bl = (v & 255) + (d & 255) * k / 255;
+                row[px] = (r > 255 ? 255 : r) << 16 | (g > 255 ? 255 : g) << 8 | (bl > 255 ? 255 : bl);
+            }
+        }
+    }
 }
 
 /* ---- Window motion ----------------------------------------------------------
@@ -1267,6 +1405,11 @@ static void draw_window(painter_t *p, int k, int front_win) {
     int hover = tl_hover >= 0 && &wins[tl_hover] == w;
     if (w->anim != ANIM_NONE && anim_ok(w)) {
         draw_window_anim(p, k, focused, hover);
+        return;
+    }
+    if (layer_current(w, focused, hover)) {
+        layer_blit(&p->c, w);
+        window_content(&p->c, w, w->x, w->y);
         return;
     }
     int x, y, ww, hh;
@@ -1451,12 +1594,26 @@ static int overlaps(int ax0, int ay0, int ax1, int ay1, int bx, int by, int bw, 
     return ax0 < bx + bw && bx < ax1 && ay0 < by + bh && by < ay1;
 }
 
+/* The highest row the Dock draws on now: magnified and bouncing icons (and
+ * their shadows), the name shown above the one under the pointer. */
+static int dock_reach(void) {
+    int top = dock_bottom() - dock_h();
+    for (int i = 0; i < DOCK_APPS; i++) {
+        int size = apps[i].size;
+        int iy = dock_bottom() - pad() - size - (int)(apps[i].bounce / FP) - size / 12 - 2;
+        int ly = dock_bottom() - dock_h() - 24 * S - 8 * S - (size - icon());   /* as draw_dock places it */
+        if (iy < top) top = iy;
+        if (ly < top) top = ly;
+    }
+    return top - 2 * S;
+}
+
 static void plan_gpu_copies(void) {
     static struct os_copy items[64];
     int n = 0;
     for (int k = 0; k < MAX_WINDOWS; k++) wins[k].gpu_body = 0;
     if (!gpu_frames || !kernel_cursor || motion()) return;
-    int dock_top = dock_bottom() - dock_h() - 48 * S;  /* (with its labels and magnified icons) */
+    int dock_top = dock_reach();
     for (int i = 0; i < norder; i++) {
         window_t *w = &wins[order[i]];
         if (!live(w) || w->minimised || w->anim != ANIM_NONE) continue;
@@ -1502,6 +1659,12 @@ static void plan_gpu_copies(void) {
 static int compose(void) {
     frame_no++;
     plan_gpu_copies();
+    window_t *f = front();
+    for (int i = 0; i < norder; i++) {                 /* window pictures, before the painters share them */
+        window_t *w = &wins[order[i]];
+        if (w->used && !w->minimised && w->anim == ANIM_NONE)
+            layer_update(&painters[0], w, w == f, tl_hover >= 0 && &wins[tl_hover] == w);
+    }
     long area = 0;
     for (int d = 0; d < ndmg; d++) area += (long)(dmg[d].x1 - dmg[d].x0) * (dmg[d].y1 - dmg[d].y0);
     if (n_painters > 1 && frame_no > 1 && area >= PAINT_MIN && !motion()) {   /* (the first frame loads the font) */
@@ -2001,7 +2164,15 @@ int main(int argc, char **argv) {
             if (w->used && w->s->damage != w->seen) {
                 w->seen = w->s->damage;
                 if (w->anim == ANIM_WAIT) start_open(w);       /* the first drawing: open it */
-                else if (!w->minimised && w->anim == ANIM_NONE) damage(w->x, w->y, w->w, w->h);
+                else if (!w->minimised && w->anim == ANIM_NONE) {
+                    struct ws_surface *sf = w->s;      /* what the program says changed */
+                    int x0 = sf->dirty_x0, y0 = sf->dirty_y0, x1 = sf->dirty_x1, y1 = sf->dirty_y1;
+                    sf->dirty_x1 = sf->dirty_x0 = 0;
+                    if (x1 <= x0 || y1 <= y0 || x0 < 0 || y0 < 0 || x1 > w->w || y1 > w->h)
+                        damage(w->x, w->y, w->w, w->h);
+                    else
+                        damage(w->x + x0, w->y + y0, x1 - x0, y1 - y0);
+                }
             }
         }
         animate_dock(dt);
@@ -2011,7 +2182,12 @@ int main(int argc, char **argv) {
             tidy();
         }
         if (gpu_frames) gfx_sync();                  /* the GPU has read the frame before */
-        int fresh = compose(), paced = 0;
+        int fresh = compose(), paced = 0, read = 0;
+        for (int k = 0; k < MAX_WINDOWS; k++)          /* the windows this frame was made from */
+            if (wins[k].used && wins[k].drawn != wins[k].seen) {
+                wins[k].drawn = wins[k].seen;
+                read = 1;
+            }
         mutex_unlock(&lock);
         /* Present without the lock: on Intel graphics it waits for the screen's
          * refresh, and holding the lock meanwhile starved the thread that opens
@@ -2019,12 +2195,19 @@ int main(int argc, char **argv) {
         if (fresh) {
             paced = gfx_present() > 0;                /* tear-free on Intel graphics */
             unpresented = 0;
+            if (read && gpu_frames) gfx_sync();       /* (the GPU's copies of them are done) */
             static int surface_tries;                 /* the GPU takes frames from scr itself */
             if (surface_tries >= 0 && surface_tries++ < 20 && gfx_surface(scr.px, W, H, scr.stride) == 0) {
                 printf("windowserver: the GPU copies frames (and window contents) from here on\n");
                 surface_tries = -1;
                 gpu_frames = 1;
             }
+        }
+        if (read) {                                   /* their programs may draw again (ui_present returns) */
+            mutex_lock(&lock);
+            for (int k = 0; k < MAX_WINDOWS; k++)
+                if (wins[k].used) wins[k].s->released = wins[k].drawn;
+            mutex_unlock(&lock);
         }
         if (!paced) sleep_ms(5);                      /* else the screen's refresh set the pace */
     }

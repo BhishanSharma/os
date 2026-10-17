@@ -60,6 +60,24 @@ KEYS = {' ': 'spc', '/': 'slash', ':': 'shift-semicolon', '.': 'dot', '-': 'minu
         '(': 'shift-9', ')': 'shift-0', '+': 'shift-equal'}
 
 
+_symbols = None
+
+
+def kernel_symbols():
+    """address -> name for the kernel's functions (nm in the build image)."""
+    global _symbols
+    if _symbols is None:
+        _symbols = {}
+        nm = subprocess.run(["docker", "run", "--rm", "-v", ROOT + ":/root/env", "myos-buildenv",
+                             "sh", "-c", "x86_64-elf-nm -n /root/env/dist/x86_64/kernel.bin"],
+                            capture_output=True, text=True).stdout
+        for line in nm.splitlines():
+            parts = line.split()
+            if len(parts) == 3 and parts[1] in "tT":
+                _symbols[int(parts[0], 16)] = parts[2]
+    return _symbols
+
+
 class Machine:
     """One QEMU: the monitor on stdin, the serial port in a file."""
 
@@ -73,14 +91,36 @@ class Machine:
                "-netdev", "user,id=n0", "-device", "rtl8139,netdev=n0"]
         if uefi:
             cmd += ["-drive", "if=pflash,format=raw,readonly=on,file=" + find_ovmf("code")]
+        self.mon_path = os.path.join(OUT, name + ".monitor.txt")   # what the monitor answers
+        self.mon_out = open(self.mon_path, "wb")
         self.proc = subprocess.Popen(cmd + args, cwd=ROOT, stdin=subprocess.PIPE,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                                     stdout=self.mon_out, stderr=subprocess.PIPE)
         self.pos = 0                         # serial text already looked at
 
     def monitor(self, command):
         self.proc.stdin.write((command + "\n").encode())
         self.proc.stdin.flush()
         time.sleep(0.03)
+
+    def where(self):
+        """Where each CPU is (for a hang): its instruction pointer and the
+        kernel function there (from the symbols of kernel.bin)."""
+        try:
+            size = os.path.getsize(self.mon_path)
+            self.monitor("info registers -a")
+            time.sleep(1.5)
+            with open(self.mon_path, "rb") as f:
+                f.seek(size)
+                regs = f.read().decode("latin-1")
+            rips = [int(r, 16) for r in re.findall(r"RIP=([0-9a-f]{16})", regs)]
+            syms = kernel_symbols()
+            lines = []
+            for i, rip in enumerate(rips):
+                name = max((a for a in syms if a <= rip), default=None)
+                lines.append("    cpu %d: %016x %s" % (i, rip, syms[name] + "+0x%x" % (rip - name) if name else "(user)"))
+            return "\n  where the CPUs are:\n" + "\n".join(lines)
+        except Exception as e:
+            return "\n  (could not read the CPUs: %s)" % e
 
     def keys(self, *names):
         for k in names:
@@ -117,7 +157,7 @@ class Machine:
             if self.proc.poll() is not None:
                 raise TestError("QEMU ended (%s)" % self.proc.stderr.read().decode(errors="replace").strip())
             if time.time() > end:
-                raise TestError("no %r after %d s; the end of the output:\n%s" % (rx.pattern, timeout, tail(out[start:])))
+                raise TestError("no %r after %d s; the end of the output:\n%s" % (rx.pattern, timeout, tail(out[start:])) + self.where())
             time.sleep(0.25)
 
     def run(self, command, timeout=60):

@@ -63,6 +63,35 @@ void free(void *ptr) {
     }
 }
 
+/* Memory at a multiple of `align` (a power of two): a block with room to
+ * spare, whose front part becomes a free block of its own. free() takes it. */
+void *memalign(size_t align, size_t size) {
+    if (align <= 16) return malloc(size);
+    size = ALIGN16(size ? size : 1);
+    char *p = malloc(size + align + HEADER + 32);
+    if (!p || ((size_t)p & (align - 1)) == 0) return p;
+    block_t *b = (block_t *)(p - HEADER);
+    char *a = (char *)(((size_t)p + HEADER + 32 + align - 1) & ~(align - 1));
+    block_t *n = (block_t *)(a - HEADER);
+    n->size = (size_t)((char *)b + HEADER + b->size - a);
+    n->free = 0;
+    n->next = b->next;
+    b->next = n;
+    b->size = (size_t)((char *)n - p);
+    if (heap_tail == b) heap_tail = n;
+    free(p);                                  /* the front part: free (merges with what follows only) */
+    return a;
+}
+
+int posix_memalign(void **out, size_t align, size_t size) {
+    void *p = memalign(align, size);
+    if (!p) return 12;                        /* ENOMEM */
+    *out = p;
+    return 0;
+}
+
+void *aligned_alloc(size_t align, size_t size) { return memalign(align, size); }
+
 void *calloc(size_t count, size_t size) {
     size_t total = count * size;
     if (size && total / size != count) return 0;

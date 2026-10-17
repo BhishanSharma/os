@@ -39,10 +39,71 @@ color = 5E5CE6        # the drawn icon's colour (RRGGBB) when there is no pictur
 `scripts/mkdock.sh` reads these at build time and writes `DOCK.CFG`, which the
 window server reads when it starts.
 
-## The program
+## Views: the easy way (`view.h`)
+
+Describe the window once as a tree of components, then change their state;
+the toolkit redraws only what changed (a table only the rows whose text
+changed) and lays everything out for you, at any size and in Dark mode. Like
+React: state in, minimal redraw out. Problem Report (`user/programs/crashrep.c`)
+and Activity Monitor (`apps/activity/main.c`) are built this way.
+
+```c
+#include <stdio.h>
+#include <view.h>
+
+static view_t *count;
+
+static void more(view_t *button) {
+    static int n;
+    char text[16];
+    snprintf(text, sizeof(text), "Clicked %d times", ++n);
+    v_set_text(count, text);                    // redraws this label, nothing else
+}
+
+int main(void) {
+    int S = ui_scale();
+    ui_window win;
+    if (ui_open(&win, "Counter", 320 * S, 140 * S) < 0) return 1;
+    view_t *root = v_box(0, V_COLUMN);          // the window: a column, 16 pt margins
+    count = v_label(root, "Not clicked yet");
+    view_t *row = v_box(root, V_ROW);
+    v_spacer(row);                              // pushes the button to the right
+    v_button(row, "More", more)->flags = UI_BTN_DEFAULT;   // Return clicks it
+    return v_run(&win, root, 0, 0);             // until the window is closed
+}
+```
+
+| Component | |
+| --------- | - |
+| `v_box(parent, V_COLUMN / V_ROW)` | holds others; `pad`, `gap` (points), `align` (`V_START`, `V_CENTER`, `V_END`, `V_STRETCH`) |
+| `v_label`, `v_text` | a line of text, a wrapped paragraph; `style = UI_BOLD`, `color = UI_C_SECONDARY` |
+| `v_button(parent, "OK", fn)` | calls `fn` when clicked; `flags`: `UI_BTN_DEFAULT`, `UI_BTN_DISABLED` |
+| `v_icon(parent, "folder", 48)` | an icon |
+| `v_table(parent, cols, heads, widths, cell)` | rows from your data: `cell(t, row, col, out, max)` fills in a cell; `v_table_rows(t, n)` after the data changes, `on_select` for clicks |
+| `v_field(parent, "text", on_enter)` | a text field; `on_change` on each key, `hint` a placeholder, `flags = V_SECRET` for passwords |
+| `v_slider(parent, 50, on_change)` | 0-100 in `value` |
+| `v_custom(parent, draw, event)` | anything else: `draw(v, canvas)` paints `[v->x, v->y, v->w, v->h]`, `event(v, e)` gets the mouse (x, y inside it) and, with `focusable = 1`, the keys; call `v_dirty(v)` to have it drawn again |
+| `v_spacer(parent)` | takes the space left |
+
+More: `scale = 2` for a big title; tables take `row_icon`, `row_header`
+(section headings), `on_open` (double-click or Return) and `flags = V_INSET`
+(a sidebar); `v_show(v, 0)` hides a view (its space goes to the others);
+`v_clear(box)` empties a box to fill it again; `on_key` on any view gets the
+keys nothing inside it used (shortcuts); `v_update()` draws now, before
+something slow; `v_alert(icon, title, message)` shows a small message window. Every app in `apps/` is built this way: Paint, Terminal and
+Console show how a custom view does the drawing that no component can.
+
+Set `flex = 1` on a view to give it the space left in its box (several
+share it by their `flex`). Change state only through `v_set_text`,
+`v_set_flags`, `v_set_color`, `v_table_rows`, `v_table_select`: they redraw
+only if the value really changed. `v_run(&win, root, 1000, tick)` also calls
+`tick` every second (refresh your data there); `v_quit(code)` ends it.
+
+## The program, drawn by hand
 
 Every app has the same shape: open a window, draw, wait for an event, draw
-again. This is the template that `new-app.py` writes, shortened:
+again. Views (above) do this for you; drawing by hand gives full control
+(Paint, Terminal). This is the template that `new-app.py` writes, shortened:
 
 ```c
 #include <stdio.h>
@@ -124,7 +185,7 @@ Files: `open`, `read`, `write`, `close` (saved at close), `stat`, `listdir`,
 `mkdir`, `unlink`. Time: `uptime_ms`, `gettime`, `sleep_ms`. Programs:
 `spawn("textedit", argv, 0)` opens another app. Threads: `thread_create`,
 `mutex_lock`. Network: `resolve`, `net_connect`, `net_send`, `net_recv`.
-Sound: `sound_open`, `sound_write` (`video.c` shows how). The comments in
+Sound: `sound_open`, `sound_write` (`apps/music` shows how). The comments in
 `user/include/os.h` explain each one; `docs/USERSPACE.md` covers more.
 
 `printf` writes to the text console (and the serial port): use it for
@@ -132,10 +193,14 @@ debug output, which shows up in the test logs.
 
 ## Rules of thumb
 
-- **No floating point.** Programs are built with `-mgeneral-regs-only`: use
-  integers (fixed point, `* 1000`). The C library is small: `string.h`,
-  `stdio.h` (`snprintf`, `printf`), `stdlib.h`; look in `user/include` for
-  what exists.
+- **No floating point** in your own app code. Apps are built with
+  `-mgeneral-regs-only`, so use integers (fixed point, `* 1000`).
+  - Code ported from elsewhere may use floating point. The Makefile then
+    builds that file with SSE allowed: see `apps/music` and `apps/video`.
+  - The C library covers what ports usually need: `string.h`, `stdio.h`
+    (`printf` with `%f`, `sscanf`), `stdlib.h` (`strtod`, `qsort`,
+    `posix_memalign`), `math.h`, `time.h`, `errno.h`, `inttypes.h`.
+  - Look in `user/include` for what exists.
 - **Multiply sizes by `S`** (`ui_scale()`), so the app looks right on a
   1080p laptop and on a 4K screen.
 - **Lay out from `win.c.w` and `win.c.h`**, not from the size you asked for:
@@ -172,6 +237,8 @@ your change.
 | | |
 | - | - |
 | `apps/*/` | the desktop apps (Files is `finder`) |
+| `apps/finder/main.c` | which app opens which file (`pictures`, `movies`, `songs`, `texts`) |
+| `apps/video/` | Videos: MPEG-1 by pl_mpeg, everything else by FFmpeg (`ff.c`; LGPL, built by `scripts/build-ffmpeg.sh` from the source in the build image) |
 | `user/programs/` | command-line programs and the system's own: `windowserver`, `loginwindow`, `shell`, `launchd` |
 | `user/lib/ui.c`, `user/include/ui.h` | drawing and windows |
 | `user/include/ws.h` | how a window talks to the window server |

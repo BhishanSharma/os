@@ -1,7 +1,14 @@
-// about - About this computer, in a window (and the desktop's own test app)
+// about - About this computer, in a window (and the desktop's own test app).
+// Built from views (view.h).
 #include <stdio.h>
 #include <os.h>
-#include <ui.h>
+#include <view.h>
+
+static void ok(view_t *b) {
+    (void)b;
+    printf("about: OK clicked\n");
+    v_quit(0);
+}
 
 int main(void) {
     int S = ui_scale();
@@ -14,33 +21,28 @@ int main(void) {
     struct os_meminfo m;
     uname(&u);
     meminfo(&m);
-    char line[96];
-    int bx = 340 * S - 96 * S, by = 170 * S - 44 * S, bw = 80 * S, bh = 30 * S, pressed = 0;
-    printf("about: OK button at %d,%d\n", w.x + bx + bw / 2, w.y + by + bh / 2);
-    for (;;) {
-        ui_fill(&w.c, 0, 0, w.c.w, w.c.h, UI_WINDOW);
-        if (ui_icon(&w.c, 14 * S, 18 * S, 72 * S, "computer", 255) != 0) {
-            ui_circle(&w.c, 50 * S, 54 * S, 30 * S, UI_ACCENT);
-            ui_text(&w.c, 50 * S - 8 * S, 54 * S - 16 * S, "i", UI_WHITE, 2 * S);
-        }
-        ui_text(&w.c, 100 * S, 26 * S, u.sysname, UI_TEXT, S);
-        snprintf(line, sizeof(line), "Version %s", u.release);
-        ui_text(&w.c, 100 * S, 48 * S, line, UI_DIM, S);
-        snprintf(line, sizeof(line), "%lu MiB of memory", m.ram >> 20);
-        ui_text(&w.c, 100 * S, 70 * S, line, UI_DIM, S);
-        ui_button(&w.c, bx, by, bw, bh, "OK", S, pressed);
-        ui_present(&w);
-        struct ws_event e;
-        ui_wait(&w, &e, 0);
-        if (e.type == WS_EV_CLOSE) return 0;
-        if (e.type == WS_EV_DOWN && ui_inside(e.x, e.y, bx, by, bw, bh)) pressed = 1;
-        if (e.type == WS_EV_UP && pressed) {
-            if (ui_inside(e.x, e.y, bx, by, bw, bh)) {
-                printf("about: OK clicked\n");
-                return 0;
-            }
-            pressed = 0;
-        }
-        if (e.type == WS_EV_KEY && (e.key == '\n' || e.key == '\r')) return 0;
-    }
+    char version[48], memory[48];
+    snprintf(version, sizeof(version), "Version %s", u.release);
+    snprintf(memory, sizeof(memory), "%lu MiB of memory", m.ram >> 20);
+
+    view_t *root = v_box(0, V_COLUMN);
+    view_t *top = v_box(root, V_ROW);
+    top->gap = 14;
+    top->flex = 1;
+    v_icon(top, "computer", 72);
+    view_t *words = v_box(top, V_COLUMN);
+    words->flex = 1;
+    words->gap = 2;
+    v_label(words, u.sysname);
+    v_label(words, version)->color = UI_C_SECONDARY;
+    v_label(words, memory)->color = UI_C_SECONDARY;
+    view_t *bottom = v_box(root, V_ROW);
+    v_spacer(bottom);
+    view_t *button = v_button(bottom, "OK", ok);
+    button->flags = UI_BTN_DEFAULT;
+    button->want_w = 80;
+
+    v_layout(&w, root);                                /* (the tests click it: where it is) */
+    printf("about: OK button at %d,%d\n", w.x + button->x + button->w / 2, w.y + button->y + button->h / 2);
+    return v_run(&w, root, 0, 0);
 }

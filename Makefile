@@ -268,7 +268,26 @@ $(USER_BUILD)/programs/%.o: user/programs/%.c
 # The video player decodes with pl_mpeg (third_party/pl_mpeg, MIT), whose
 # sound decoder uses floating point: SSE is allowed here (the kernel saves
 # every task's SSE registers).
-$(USER_BUILD)/programs/video.o: USER_CFLAGS := $(filter-out -mgeneral-regs-only,$(USER_CFLAGS)) -I third_party/pl_mpeg -Wno-sign-compare -Wno-unused-function
+
+# Everything else it plays (MP4, MKV, WebM...) is decoded by FFmpeg (LGPL),
+# built from the source in the build image by scripts/build-ffmpeg.sh.
+FFMPEG_SRC ?= /root/ffmpeg
+FFMPEG_OUT  = $(BUILD)/ffmpeg
+FFMPEG_LIBS = $(addprefix $(FFMPEG_OUT)/lib/,libavformat.a libavcodec.a libswresample.a libavutil.a)
+APP_LIBS_video = $(FFMPEG_LIBS) $(shell $(CC) -print-libgcc-file-name)
+$(FFMPEG_OUT)/lib/libavutil.a: scripts/build-ffmpeg.sh | $(USER_BUILD)/libc.a $(USER_BUILD)/crt0.o
+	sh scripts/build-ffmpeg.sh $(FFMPEG_SRC) $(FFMPEG_OUT)
+$(filter-out %/libavutil.a,$(FFMPEG_LIBS)): $(FFMPEG_OUT)/lib/libavutil.a
+$(call app_objs,video): | $(FFMPEG_OUT)/lib/libavutil.a
+$(USER_BUILD)/apps/video/%.o: USER_CFLAGS := $(filter-out -mgeneral-regs-only,$(USER_CFLAGS)) -I third_party/pl_mpeg -I $(FFMPEG_OUT)/include -Wno-sign-compare -Wno-unused-function
+
+# stb_image (third_party/stb, public domain) decodes JPEG, GIF, TGA and PSD;
+# minimp3 (third_party/minimp3, CC0) decodes MP3 for Music. Both use floating point.
+$(USER_BUILD)/lib/stbimage.o: USER_CFLAGS := $(filter-out -mgeneral-regs-only,$(USER_CFLAGS)) -I third_party/stb -w
+# The C library's floating point: maths, strtod, printf's %f (programs that
+# never use floating point don't run any of it).
+$(USER_BUILD)/lib/libm.o $(USER_BUILD)/lib/libc2.o $(USER_BUILD)/lib/stdio.o: USER_CFLAGS := $(filter-out -mgeneral-regs-only,$(USER_CFLAGS)) -fno-math-errno
+$(USER_BUILD)/apps/music/%.o: USER_CFLAGS := $(filter-out -mgeneral-regs-only,$(USER_CFLAGS)) -I third_party/minimp3 -Wno-sign-compare -Wno-unused-function
 
 $(USER_BUILD)/crt0.o: user/crt0.asm
 	@mkdir -p $(dir $@)
@@ -286,8 +305,8 @@ $(USER_BUILD)/apps/%.o: apps/%.c
 	$(CC) $(USER_CFLAGS) -I $(dir $<) -MMD -MP $< -o $@
 
 define APP_RULE
-$(USER_BUILD)/$(1).elf: $(call app_objs,$(1)) $(USER_BUILD)/crt0.o $(USER_BUILD)/libc.a user/user.ld
-	$$(LD) -T user/user.ld -z max-page-size=4096 -z noexecstack -o $$@ $(USER_BUILD)/crt0.o $(call app_objs,$(1)) $(USER_BUILD)/libc.a
+$(USER_BUILD)/$(1).elf: $(call app_objs,$(1)) $$(APP_LIBS_$(1)) $(USER_BUILD)/crt0.o $(USER_BUILD)/libc.a user/user.ld
+	$$(LD) -T user/user.ld -z max-page-size=4096 -z noexecstack -o $$@ $(USER_BUILD)/crt0.o $(call app_objs,$(1)) $$(APP_LIBS_$(1)) $(USER_BUILD)/libc.a
 endef
 $(foreach a,$(app_names),$(eval $(call APP_RULE,$(a))))
 

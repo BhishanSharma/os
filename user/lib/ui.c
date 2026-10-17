@@ -33,8 +33,22 @@ static inline int inside_clip(const ui_canvas *c, int x, int y) {
     return x >= c->cx0 && y >= c->cy0 && x < c->cx1 && y < c->cy1;
 }
 
+/* What was drawn on (clipped), for ui_present: only that is shown again. */
+static inline void touch(ui_canvas *c, int x0, int y0, int x1, int y1) {
+    if (x1 <= x0 || y1 <= y0) return;
+    if (c->dx1 <= c->dx0) {
+        c->dx0 = x0; c->dy0 = y0; c->dx1 = x1; c->dy1 = y1;
+        return;
+    }
+    if (x0 < c->dx0) c->dx0 = x0;
+    if (y0 < c->dy0) c->dy0 = y0;
+    if (x1 > c->dx1) c->dx1 = x1;
+    if (y1 > c->dy1) c->dy1 = y1;
+}
+
 static inline void blend(ui_canvas *c, int x, int y, unsigned color, unsigned a) {
     if (a && inside_clip(c, x, y)) {
+        touch(c, x, y, x + 1, y + 1);
         unsigned *p = c->px + (long)y * c->stride + x;
         *p = mix(*p, color, a);
     }
@@ -47,6 +61,7 @@ void ui_canvas_init(ui_canvas *c, unsigned *px, int w, int h, int stride) {
     c->w = w;
     c->h = h;
     c->stride = stride;
+    c->dx0 = c->dy0 = c->dx1 = c->dy1 = 0;
     ui_noclip(c);
 }
 
@@ -66,6 +81,7 @@ void ui_clip(ui_canvas *c, int x, int y, int w, int h) {
 void ui_fill_a(ui_canvas *c, int x, int y, int w, int h, unsigned color, int alpha) {
     int x0 = x < c->cx0 ? c->cx0 : x, y0 = y < c->cy0 ? c->cy0 : y;
     int x1 = x + w > c->cx1 ? c->cx1 : x + w, y1 = y + h > c->cy1 ? c->cy1 : y + h;
+    touch(c, x0, y0, x1, y1);
     for (int j = y0; j < y1; j++) {
         unsigned *row = c->px + (long)j * c->stride;
         if (alpha >= 255)
@@ -121,6 +137,7 @@ void ui_round_ex(ui_canvas *c, int x, int y, int w, int h, int r, unsigned color
     if (r * 2 > w) r = w / 2;
     int y0 = y < c->cy0 ? c->cy0 : y, y1 = y + h > c->cy1 ? c->cy1 : y + h;
     int x0 = x < c->cx0 ? c->cx0 : x, x1 = x + w > c->cx1 ? c->cx1 : x + w;
+    touch(c, x0, y0, x1, y1);
     for (int py = y0; py < y1; py++) {
         int j = py - y;
         unsigned *row = c->px + (long)py * c->stride;
@@ -151,6 +168,7 @@ void ui_copy(ui_canvas *c, int x, int y, const unsigned *src, int w, int h, int 
     int x0 = x < c->cx0 ? c->cx0 : x, y0 = y < c->cy0 ? c->cy0 : y;
     int x1 = x + w > c->cx1 ? c->cx1 : x + w, y1 = y + h > c->cy1 ? c->cy1 : y + h;
     if (x1 <= x0) return;
+    touch(c, x0, y0, x1, y1);
     for (int j = y0; j < y1; j++)
         memcpy(c->px + (long)j * c->stride + x0, src + (long)(j - y) * stride + (x0 - x),
                (size_t)(x1 - x0) * 4);
@@ -164,6 +182,7 @@ void ui_copy_round(ui_canvas *c, int x, int y, const unsigned *src, int w, int h
     int x0 = x < c->cx0 ? c->cx0 : x, y0 = y < c->cy0 ? c->cy0 : y;
     int x1 = x + w > c->cx1 ? c->cx1 : x + w, y1 = y + h > c->cy1 ? c->cy1 : y + h;
     if (x1 <= x0) return;
+    touch(c, x0, y0, x1, y1);
     for (int py = y0; py < y1; py++) {
         int j = py - y;
         unsigned *dst = c->px + (long)py * c->stride;
@@ -205,6 +224,7 @@ void ui_shadow_ex(ui_canvas *c, int x, int y, int w, int h, int r, int size, int
     if (y0 < c->cy0) y0 = c->cy0;
     if (x1 > c->cx1) x1 = c->cx1;
     if (y1 > c->cy1) y1 = c->cy1;
+    touch(c, x0, y0, x1, y1);
     for (int py = y0; py < y1; py++) {
         unsigned *row = c->px + (long)py * c->stride;
         int qy = y + r - py;
@@ -309,6 +329,8 @@ static void draw_glyph(ui_canvas *c, const face_t *f, const glyph_t *g, long x64
     if (!g->w) return;
     int gx = (int)((x64 + 32) >> 6) + g->x0, gy = y + g->y0;
     if (gx >= c->cx1 || gy >= c->cy1 || gx + g->w <= c->cx0 || gy + g->h <= c->cy0) return;
+    touch(c, gx < c->cx0 ? c->cx0 : gx, gy < c->cy0 ? c->cy0 : gy,
+          gx + g->w > c->cx1 ? c->cx1 : gx + g->w, gy + g->h > c->cy1 ? c->cy1 : gy + g->h);
     const unsigned char *bits = font + g->bitmap;
     for (int j = 0; j < g->h; j++) {
         int py = gy + j;
@@ -486,6 +508,7 @@ int ui_icon(ui_canvas *c, int x, int y, int size, const char *name, int alpha) {
     const unsigned *px = (const unsigned *)(icons + ic->m[k].offset);
     int y0 = y < c->cy0 ? c->cy0 : y, y1 = y + size > c->cy1 ? c->cy1 : y + size;
     int x0 = x < c->cx0 ? c->cx0 : x, x1 = x + size > c->cx1 ? c->cx1 : x + size;
+    touch(c, x0, y0, x1, y1);
     for (int py = y0; py < y1; py++) {
         int v = ((2 * (py - y) + 1) * s * 128) / size - 128;  /* 1/256 texels */
         int ty = v >> 8;
@@ -678,9 +701,38 @@ void ui_set_title(ui_window *w, const char *title) {
     port_close(server);
 }
 
+/* The frame is done: the server may show it. Returns once the server has
+ * read it (by the CPU or the GPU), so the next drawing cannot be seen half
+ * done; this also paces a program at the screen's rate. At most 50 ms (a
+ * busy or stopped server does not stop the program). */
+void ui_damage(ui_window *w, int x, int y, int width, int height) {
+    ui_canvas *c = &w->c;
+    int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+    int x1 = x + width > c->w ? c->w : x + width, y1 = y + height > c->h ? c->h : y + height;
+    touch(c, x0, y0, x1, y1);
+}
+
 void ui_present(ui_window *w) {
     prefs = w->s->prefs;
-    w->s->damage++;
+    ui_canvas *c = &w->c;
+    struct ws_surface *s = w->s;
+    if (c->dx1 <= c->dx0) {                          /* nothing through ui_: all of it (to be safe) */
+        c->dx0 = c->dy0 = 0;
+        c->dx1 = c->w;
+        c->dy1 = c->h;
+    }
+    if (s->dirty_x1 <= s->dirty_x0) {                /* the server took the last: this one alone */
+        s->dirty_x0 = c->dx0; s->dirty_y0 = c->dy0; s->dirty_x1 = c->dx1; s->dirty_y1 = c->dy1;
+    } else {                                         /* not looked at yet: both */
+        if (c->dx0 < s->dirty_x0) s->dirty_x0 = c->dx0;
+        if (c->dy0 < s->dirty_y0) s->dirty_y0 = c->dy0;
+        if (c->dx1 > s->dirty_x1) s->dirty_x1 = c->dx1;
+        if (c->dy1 > s->dirty_y1) s->dirty_y1 = c->dy1;
+    }
+    c->dx0 = c->dy0 = c->dx1 = c->dy1 = 0;
+    unsigned d = ++w->s->damage;
+    unsigned long until = uptime_ms() + 50;
+    while ((int)(w->s->released - d) < 0 && uptime_ms() < until) sleep_ms(1);
 }
 
 void ui_set_resizable(ui_window *w) {
@@ -725,6 +777,13 @@ int ui_poll(ui_window *w, struct ws_event *e) {
     if (s->ev_tail == s->ev_head) return 0;
     *e = s->ev[s->ev_tail % WS_EVENTS];
     s->ev_tail++;
+    /* Pointer moves with no button down: only the newest of a run counts
+     * (hover). With a button down every one does (drawing, dragging). */
+    while (e->type == WS_EV_MOVE && !e->buttons && s->ev_tail != s->ev_head &&
+           s->ev[s->ev_tail % WS_EVENTS].type == WS_EV_MOVE && !s->ev[s->ev_tail % WS_EVENTS].buttons) {
+        *e = s->ev[s->ev_tail % WS_EVENTS];
+        s->ev_tail++;
+    }
     if (e->type == WS_EV_RESIZE) resize(w, e->x, e->y);
     return 1;
 }

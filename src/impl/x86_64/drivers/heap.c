@@ -43,7 +43,9 @@ static uint64_t allocation_count;
 #define ALIGN(size) (((size) + 15) & ~15ULL)
 
 void heap_init(uint64_t start, uint64_t size) {
-    start = (start + 15) & ~15ULL;
+    uint64_t aligned = (start + 15) & ~15ULL;
+    size -= aligned - start;
+    start = aligned;
     heap_base = start;
     heap_end = start + size;
     heap_size = size;

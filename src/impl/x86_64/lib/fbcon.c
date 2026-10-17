@@ -409,9 +409,13 @@ static int pending_finish(int wait) {
             if (surface) cpu_pre(pend_pre, pend_npre);
             for (int i = 0; i < pend_n; i++) copy_rect(dst, &pend_rects[i]);
         } else {
-            for (int i = 0; i < 200 && !igfx_copy_done(pending_seq); i++)
-                for (int k = 0; k < 1000; k++) __asm__ volatile("pause");   /* (usually well under 1 ms) */
-            if (!igfx_copy_done(pending_seq)) task_block((const void *)&pending, 1);
+            /* Wait without the kernel lock: holding it stalled every core
+             * (and the touchpad's polling) for each frame's copy. */
+            uint32_t seq = pending_seq, until = timer_ms() + 2;
+            int depth = bkl_drop();
+            while (!igfx_copy_done(seq) && timer_ms() < until) __asm__ volatile("pause");
+            bkl_take(depth);
+            if (pending >= 0 && !igfx_copy_done(pending_seq)) task_block((const void *)&pending, 1);
             continue;
         }
         igfx_flip(pending);

@@ -45,6 +45,7 @@ typedef struct {
     unsigned *px;
     int w, h, stride;
     int cx0, cy0, cx1, cy1;        /* drawing stays inside [cx0, cx1) x [cy0, cy1) */
+    int dx0, dy0, dx1, dy1;        /* what was drawn on since ui_present (empty: dx1 <= dx0) */
 } ui_canvas;
 
 void ui_canvas_init(ui_canvas *c, unsigned *px, int w, int h, int stride);
@@ -151,6 +152,9 @@ int ui_open(ui_window *w, const char *title, int width, int height);   /* -> 0, 
 void ui_set_title(ui_window *w, const char *title);
 void ui_set_resizable(ui_window *w);                      /* it redraws on WS_EV_RESIZE: zoom allowed */
 void ui_present(ui_window *w);                            /* show what was drawn */
+/* Pixels changed without the ui_ functions (written into c.px directly): tell
+ * ui_present they changed too. */
+void ui_damage(ui_window *w, int x, int y, int width, int height);
 int ui_poll(ui_window *w, struct ws_event *e);             /* -> 1 if there was an event */
 int ui_wait(ui_window *w, struct ws_event *e, int timeout_ms);   /* 0 = no limit; -> 0 on timeout */
 

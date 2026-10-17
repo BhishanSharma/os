@@ -7,10 +7,13 @@
 // The wheel, or Shift+Up/Down, scrolls back through older output; the green
 // button makes the window fill the screen and the text follows its size.
 // With a command, it is typed first (Files opens programs with `terminal x`).
+//
+// Built from views (view.h): the screen is one custom view that draws the
+// text and takes the keys; the reader thread marks it dirty.
 #include <stdio.h>
 #include <string.h>
 #include <os.h>
-#include <ui.h>
+#include <view.h>
 
 #define MAXC 240                        /* the widest line kept */
 #define LINES 1000                      /* the scrollback */
@@ -22,6 +25,7 @@
 #define KEY_SCROLL_DOWN 1002
 
 static ui_window win;
+static view_t *screen;
 static mutex_t lock;
 static volatile int dirty = 1;
 static int to_shell, from_shell, shell_pid;
@@ -76,18 +80,20 @@ static void reader(void *arg) {
     }
 }
 
-static void fit(void) {                                 /* the window's size in characters */
+static void fit(void) {                                 /* the view's size in characters */
     int S = win.scale;
-    cols = (win.c.w - 8 * S) / (8 * S);
-    rows = (win.c.h - 8 * S) / (16 * S);
+    cols = (screen->w - 8 * S) / (8 * S);
+    rows = (screen->h - 8 * S) / (16 * S);
     if (cols > MAXC) cols = MAXC;
     if (cols < 10) cols = 10;
     if (rows < 2) rows = 2;
 }
 
-static void draw(void) {
-    int S = win.scale, cw = 8 * S, ch = 16 * S, m = 4 * S;
-    ui_fill(&win.c, 0, 0, win.c.w, win.c.h, BG);
+static void draw(view_t *v, ui_canvas *c) {
+    mutex_lock(&lock);
+    fit();
+    int S = win.scale, cw = 8 * S, ch = 16 * S, m = 4 * S, ox = v->x, oy = v->y;
+    ui_fill(c, ox, oy, v->w, v->h, BG);
     /* The screen's lines from the bottom up: the typed line follows the
      * output on the newest line, wrapped at the window's width. */
     static char tail[MAXC + 256];
@@ -114,21 +120,21 @@ static void draw(void) {
             n = tlen - k < cols ? tlen - k : cols;
         }
         for (int c = 0; c < n; c++)
-            if (s[c] != ' ') ui_char(&win.c, m + c * cw, m + r * ch, (unsigned char)s[c], FG, S);
+            if (s[c] != ' ') ui_char(&win.c, ox + m + c * cw, oy + m + r * ch, (unsigned char)s[c], FG, S);
     }
     if (!back) {                                           /* the cursor */
         int at = col + (secret ? 0 : cur);
         int r = rows - (tail_rows - at / cols);
-        ui_fill(&win.c, m + (at % cols) * cw, m + r * ch, cw, ch, CURSOR);
+        ui_fill(&win.c, ox + m + (at % cols) * cw, oy + m + r * ch, cw, ch, CURSOR);
         if (!secret && cur < line_len)
-            ui_char(&win.c, m + (at % cols) * cw, m + r * ch, (unsigned char)line[cur], BG, S);
+            ui_char(&win.c, ox + m + (at % cols) * cw, oy + m + r * ch, (unsigned char)line[cur], BG, S);
     } else {                                               /* where the view is in the scrollback */
-        int track = win.c.h - 2 * m, bar = track * rows / total;
+        int track = v->h - 2 * m, bar = track * rows / total;
         if (bar < 12 * S) bar = 12 * S;
         int y = m + (track - bar) * (bottom - rows) / (total - rows > 0 ? total - rows : 1);
-        ui_round(&win.c, win.c.w - 6 * S, y, 3 * S, bar, S, 0x8A8A96);
+        ui_round(&win.c, ox + v->w - 6 * S, oy + y, 3 * S, bar, S, 0x8A8A96);
     }
-    ui_present(&win);
+    mutex_unlock(&lock);
 }
 
 static void scroll_by(int n) {
@@ -242,6 +248,23 @@ static void key(int k) {
     }
 }
 
+/* Keys and the wheel, from the view. */
+static int screen_event(view_t *v, const struct ws_event *e) {
+    if (e->type != WS_EV_KEY && e->type != WS_EV_WHEEL) return 0;
+    mutex_lock(&lock);
+    if (e->type == WS_EV_KEY) key(e->key);
+    else scroll_by(-e->key * 3);
+    mutex_unlock(&lock);
+    v_dirty(v);
+    return 1;
+}
+
+static void tick(void) {                                /* the reader printed: show it */
+    if (!dirty) return;
+    dirty = 0;
+    v_dirty(screen);
+}
+
 int main(int argc, char **argv) {
     int S = ui_scale();
     if (ui_open(&win, "Terminal", 80 * 8 * S + 8 * S, 25 * 16 * S + 8 * S) < 0) {
@@ -249,6 +272,11 @@ int main(int argc, char **argv) {
         return 1;
     }
     ui_set_resizable(&win);
+    view_t *root = v_box(0, V_COLUMN);
+    root->pad = 0;
+    screen = v_custom(root, draw, screen_event);
+    screen->focusable = 1;
+    v_layout(&win, root);
     fit();
     memset(text[0], ' ', MAXC);
     if (start_shell() < 0) {
@@ -264,23 +292,5 @@ int main(int argc, char **argv) {
         }
         send_line(cmd);
     }
-    for (;;) {
-        struct ws_event e;
-        while (ui_poll(&win, &e)) {
-            if (e.type == WS_EV_CLOSE) exit(0);
-            mutex_lock(&lock);
-            if (e.type == WS_EV_KEY) key(e.key);
-            else if (e.type == WS_EV_WHEEL) scroll_by(-e.key * 3);
-            else if (e.type == WS_EV_RESIZE) fit();
-            dirty = 1;
-            mutex_unlock(&lock);
-        }
-        if (dirty) {
-            mutex_lock(&lock);
-            dirty = 0;
-            draw();
-            mutex_unlock(&lock);
-        }
-        sleep_ms(15);
-    }
+    return v_run(&win, root, 15, tick);
 }

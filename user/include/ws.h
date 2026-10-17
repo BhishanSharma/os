@@ -60,6 +60,11 @@ struct ws_surface {
     volatile int focused;
     volatile unsigned prefs;           /* WS_PREF_*, written by the server */
     struct ws_event ev[WS_EVENTS];
+    volatile int dirty_x0, dirty_y0, dirty_x1, dirty_y1;   /* the program: what changed since the
+                                          server last looked (x1 <= x0: all of it); the server clears it */
+    volatile unsigned released;        /* the server: the last `damage` it has finished reading
+                                          (ui_present waits for it: no drawing into a frame
+                                          while the screen is being made from it) */
 };
 
 static inline unsigned long ws_surface_size(int w, int h) {

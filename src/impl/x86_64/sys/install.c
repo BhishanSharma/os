@@ -311,8 +311,11 @@ void install_run(void) {
                 return;
             }
         print_str("Formatting... ");
-        if (disk_open_nvme_partition(p->start, p->sectors, 1, p->number, &dev) != 0 ||
-            fatvol_format(&dev, p->start, OUR_LABEL) != 0) {
+        kmutex_lock(&vfs_lock);                       /* (see the copy below) */
+        int bad = disk_open_nvme_partition(p->start, p->sectors, 1, p->number, &dev) != 0 ||
+                  fatvol_format(&dev, p->start, OUR_LABEL) != 0;
+        kmutex_unlock(&vfs_lock);
+        if (bad) {
             print_str("failed.\n");
             return;
         }
@@ -333,7 +336,12 @@ void install_run(void) {
         mounted_here = 1;
     }
     print_str("Copying Terminal OS:\n");
+    /* The file system's lock, as every vfs call holds it: the disk's waits let
+     * other cores into the kernel, and logd writing the log to the USB stick
+     * meanwhile ran inside these fat32 calls (an install hung now and then). */
+    kmutex_lock(&vfs_lock);
     int r = copy_files(strcmp(mounted, "/") ? mounted : "");
+    kmutex_unlock(&vfs_lock);
     if (mounted_here) vfs_unmount("/INSTALL");
     if (r != 0) {
         print_str("install: stopped; the boot menu was not changed.\n");

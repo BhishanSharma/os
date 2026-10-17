@@ -1,33 +1,53 @@
 // settings [wifi|sound|battery|display|about] - System Settings: Wi-Fi
 // networks, the volume, the battery, the screen and this computer.
+//
+// Built from views (view.h): a sidebar table of panes, and one box per pane
+// of which only the chosen one is shown. Every two seconds the state is read
+// again; only the views whose text or value changed are drawn.
 #include <stdio.h>
 #include <string.h>
 #include <os.h>
-#include <ui.h>
+#include <view.h>
 
 enum { P_WIFI, P_SOUND, P_BATTERY, P_DISPLAY, P_ABOUT, PANES };
 static const char *pane_names[PANES] = { "Wi-Fi", "Sound", "Battery", "Display", "About" };
 static const char *pane_icons[PANES] = { "wifi", "sound", "battery", "computer", "info" };
 
-static ui_window win;
-static int S, pane, SIDE;
+static int S, pane;
+static view_t *sidebar, *title, *panes[PANES];
 
 /* Wi-Fi */
 static struct os_wifi nets[24], now;
-static int n_nets, connected, have_card = 1, picked = -1, typing;
-static char password[64], wifi_msg[80];
+static int n_nets, connected, have_card = 1, picked = -1;
+static view_t *no_card, *wifi_box, *status, *signal_lbl, *disconnect, *message, *networks, *join_row, *password;
 
 /* Sound */
-static int vol = -1, muted_at = -1, dragging;
+static int vol = -1, muted_at = -1;
+static view_t *no_sound, *sound_box, *vol_label, *slider, *mute;
 
-static void button(int x, int y, int w, const char *label, int on) {
-    ui_button(&win.c, x, y, w, 28 * S, label, S, on);
+/* Battery */
+static int bat = -1;
+static view_t *bat_label, *bat_bar;
+
+static const char *strength(int signal) {
+    return signal >= -55 ? "Excellent" : signal >= -65 ? "Good" : signal >= -75 ? "Fair" : "Weak";
 }
 
-static void bars(int x, int y, int signal, unsigned color) {
-    int n = signal >= -55 ? 4 : signal >= -65 ? 3 : signal >= -75 ? 2 : 1;
-    for (int i = 0; i < 4; i++)
-        ui_round(&win.c, x + i * 5 * S, y + (12 - 3 * i) * S, 3 * S, (3 + 3 * i) * S, S, i < n ? color : 0xD0D0D6);
+/* ---- Wi-Fi ----------------------------------------------------------------- */
+
+static void show_wifi(void) {
+    v_show(no_card, !have_card);
+    v_show(wifi_box, have_card);
+    char line[96];
+    if (connected) snprintf(line, sizeof(line), "Connected to %s   %s", now.name, now.address);
+    else snprintf(line, sizeof(line), "Not connected");
+    v_set_text(status, line);
+    v_set_text(signal_lbl, connected ? strength(now.signal) : "");
+    v_show(disconnect, connected);
+    v_table_rows(networks, n_nets);
+    v_table_select(networks, picked);
+    v_show(join_row, picked >= 0);
+    v_show(password, picked >= 0 && nets[picked].secured);
 }
 
 static void refresh_wifi(void) {
@@ -36,98 +56,185 @@ static void refresh_wifi(void) {
     connected = r == 1;
 }
 
-static void draw_wifi(int x, int y, int w) {
-    ui_canvas *c = &win.c;
-    if (!have_card) {
-        ui_text(c, x, y, "No Wi-Fi card was found.", UI_DIM, S);
-        return;
+static void net_cell(view_t *t, int row, int col, char *out, int max) {
+    (void)t;
+    if (col == 0) snprintf(out, max, "%s", nets[row].name);
+    else if (col == 1) snprintf(out, max, "%s", strength(nets[row].signal));
+    else snprintf(out, max, "%s", nets[row].secured ? "Secured" : "Open");
+}
+
+static void scan(view_t *b) {
+    (void)b;
+    v_set_text(message, "Looking for networks...");
+    v_update();                                        /* (the scan takes a few seconds) */
+    n_nets = wifi_scan(nets, 24);
+    if (n_nets < 0) {
+        char line[80];
+        snprintf(line, sizeof(line), "Scanning failed: %s", os_strerror(n_nets));
+        v_set_text(message, line);
+        n_nets = 0;
+    } else {
+        v_set_text(message, n_nets ? "" : "No networks heard.");
     }
+    picked = -1;
+    show_wifi();
+}
+
+static void disconnect_now(view_t *b) {
+    (void)b;
+    wifi_disconnect();
+    refresh_wifi();
+    show_wifi();
+}
+
+static void pick_net(view_t *t, int row) {
+    (void)t;
+    picked = row;
+    v_set_text(password, "");
+    show_wifi();
+    if (nets[row].secured) v_focus(password);
+}
+
+static void join(view_t *b) {
+    (void)b;
+    if (picked < 0) return;
     char line[96];
-    if (connected) snprintf(line, sizeof(line), "Connected to %s   %s", now.name, now.address);
-    else snprintf(line, sizeof(line), "Not connected");
-    ui_text_bold(c, x, y, line, UI_TEXT, S);
-    if (connected) bars(x + w - 30 * S, y, now.signal, UI_ACCENT);
-    y += 30 * S;
-    button(x, y, 110 * S, "Scan", 0);
-    if (connected) button(x + 120 * S, y, 120 * S, "Disconnect", 0);
-    y += 40 * S;
-    if (wifi_msg[0]) {
-        ui_text(c, x, y, wifi_msg, UI_DIM, S);
-        y += 24 * S;
-    }
-    for (int i = 0; i < n_nets && y < win.c.h - 80 * S; i++, y += 30 * S) {
-        if (i == picked) ui_round(c, x - 6 * S, y - 4 * S, w + 12 * S, 28 * S, 6 * S, UI_ACCENT);
-        unsigned fg = i == picked ? UI_WHITE : UI_TEXT;
-        bars(x, y + S, nets[i].signal, i == picked ? UI_WHITE : 0x606068);
-        ui_text(c, x + 30 * S, y, nets[i].name, fg, S);
-        if (nets[i].secured) ui_text(c, x + w - 60 * S, y, "secured", i == picked ? UI_WHITE : UI_DIM, S);
-    }
-    if (picked >= 0) {
-        int py = win.c.h - 50 * S;
-        if (nets[picked].secured) {
-            ui_text(c, x, py + 6 * S, "Password", UI_TEXT, S);
-            char dots[64];
-            int n = (int)strlen(password);
-            for (int i = 0; i < n && i < 63; i++) dots[i] = '*';
-            dots[n < 63 ? n : 63] = 0;
-            ui_textfield(c, x + 80 * S, py, w - 180 * S, 28 * S, dots, S, typing);
-        }
-        button(x + w - 90 * S, py, 90 * S, "Join", 0);
-    }
+    snprintf(line, sizeof(line), "Joining %s...", nets[picked].name);
+    v_set_text(message, line);
+    v_update();
+    int r = wifi_connect(nets[picked].name, password->text);
+    memset(password->text, 0, sizeof(password->text));
+    refresh_wifi();
+    v_set_text(message, r == 0 ? "Connected." : "Could not join: check the password.");
+    picked = -1;
+    show_wifi();
 }
 
-static void slider(int x, int y, int w, int value) {
-    ui_round(&win.c, x, y + 10 * S, w, 6 * S, 3 * S, 0xD8D8DE);
-    ui_round(&win.c, x, y + 10 * S, w * value / 100, 6 * S, 3 * S, UI_ACCENT);
-    int kx = x + w * value / 100;
-    ui_shadow(&win.c, kx - 11 * S, y + 2 * S, 22 * S, 22 * S, 11 * S, 3 * S, 60);
-    ui_circle(&win.c, kx, y + 13 * S, 11 * S, UI_WHITE);
+static void build_wifi(view_t *p) {
+    no_card = v_label(p, "No Wi-Fi card was found.");
+    no_card->color = UI_C_SECONDARY;
+    wifi_box = v_box(p, V_COLUMN);
+    wifi_box->flex = 1;
+    wifi_box->gap = 10;
+    view_t *top = v_box(wifi_box, V_ROW);
+    status = v_label(top, "");
+    status->style = UI_BOLD;
+    status->flex = 1;
+    signal_lbl = v_label(top, "");
+    signal_lbl->color = UI_C_SECONDARY;
+    view_t *buttons = v_box(wifi_box, V_ROW);
+    v_button(buttons, "Scan", scan);
+    disconnect = v_button(buttons, "Disconnect", disconnect_now);
+    v_spacer(buttons);
+    message = v_label(wifi_box, "");
+    message->color = UI_C_SECONDARY;
+    static const char *heads[] = { "Network", "Signal", "Security" };
+    static const int widths[] = { 220, 100, 90 };
+    networks = v_table(wifi_box, 3, heads, widths, net_cell);
+    networks->on_select = pick_net;
+    join_row = v_box(wifi_box, V_ROW);
+    join_row->align = V_CENTER;
+    password = v_field(join_row, "", join);
+    password->flags = V_SECRET;
+    password->flex = 1;
+    snprintf(password->hint, sizeof(password->hint), "Password");
+    v_button(join_row, "Join", join)->flags = UI_BTN_DEFAULT;
 }
 
-static void draw_sound(int x, int y, int w) {
-    ui_canvas *c = &win.c;
-    if (vol < 0) {
-        ui_text(c, x, y, "No sound device was found.", UI_DIM, S);
-        return;
-    }
+/* ---- Sound ----------------------------------------------------------------- */
+
+static void show_sound(void) {
+    v_show(no_sound, vol < 0);
+    v_show(sound_box, vol >= 0);
     char line[32];
-    snprintf(line, sizeof(line), "Output volume: %d%%", vol);
-    ui_text_bold(c, x, y, line, UI_TEXT, S);
-    slider(x, y + 30 * S, w - 20 * S, vol);
-    button(x, y + 80 * S, 110 * S, vol ? "Mute" : "Unmute", 0);
-    button(x + 120 * S, y + 80 * S, 110 * S, "Test", 0);
+    snprintf(line, sizeof(line), "Output volume: %d%%", vol < 0 ? 0 : vol);
+    v_set_text(vol_label, line);
+    v_set_value(slider, vol < 0 ? 0 : vol);
+    v_set_text(mute, vol ? "Mute" : "Unmute");
 }
 
-static void draw_battery(int x, int y, int w) {
-    ui_canvas *c = &win.c;
-    int b = battery();
-    if (b < 0) {
-        ui_text(c, x, y, "This computer has no battery.", UI_DIM, S);
-        return;
+static void slid(view_t *s) {
+    vol = volume(s->value);
+    show_sound();
+}
+
+static void mute_now(view_t *b) {
+    (void)b;
+    if (vol) {
+        muted_at = vol;
+        vol = volume(0);
+    } else {
+        vol = volume(muted_at > 0 ? muted_at : 50);
     }
-    int p = b & 0xFF;
-    char line[48];
-    snprintf(line, sizeof(line), "%d%%  %s", p, (b & 0x100) ? "charging" : "on battery");
-    ui_text_style(c, x, y, line, UI_TEXT, 2 * S, UI_BOLD);
-    int bw = w - 40 * S, bh = 40 * S, by = y + 60 * S;
-    ui_round(c, x, by, bw, bh, 10 * S, 0xC8C8D0);
-    ui_round(c, x + 3 * S, by + 3 * S, bw - 6 * S, bh - 6 * S, 8 * S, UI_WHITE);
-    ui_round(c, x + 5 * S, by + 5 * S, (bw - 10 * S) * p / 100, bh - 10 * S, 6 * S,
-             p <= 20 ? 0xFF5F57 : (b & 0x100) ? 0x28C840 : UI_ACCENT);
+    show_sound();
 }
 
-static void draw_display(int x, int y, int w) {
+static void test_sound(view_t *b) {
+    (void)b;
+    kcommand("beep");
+}
+
+static void build_sound(view_t *p) {
+    no_sound = v_label(p, "No sound device was found.");
+    no_sound->color = UI_C_SECONDARY;
+    sound_box = v_box(p, V_COLUMN);
+    sound_box->gap = 14;
+    vol_label = v_label(sound_box, "");
+    vol_label->style = UI_BOLD;
+    slider = v_slider(sound_box, 0, slid);
+    view_t *buttons = v_box(sound_box, V_ROW);
+    mute = v_button(buttons, "Mute", mute_now);
+    v_button(buttons, "Test", test_sound);
+    v_spacer(buttons);
+}
+
+/* ---- Battery --------------------------------------------------------------- */
+
+static void draw_bar(view_t *v, ui_canvas *c) {
+    ui_fill(c, v->x, v->y, v->w, v->h, ui_color(UI_C_WINDOW));
+    if (bat < 0) return;
+    int p = bat & 0xFF, x = v->x, y = v->y, w = v->w, h = v->h;
+    ui_round(c, x, y, w, h, 10 * S, ui_color(UI_C_CONTROL_EDGE));
+    ui_round(c, x + 3 * S, y + 3 * S, w - 6 * S, h - 6 * S, 8 * S, ui_color(UI_C_CONTENT));
+    ui_round(c, x + 5 * S, y + 5 * S, (w - 10 * S) * p / 100, h - 10 * S, 6 * S,
+             p <= 20 ? 0xFF5F57 : (bat & 0x100) ? 0x28C840 : ui_color(UI_C_ACCENT));
+}
+
+static void show_battery(void) {
+    bat = battery();
+    char line[48];
+    if (bat < 0) snprintf(line, sizeof(line), "This computer has no battery.");
+    else snprintf(line, sizeof(line), "%d%%  %s", bat & 0xFF, (bat & 0x100) ? "charging" : "on battery");
+    v_set_text(bat_label, line);
+    v_show(bat_bar, bat >= 0);
+    v_set_value(bat_bar, bat);                         /* (redraws the bar when it changes) */
+}
+
+static void build_battery(view_t *p) {
+    bat_label = v_label(p, "");
+    bat_label->style = UI_BOLD;
+    bat_label->scale = 2;
+    bat_bar = v_custom(p, draw_bar, 0);
+    bat_bar->flex = 0;
+    bat_bar->want_h = 40;
+}
+
+/* ---- Display, About ------------------------------------------------------- */
+
+static void build_display(view_t *p) {
     struct os_gfx_info g;
     char line[64];
     gfx_info(&g);
     snprintf(line, sizeof(line), "%d x %d pixels", g.width, g.height);
-    ui_text_style(&win.c, x, y, line, UI_TEXT, 2 * S, UI_BOLD);
+    view_t *big = v_label(p, line);
+    big->style = UI_BOLD;
+    big->scale = 2;
     snprintf(line, sizeof(line), "Drawn at %dx for sharp text (Retina-style)", S);
-    ui_text(&win.c, x, y + 50 * S, line, UI_DIM, S);
-    ui_text(&win.c, x, y + 74 * S, "The native mode comes from the screen's EDID.", UI_DIM, S);
+    v_label(p, line)->color = UI_C_SECONDARY;
+    v_label(p, "The native mode comes from the screen's EDID.")->color = UI_C_SECONDARY;
 }
 
-static void draw_about(int x, int y, int w) {
+static void build_about(view_t *p) {
     struct os_uname u;
     struct os_meminfo m;
     struct os_user me;
@@ -135,120 +242,57 @@ static void draw_about(int x, int y, int w) {
     meminfo(&m);
     getuser(&me);
     char line[96];
-    ui_icon(&win.c, x, y, 80 * S, "computer", 255);
-    ui_text_style(&win.c, x + 100 * S, y + 6 * S, u.sysname, UI_TEXT, 2 * S, UI_BOLD);
+    view_t *top = v_box(p, V_ROW);
+    top->gap = 20;
+    v_icon(top, "computer", 80);
+    view_t *names = v_box(top, V_COLUMN);
+    names->flex = 1;
+    view_t *big = v_label(names, u.sysname);
+    big->style = UI_BOLD;
+    big->scale = 2;
     snprintf(line, sizeof(line), "Version %s (x86_64)", u.release);
-    ui_text(&win.c, x + 100 * S, y + 46 * S, line, UI_DIM, S);
+    v_label(names, line)->color = UI_C_SECONDARY;
     snprintf(line, sizeof(line), "Memory: %lu MiB", m.ram >> 20);
-    ui_text(&win.c, x, y + 110 * S, line, UI_TEXT, S);
+    v_label(p, line);
     snprintf(line, sizeof(line), "Computer name: %s", u.hostname);
-    ui_text(&win.c, x, y + 134 * S, line, UI_TEXT, S);
+    v_label(p, line);
     snprintf(line, sizeof(line), "You are %s%s", me.name, me.uid == 0 ? " (administrator)" : "");
-    ui_text(&win.c, x, y + 158 * S, line, UI_TEXT, S);
+    v_label(p, line);
 }
 
-static void draw(void) {
-    ui_canvas *c = &win.c;
-    ui_fill(c, 0, 0, c->w, c->h, UI_WHITE);
-    ui_fill(c, 0, 0, SIDE, c->h, 0xF0F0F4);
-    ui_fill(c, SIDE, 0, 1, c->h, 0xDADAE0);
-    for (int i = 0; i < PANES; i++) {
-        int y = 14 * S + i * 36 * S;
-        if (i == pane) ui_round(c, 8 * S, y, SIDE - 16 * S, 32 * S, 7 * S, UI_ACCENT);
-        ui_icon(c, 16 * S, y + 5 * S, 22 * S, pane_icons[i], 255);
-        ui_text(c, 46 * S, y + 8 * S, pane_names[i], i == pane ? UI_WHITE : UI_TEXT, S);
-    }
-    int x = SIDE + 24 * S, y = 20 * S, w = c->w - x - 24 * S;
-    ui_text_style(c, x, y, pane_names[pane], UI_TEXT, 2 * S, UI_BOLD);
-    y += 50 * S;
-    if (pane == P_WIFI) draw_wifi(x, y, w);
-    else if (pane == P_SOUND) draw_sound(x, y, w);
-    else if (pane == P_BATTERY) draw_battery(x, y, w);
-    else if (pane == P_DISPLAY) draw_display(x, y, w);
-    else draw_about(x, y, w);
-    ui_present(&win);
+/* ---- The window ------------------------------------------------------------ */
+
+static void choose(int i) {
+    pane = i;
+    for (int k = 0; k < PANES; k++) v_show(panes[k], k == i);
+    v_set_text(title, pane_names[i]);
+    v_table_select(sidebar, i);
 }
 
-static void scan(void) {
-    snprintf(wifi_msg, sizeof(wifi_msg), "Looking for networks...");
-    draw();
-    n_nets = wifi_scan(nets, 24);
-    if (n_nets < 0) {
-        snprintf(wifi_msg, sizeof(wifi_msg), "Scanning failed: %s", os_strerror(n_nets));
-        n_nets = 0;
-    } else {
-        snprintf(wifi_msg, sizeof(wifi_msg), n_nets ? "" : "No networks heard.");
-    }
-    picked = -1;
+static void pane_cell(view_t *t, int row, int col, char *out, int max) {
+    (void)t;
+    (void)col;
+    snprintf(out, max, "%s", pane_names[row]);
 }
 
-static void join(void) {
-    snprintf(wifi_msg, sizeof(wifi_msg), "Joining %s...", nets[picked].name);
-    draw();
-    int r = wifi_connect(nets[picked].name, password);
-    memset(password, 0, sizeof(password));
+static const char *pane_icon(view_t *t, int row) {
+    (void)t;
+    return pane_icons[row];
+}
+
+static void picked_pane(view_t *t, int row) {
+    (void)t;
+    choose(row);
+}
+
+static void tick(void) {                               /* now and then: the network, the battery */
     refresh_wifi();
-    snprintf(wifi_msg, sizeof(wifi_msg), r == 0 ? "Connected." : "Could not join: check the password.");
-    picked = -1;
-    typing = 0;
-}
-
-static void set_volume_at(int ex) {
-    int x = SIDE + 24 * S, w = win.c.w - x - 24 * S - 20 * S;
-    int v = (ex - x) * 100 / w;
-    vol = volume(v < 0 ? 0 : v > 100 ? 100 : v);
-}
-
-static void click(int ex, int ey) {
-    if (ex < SIDE) {
-        int i = (ey - 14 * S) / (36 * S);
-        if (i >= 0 && i < PANES) pane = i;
-        return;
-    }
-    int x = SIDE + 24 * S, y = 70 * S, w = win.c.w - x - 24 * S;
-    if (pane == P_WIFI && have_card) {
-        int by = y + 30 * S;
-        if (ui_inside(ex, ey, x, by, 110 * S, 28 * S)) {
-            scan();
-            return;
-        }
-        if (connected && ui_inside(ex, ey, x + 120 * S, by, 120 * S, 28 * S)) {
-            wifi_disconnect();
-            refresh_wifi();
-            return;
-        }
-        int ly = by + 40 * S + (wifi_msg[0] ? 24 * S : 0);
-        if (ey >= ly - 4 * S && ey < win.c.h - 80 * S) {
-            int i = (ey - ly + 4 * S) / (30 * S);
-            if (i < n_nets) {
-                picked = i;
-                typing = nets[i].secured;
-                password[0] = 0;
-            }
-            return;
-        }
-        if (picked >= 0 && ui_inside(ex, ey, x + w - 90 * S, win.c.h - 50 * S, 90 * S, 28 * S)) join();
-        else if (picked >= 0) typing = nets[picked].secured;
-    } else if (pane == P_SOUND && vol >= 0) {
-        if (ey >= y + 26 * S && ey < y + 60 * S) {
-            dragging = 1;
-            set_volume_at(ex);
-        } else if (ui_inside(ex, ey, x, y + 80 * S, 110 * S, 28 * S)) {
-            if (vol) {
-                muted_at = vol;
-                vol = volume(0);
-            } else {
-                vol = volume(muted_at > 0 ? muted_at : 50);
-            }
-        } else if (ui_inside(ex, ey, x + 120 * S, y + 80 * S, 110 * S, 28 * S)) {
-            kcommand("beep");
-        }
-    }
+    show_wifi();
+    show_battery();
 }
 
 int main(int argc, char **argv) {
     S = ui_scale();
-    SIDE = 170 * S;
     for (int i = 0; argc > 1 && i < PANES; i++) {
         char lower[16];
         int k = 0;
@@ -259,41 +303,48 @@ int main(int argc, char **argv) {
         lower[k] = 0;
         if (!strcmp(argv[1], lower) || (!strcmp(argv[1], "wifi") && i == P_WIFI)) pane = i;
     }
+    ui_window win;
     if (ui_open(&win, "System Settings", 660 * S, 440 * S) < 0) {
         printf("settings: the desktop is not running\n");
         return 1;
     }
     ui_set_resizable(&win);
+
+    view_t *root = v_box(0, V_ROW);
+    root->pad = root->gap = 0;
+    sidebar = v_table(root, 1, 0, 0, pane_cell);
+    sidebar->flags = V_INSET;
+    sidebar->flex = 0;
+    sidebar->want_w = 170;
+    sidebar->row_h = 36;
+    sidebar->bg = UI_C_SIDEBAR;
+    sidebar->row_icon = pane_icon;
+    sidebar->on_select = picked_pane;
+    v_table_rows(sidebar, PANES);
+    view_t *content = v_box(root, V_COLUMN);
+    content->flex = 1;
+    content->pad = 24;
+    content->gap = 14;
+    title = v_label(content, "");
+    title->style = UI_BOLD;
+    title->scale = 2;
+    for (int i = 0; i < PANES; i++) {
+        panes[i] = v_box(content, V_COLUMN);
+        panes[i]->flex = 1;
+        panes[i]->gap = 10;
+    }
+    build_wifi(panes[P_WIFI]);
+    build_sound(panes[P_SOUND]);
+    build_battery(panes[P_BATTERY]);
+    build_display(panes[P_DISPLAY]);
+    build_about(panes[P_ABOUT]);
+
     refresh_wifi();
     vol = volume(-1);
     if (vol < 0) vol = -1;
-    draw();
-    for (;;) {
-        struct ws_event e;
-        if (!ui_wait(&win, &e, 2000)) {                /* now and then: the battery, the network */
-            refresh_wifi();
-            draw();
-            continue;
-        }
-        if (e.type == WS_EV_CLOSE) return 0;
-        if (e.type == WS_EV_RESIZE) {                  /* the green button: a new size */
-            draw();
-            continue;
-        }
-        if (e.type == WS_EV_DOWN) click(e.x, e.y);
-        else if (e.type == WS_EV_MOVE && dragging) set_volume_at(e.x);
-        else if (e.type == WS_EV_UP) dragging = 0;
-        else if (e.type == WS_EV_KEY && typing) {
-            int n = (int)strlen(password);
-            if (e.key == '\n' || e.key == '\r') join();
-            else if (e.key == '\b' && n) password[n - 1] = 0;
-            else if (e.key >= ' ' && e.key < 127 && n < (int)sizeof(password) - 1) {
-                password[n] = (char)e.key;
-                password[n + 1] = 0;
-            }
-        } else {
-            continue;
-        }
-        draw();
-    }
+    show_wifi();
+    show_sound();
+    show_battery();
+    choose(pane);
+    return v_run(&win, root, 2000, tick);
 }

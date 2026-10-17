@@ -1,4 +1,4 @@
-// view <image> - show a PNG, BMP or PPM picture on the screen.
+// view <image> - show a PNG, JPEG, GIF, BMP, TGA, PSD or PPM picture on the screen.
 // The picture is scaled to fit (small ones are enlarged by a whole number,
 // up to 8x). Any key, or a click, closes it.
 #include <stdio.h>
@@ -6,7 +6,7 @@
 #include <string.h>
 #include <image.h>
 #include <os.h>
-#include <ui.h>
+#include <view.h>
 
 /* Shrink `img` into `out` (tw x th) by averaging the pixels each target
  * pixel covers (a box filter: no jagged edges, no lost detail). */
@@ -41,9 +41,24 @@ static void enlarge(const image_t *img, unsigned int *out, int k) {
             out[(long)y * tw + x] = img->pixels[(long)(y / k) * img->width + x / k];
 }
 
+static const unsigned int *picture;
+static int pic_w, pic_h;
+
+static void draw_picture(view_t *v, ui_canvas *c) {
+    ui_fill(c, v->x, v->y, v->w, v->h, 0);
+    ui_copy(c, v->x + (v->w - pic_w) / 2, v->y + (v->h - pic_h) / 2, picture, pic_w, pic_h, pic_w);
+}
+
+static int closing_key(view_t *v, int k) {             /* Esc or q closes it */
+    (void)v;
+    if (k != 27 && k != 'q') return 0;
+    v_quit(0);
+    return 1;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
-        printf("Usage: view <image>   (PNG, BMP or PPM; e.g. view sample.png)\n");
+        printf("Usage: view <image>   (PNG, JPEG, GIF, BMP, TGA, PSD or PPM)\n");
         return 2;
     }
     struct os_gfx_info screen;
@@ -55,7 +70,9 @@ int main(int argc, char **argv) {
     image_t img;
     const char *error;
     if (image_load(argv[1], &img, &error) != 0) {
-        printf("view: %s: %s\n", argv[1], error);
+        char title[96];
+        snprintf(title, sizeof(title), "Can't open %s", strrchr(argv[1], '/') ? strrchr(argv[1], '/') + 1 : argv[1]);
+        v_alert("picture", title, error);
         return 1;
     }
 
@@ -104,18 +121,21 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (windowed) {
+    if (windowed) {                                    /* views (view.h): the picture is a custom view */
         ui_window w;
         const char *name = strrchr(argv[1], '/') ? strrchr(argv[1], '/') + 1 : argv[1];
         if (ui_open(&w, name, tw, th) == 0) {
-            ui_copy(&w.c, 0, 0, shown, tw, th, tw);
-            ui_present(&w);
-            struct ws_event e;
-            do ui_wait(&w, &e, 0);
-            while (e.type != WS_EV_CLOSE && !(e.type == WS_EV_KEY && (e.key == 27 || e.key == 'q')));
+            picture = shown;
+            pic_w = tw;
+            pic_h = th;
+            view_t *root = v_box(0, V_COLUMN);
+            root->pad = 0;
+            root->on_key = closing_key;
+            v_custom(root, draw_picture, 0);
+            int r = v_run(&w, root, 0, 0);
             free(scaled);
             image_free(&img);
-            return 0;
+            return r;
         }
     }
     if (gfx_begin() != 0) {
