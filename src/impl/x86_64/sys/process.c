@@ -2095,6 +2095,12 @@ static int64_t sys_system(uint64_t op, uint64_t a, uint64_t b) {
         }
         case SYSTEM_CPUS:
             return smp_cpu_count();
+        case SYSTEM_POINTER: {
+            if (!user_range_ok(a, sizeof(struct os_pointer), b ? 0 : 1)) return SYSERR_FAULT;
+            if (b) mouse_set_settings((const struct os_pointer *)a);
+            else mouse_get_settings((struct os_pointer *)a);
+            return 0;
+        }
         case SYSTEM_POWER:
             print_set_graphics(0);
             if (a == 1) reboot();

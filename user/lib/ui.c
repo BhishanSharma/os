@@ -570,8 +570,50 @@ static const unsigned color_table[2][2][UI_C_COUNT] = {
     },
 };
 
+/* The accent colours of System Settings > Appearance, as macOS's:
+ * [accent][Increase Contrast][Dark]. */
+static const unsigned accents[WS_ACCENTS][2][2] = {
+    [WS_ACCENT_BLUE]     = { { 0x007AFF, 0x0A84FF }, { 0x0058D0, 0x409CFF } },
+    [WS_ACCENT_PURPLE]   = { { 0xAF52DE, 0xBF5AF2 }, { 0x8944AB, 0xDA8FFF } },
+    [WS_ACCENT_PINK]     = { { 0xFF2D55, 0xFF375F }, { 0xD30F45, 0xFF6482 } },
+    [WS_ACCENT_RED]      = { { 0xFF3B30, 0xFF453A }, { 0xD70015, 0xFF6961 } },
+    [WS_ACCENT_ORANGE]   = { { 0xFF9500, 0xFF9F0A }, { 0xC93400, 0xFFB340 } },
+    [WS_ACCENT_YELLOW]   = { { 0xFFCC00, 0xFFD60A }, { 0xB25000, 0xFFD426 } },
+    [WS_ACCENT_GREEN]    = { { 0x28CD41, 0x32D74B }, { 0x248A3D, 0x30DB5B } },
+    [WS_ACCENT_GRAPHITE] = { { 0x8E8E93, 0x98989D }, { 0x6C6C70, 0xAEAEB2 } },
+};
+
+unsigned ui_accent_color(int accent, int dark, int contrast) {
+    if (accent < 0 || accent >= WS_ACCENTS) accent = 0;
+    return accents[accent][contrast != 0][dark != 0];
+}
+
+/* The desktop's gradients (System Settings > Desktop & Dock): top, bottom.
+ * Gradient 0 is the default, a different pair in Dark. */
+void ui_wall_gradient(int i, int dark, unsigned *top, unsigned *bottom) {
+    static const unsigned g[WS_WALL_GRADIENTS][2] = {
+        { 0x234AC4, 0x9B5CC9 },   /* Terminal OS (dark: 0x0F1F5C, 0x4A2B72) */
+        { 0xFF7E5F, 0xFEB47B },   /* Sunset */
+        { 0x2193B0, 0x6DD5ED },   /* Ocean */
+        { 0x134E5E, 0x71B280 },   /* Forest */
+        { 0x2C3E50, 0xFD746C },   /* Dusk */
+        { 0x0F2027, 0x2C5364 },   /* Night */
+        { 0xEE9CA7, 0xFFDDE1 },   /* Rose */
+        { 0x1D2B64, 0xF8CDDA },   /* Aurora */
+    };
+    if (i < 0 || i >= WS_WALL_GRADIENTS) i = 0;
+    *top = g[i][0];
+    *bottom = g[i][1];
+    if (i == 0 && dark) {
+        *top = 0x0F1F5C;
+        *bottom = 0x4A2B72;
+    }
+}
+
 unsigned ui_color(int token) {
     if (token < 0 || token >= UI_C_COUNT) return 0;
+    int accent = WS_PREF_ACCENT(prefs);
+    if (token == UI_C_ACCENT && accent) return ui_accent_color(accent, ui_pref(UI_PREF_DARK), ui_pref(UI_PREF_CONTRAST));
     return color_table[ui_pref(UI_PREF_CONTRAST)][ui_pref(UI_PREF_DARK)][token];
 }
 

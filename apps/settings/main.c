@@ -1,5 +1,11 @@
-// settings [wifi|sound|battery|display|about] - System Settings: Wi-Fi
-// networks, the volume, the battery, the screen and this computer.
+// settings [wifi|sound|battery|appearance|wallpaper|dock|display|about] -
+// System Settings: Wi-Fi networks, the volume, the battery, how the desktop
+// looks (light or dark, the accent colour, the wallpaper, the Dock, the menu
+// bar's clock), the screen and this computer.
+//
+// The desktop's settings are shared with the window server (ws.h,
+// struct ws_settings): a change here is on the screen at once, and the window
+// server keeps it in DESKTOP.CFG in the home folder.
 //
 // Built from views (view.h): a sidebar table of panes, and one box per pane
 // of which only the chosen one is shown. Every two seconds the state is read
@@ -9,9 +15,13 @@
 #include <os.h>
 #include <view.h>
 
-enum { P_WIFI, P_SOUND, P_BATTERY, P_DISPLAY, P_ABOUT, PANES };
-static const char *pane_names[PANES] = { "Wi-Fi", "Sound", "Battery", "Display", "About" };
-static const char *pane_icons[PANES] = { "wifi", "sound", "battery", "computer", "info" };
+enum { P_WIFI, P_SOUND, P_BATTERY, P_APPEARANCE, P_WALLPAPER, P_DOCK, P_POINTER, P_DISPLAY, P_ABOUT, PANES };
+static const char *pane_names[PANES] = { "Wi-Fi", "Sound", "Battery", "Appearance", "Wallpaper",
+                                          "Dock & Menu Bar", "Mouse & Trackpad", "Display", "About" };
+static const char *pane_keys[PANES] = { "wifi", "sound", "battery", "appearance", "wallpaper", "dock", "mouse",
+                                        "display", "about" };
+static const char *pane_icons[PANES] = { "wifi", "sound", "battery", "paint", "picture", "gear", "mouse",
+                                         "computer", "info" };
 
 static int S, pane;
 static view_t *sidebar, *title, *panes[PANES];
@@ -219,6 +229,296 @@ static void build_battery(view_t *p) {
     bat_bar->want_h = 40;
 }
 
+/* ---- The desktop: Appearance, Wallpaper, Dock & Menu Bar ------------------- */
+
+static struct ws_settings *cfg, cfg_none;
+static unsigned cfg_seen;
+static view_t *looks[2], *size_lbl, *size_sl, *mag_lbl, *mag_sl, *pic_field, *pic_msg;
+static view_t *speed_lbl[2], *speed_sl[2], *scroll_lbl, *scroll_sl;
+static view_t *live[40];                          /* switches and swatches: redrawn when the settings change */
+static int n_live;
+
+/* Tell the window server (it applies it with its next frame). */
+static void changed(void) {
+    cfg->seq++;
+    cfg_seen = cfg->seq;
+}
+
+static view_t *keep(view_t *v) {
+    if (n_live < 40) live[n_live++] = v;
+    return v;
+}
+
+/* A switch, as macOS's: a pill, the accent colour when on; data: the int it sets. */
+static void draw_switch(view_t *v, ui_canvas *c) {
+    int on = *(int *)v->data, w = 40 * S, h = 24 * S, x = v->x + v->w - w, y = v->y + (v->h - h) / 2;
+    ui_fill(c, v->x, v->y, v->w, v->h, ui_color(UI_C_WINDOW));
+    ui_round(c, x, y, w, h, h / 2, on ? UI_ACCENT : ui_color(UI_C_CONTROL_OFF));
+    ui_circle(c, on ? x + w - h / 2 : x + h / 2, y + h / 2, h / 2 - 2 * S, 0xFFFFFF);
+}
+
+static int switch_event(view_t *v, const struct ws_event *e) {
+    if (e->type != WS_EV_DOWN) return 0;
+    int *field = v->data;
+    *field = !*field;
+    changed();
+    v_dirty(v);
+    return 1;
+}
+
+static void switch_row(view_t *p, const char *label, int *field) {
+    view_t *row = v_box(p, V_ROW);
+    row->pad = 0;
+    row->align = V_CENTER;
+    v_label(row, label)->flex = 1;
+    view_t *sw = keep(v_custom(row, draw_switch, switch_event));
+    sw->want_w = 44;
+    sw->want_h = 28;
+    sw->flex = 0;
+    sw->data = field;
+}
+
+static void heading(view_t *p, const char *text) {
+    view_t *h = v_label(p, text);
+    h->style = UI_BOLD;
+}
+
+/* Swatches: value is what they set (an accent, a gradient, a colour). */
+enum { SW_ACCENT, SW_GRADIENT, SW_COLOR };
+static const unsigned colors[] = { 0x1C1C1E, 0x3A3A3C, 0x1F3A68, 0x2A9D8F, 0x3B7D4F, 0xD4B483, 0xE76F51, 0x6D3B6E };
+#define N_COLORS 8
+
+static int swatch_on(view_t *v) {
+    int kind = (int)(long)v->data;
+    if (kind == SW_ACCENT) return cfg->accent == v->value;
+    if (kind == SW_GRADIENT) return cfg->wall_kind == WS_WALL_GRADIENT && cfg->wall_gradient == v->value;
+    return cfg->wall_kind == WS_WALL_COLOR && cfg->wall_color == colors[v->value];
+}
+
+static void draw_swatch(view_t *v, ui_canvas *c) {
+    int kind = (int)(long)v->data, on = swatch_on(v);
+    ui_fill(c, v->x, v->y, v->w, v->h, ui_color(UI_C_WINDOW));
+    if (kind == SW_ACCENT || kind == SW_COLOR) {      /* a circle; the chosen one has a ring */
+        int r = (v->w < v->h ? v->w : v->h) / 2 - 3 * S, cx = v->x + v->w / 2, cy = v->y + v->h / 2;
+        unsigned col = kind == SW_ACCENT ? ui_accent_color(v->value, ui_pref(UI_PREF_DARK), 0) : colors[v->value];
+        if (on) ui_circle(c, cx, cy, r + 3 * S, ui_color(UI_C_LABEL));
+        if (on) ui_circle(c, cx, cy, r + 1 * S, ui_color(UI_C_WINDOW));
+        ui_circle(c, cx, cy, r - (on ? 1 : 0) * S, col);
+        return;
+    }
+    unsigned top, bottom;                             /* a gradient: a small picture of it */
+    ui_wall_gradient(v->value, ui_pref(UI_PREF_DARK), &top, &bottom);
+    int m = 3 * S, x = v->x + m, y = v->y + m, w = v->w - 2 * m, h = v->h - 2 * m;
+    if (on) ui_round(c, v->x, v->y, v->w, v->h, 8 * S, UI_ACCENT);
+    for (int k = 0; k < h; k++) {
+        unsigned t = (unsigned)(k * 256 / (h ? h : 1));
+        unsigned col = 0;
+        for (int sh = 0; sh <= 16; sh += 8) {
+            int a = (int)(top >> sh & 255), b = (int)(bottom >> sh & 255);
+            col |= (unsigned)(a + (b - a) * (int)t / 256) << sh;
+        }
+        ui_fill(c, x, y + k, w, 1, col);
+    }
+}
+
+static int swatch_event(view_t *v, const struct ws_event *e) {
+    if (e->type != WS_EV_DOWN) return 0;
+    int kind = (int)(long)v->data;
+    if (kind == SW_ACCENT) cfg->accent = v->value;
+    else if (kind == SW_GRADIENT) {
+        cfg->wall_kind = WS_WALL_GRADIENT;
+        cfg->wall_gradient = v->value;
+    } else {
+        cfg->wall_kind = WS_WALL_COLOR;
+        cfg->wall_color = colors[v->value];
+    }
+    changed();
+    for (int i = 0; i < n_live; i++) v_dirty(live[i]);   /* the old choice loses its ring */
+    return 1;
+}
+
+static view_t *swatch(view_t *row, int kind, int value, int w, int h) {
+    view_t *v = keep(v_custom(row, draw_swatch, swatch_event));
+    v->data = (void *)(long)kind;
+    v->value = value;
+    v->want_w = w;
+    v->want_h = h;
+    v->flex = 0;
+    return v;
+}
+
+static void show_desktop(void) {                       /* the controls, from the settings */
+    v_set_flags(looks[0], cfg->dark ? 0 : V_TOGGLED);
+    v_set_flags(looks[1], cfg->dark ? V_TOGGLED : 0);
+    char t[48];
+    snprintf(t, sizeof(t), "Size: %d pt", cfg->dock_size);
+    v_set_text(size_lbl, t);
+    v_set_value(size_sl, (cfg->dock_size - 32) * 100 / 64);
+    if (cfg->dock_magnify) snprintf(t, sizeof(t), "Magnification: %d%%", cfg->dock_magnify);
+    else snprintf(t, sizeof(t), "Magnification: off");
+    v_set_text(mag_lbl, t);
+    v_set_value(mag_sl, cfg->dock_magnify);
+    struct os_pointer *pt = &cfg->pointer;
+    int sp[2] = { pt->pad_speed, pt->mouse_speed };
+    for (int i = 0; i < 2; i++) {
+        snprintf(t, sizeof(t), "%s speed: %s", i ? "Mouse" : "Tracking",
+                 sp[i] < 25 ? "slow" : sp[i] < 45 ? "slower" : sp[i] <= 55 ? "normal" : sp[i] <= 75 ? "faster" : "fast");
+        v_set_text(speed_lbl[i], t);
+        v_set_value(speed_sl[i], sp[i]);
+    }
+    snprintf(t, sizeof(t), "Scrolling speed: %dx", pt->scroll_speed);
+    v_set_text(scroll_lbl, t);
+    v_set_value(scroll_sl, (pt->scroll_speed - 1) * 100 / 3);
+    for (int i = 0; i < n_live; i++) v_dirty(live[i]);
+}
+
+static void pick_light(view_t *b) { (void)b; cfg->dark = 0; changed(); show_desktop(); }
+static void pick_dark(view_t *b) { (void)b; cfg->dark = 1; changed(); show_desktop(); }
+
+static void build_appearance(view_t *p) {
+    heading(p, "Appearance");
+    view_t *row = v_box(p, V_ROW);
+    row->pad = 0;
+    looks[0] = v_button(row, "Light", pick_light);
+    looks[1] = v_button(row, "Dark", pick_dark);
+    heading(p, "Accent colour");
+    row = v_box(p, V_ROW);
+    row->pad = 0;
+    row->gap = 4;
+    for (int i = 0; i < WS_ACCENTS; i++) swatch(row, SW_ACCENT, i, 34, 34);
+    heading(p, "Accessibility");
+    switch_row(p, "Increase contrast", &cfg->contrast);
+    switch_row(p, "Reduce motion", &cfg->reduce_motion);
+    switch_row(p, "Reduce transparency", &cfg->reduce_transp);
+}
+
+static void set_picture(view_t *v) {
+    (void)v;
+    char path[160];
+    const char *name = pic_field->text;
+    struct os_user me;
+    if (!name[0]) return;
+    if (name[0] != '/' && getuser(&me) == 0) snprintf(path, sizeof(path), "%s/%s", me.home, name);
+    else snprintf(path, sizeof(path), "%s", name);
+    int fd = open(path, OPEN_READ);
+    if (fd < 0) {
+        v_set_text(pic_msg, "There is no such file.");
+        return;
+    }
+    close(fd);
+    snprintf(cfg->wall_path, sizeof(cfg->wall_path), "%s", path);
+    cfg->wall_kind = WS_WALL_PICTURE;
+    changed();
+    v_set_text(pic_msg, "The picture is on the desktop (if it is one this OS can read).");
+    show_desktop();
+}
+
+static void build_wallpaper(view_t *p) {
+    heading(p, "Gradients");
+    for (int r = 0; r < 2; r++) {
+        view_t *row = v_box(p, V_ROW);
+        row->pad = 0;
+        row->gap = 8;
+        for (int i = 0; i < WS_WALL_GRADIENTS / 2; i++) swatch(row, SW_GRADIENT, r * WS_WALL_GRADIENTS / 2 + i, 104, 64);
+    }
+    heading(p, "Colours");
+    view_t *row = v_box(p, V_ROW);
+    row->pad = 0;
+    row->gap = 4;
+    for (int i = 0; i < N_COLORS; i++) swatch(row, SW_COLOR, i, 34, 34);
+    heading(p, "Picture");
+    row = v_box(p, V_ROW);
+    row->pad = 0;
+    pic_field = v_field(row, cfg->wall_kind == WS_WALL_PICTURE ? cfg->wall_path : "", set_picture);
+    pic_field->flex = 1;
+    snprintf(pic_field->hint, sizeof(pic_field->hint), "PHOTO.JPG (in your home folder) or a path");
+    v_button(row, "Set", set_picture);
+    pic_msg = v_label(p, "PNG, JPEG, GIF, BMP or TGA; it is scaled to fill the screen.");
+    pic_msg->color = UI_C_SECONDARY;
+}
+
+static void dock_size(view_t *sl) {
+    cfg->dock_size = 32 + sl->value * 64 / 100;
+    changed();
+    show_desktop();
+}
+
+static void dock_magnify(view_t *sl) {
+    cfg->dock_magnify = sl->value;
+    changed();
+    show_desktop();
+}
+
+static void build_dock(view_t *p) {
+    heading(p, "Dock");
+    view_t *row = v_box(p, V_ROW);
+    row->pad = 0;
+    row->align = V_CENTER;
+    size_lbl = v_label(row, "");
+    size_lbl->want_w = 170;
+    size_sl = v_slider(row, 0, dock_size);
+    size_sl->flex = 1;
+    row = v_box(p, V_ROW);
+    row->pad = 0;
+    row->align = V_CENTER;
+    mag_lbl = v_label(row, "");
+    mag_lbl->want_w = 170;
+    mag_sl = v_slider(row, 0, dock_magnify);
+    mag_sl->flex = 1;
+    switch_row(p, "Automatically hide and show the Dock", &cfg->dock_autohide);
+    switch_row(p, "Show dots under open apps", &cfg->dock_dots);
+    switch_row(p, "Animate opening apps", &cfg->dock_bounce);
+    heading(p, "Menu bar clock");
+    switch_row(p, "Use a 24-hour clock", &cfg->clock_24h);
+    switch_row(p, "Show the date", &cfg->clock_date);
+    switch_row(p, "Show the seconds", &cfg->clock_seconds);
+}
+
+/* ---- Mouse & Trackpad ------------------------------------------------------- */
+
+static void pad_speed(view_t *sl) { cfg->pointer.pad_speed = sl->value; changed(); show_desktop(); }
+static void mouse_speed(view_t *sl) { cfg->pointer.mouse_speed = sl->value; changed(); show_desktop(); }
+
+static void scroll_speed(view_t *sl) {
+    cfg->pointer.scroll_speed = 1 + (sl->value + 16) / 33;
+    changed();
+    show_desktop();
+}
+
+static view_t *slider_row(view_t *p, view_t **lbl, void (*moved)(view_t *)) {
+    view_t *row = v_box(p, V_ROW);
+    row->pad = 0;
+    row->align = V_CENTER;
+    *lbl = v_label(row, "");
+    (*lbl)->want_w = 190;
+    view_t *sl = v_slider(row, 0, moved);
+    sl->flex = 1;
+    return sl;
+}
+
+static void build_pointer(view_t *p) {
+    struct os_pointer found;
+    pointer_settings(&found, 0);
+    heading(p, "Trackpad");
+    speed_sl[0] = slider_row(p, &speed_lbl[0], pad_speed);
+    switch_row(p, "Tap to click", &cfg->pointer.tap_click);
+    switch_row(p, "Tap with two fingers for a secondary click", &cfg->pointer.tap_right);
+    switch_row(p, "Tap twice and drag to move things", &cfg->pointer.tap_drag);
+    switch_row(p, "Natural scrolling (content follows your fingers)", &cfg->pointer.natural);
+    heading(p, "Mouse");
+    speed_sl[1] = slider_row(p, &speed_lbl[1], mouse_speed);
+    switch_row(p, "Use the right button as the primary button", &cfg->pointer.swap_buttons);
+    switch_row(p, "Reverse the scroll wheel", &cfg->pointer.wheel_reverse);
+    heading(p, "Both");
+    scroll_sl = slider_row(p, &scroll_lbl, scroll_speed);
+    switch_row(p, "Pointer acceleration (fast moves go further)", &cfg->pointer.accel);
+    char t[80];
+    snprintf(t, sizeof(t), "Found: %s%s%s", found.has_pad ? "a trackpad" : "",
+             found.has_pad && found.has_mouse ? " and " : "", found.has_mouse ? "a mouse" : "");
+    if (!found.has_pad && !found.has_mouse) snprintf(t, sizeof(t), "Touch the trackpad or move the mouse to have it found.");
+    v_label(p, t)->color = UI_C_SECONDARY;
+}
+
 /* ---- Display, About ------------------------------------------------------- */
 
 static void build_display(view_t *p) {
@@ -286,6 +586,10 @@ static void picked_pane(view_t *t, int row) {
 }
 
 static void tick(void) {                               /* now and then: the network, the battery */
+    if (cfg->seq != cfg_seen) {                        /* changed from the menu bar */
+        cfg_seen = cfg->seq;
+        show_desktop();
+    }
     refresh_wifi();
     show_wifi();
     show_battery();
@@ -293,18 +597,13 @@ static void tick(void) {                               /* now and then: the netw
 
 int main(int argc, char **argv) {
     S = ui_scale();
-    for (int i = 0; argc > 1 && i < PANES; i++) {
-        char lower[16];
-        int k = 0;
-        for (; pane_names[i][k] && k < 15; k++) {
-            char ch = pane_names[i][k];
-            lower[k] = ch >= 'A' && ch <= 'Z' ? (char)(ch + 32) : ch;
-        }
-        lower[k] = 0;
-        if (!strcmp(argv[1], lower) || (!strcmp(argv[1], "wifi") && i == P_WIFI)) pane = i;
-    }
+    for (int i = 0; argc > 1 && i < PANES; i++)
+        if (!strcmp(argv[1], pane_keys[i])) pane = i;
+    cfg = shm_map(WS_SETTINGS, sizeof(struct ws_settings));
+    if (!cfg || cfg->magic != WS_SETTINGS_MAGIC) cfg = &cfg_none;   /* (no window server: nothing to change) */
+    cfg_seen = cfg->seq;
     ui_window win;
-    if (ui_open(&win, "System Settings", 660 * S, 440 * S) < 0) {
+    if (ui_open(&win, "System Settings", 780 * S, 600 * S) < 0) {
         printf("settings: the desktop is not running\n");
         return 1;
     }
@@ -315,7 +614,7 @@ int main(int argc, char **argv) {
     sidebar = v_table(root, 1, 0, 0, pane_cell);
     sidebar->flags = V_INSET;
     sidebar->flex = 0;
-    sidebar->want_w = 170;
+    sidebar->want_w = 190;
     sidebar->row_h = 36;
     sidebar->bg = UI_C_SIDEBAR;
     sidebar->row_icon = pane_icon;
@@ -336,6 +635,10 @@ int main(int argc, char **argv) {
     build_wifi(panes[P_WIFI]);
     build_sound(panes[P_SOUND]);
     build_battery(panes[P_BATTERY]);
+    build_appearance(panes[P_APPEARANCE]);
+    build_wallpaper(panes[P_WALLPAPER]);
+    build_dock(panes[P_DOCK]);
+    build_pointer(panes[P_POINTER]);
     build_display(panes[P_DISPLAY]);
     build_about(panes[P_ABOUT]);
 
@@ -345,6 +648,7 @@ int main(int argc, char **argv) {
     show_wifi();
     show_sound();
     show_battery();
+    show_desktop();
     choose(pane);
     return v_run(&win, root, 2000, tick);
 }

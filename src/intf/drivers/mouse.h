@@ -10,6 +10,7 @@
 #define MOUSE_H
 
 #include <stdint.h>
+#include "sys/syscall_nums.h"
 
 #define MOUSE_LEFT    1
 #define MOUSE_RIGHT   2
@@ -54,5 +55,10 @@ void mouse_set_owner(int pid);
 /* The pointer on the screen, in pixels. */
 void mouse_pixel(int *x, int *y);
 int mouse_owner(void);
+
+/* System Settings: speeds, scrolling, tapping (SYSTEM_POINTER). */
+void mouse_get_settings(struct os_pointer *p);
+void mouse_set_settings(const struct os_pointer *p);
+const struct os_pointer *mouse_settings(void);
 
 #endif

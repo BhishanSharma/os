@@ -86,6 +86,8 @@ void ui_copy_round(ui_canvas *c, int x, int y, const unsigned *src, int w, int h
 #define UI_PREF_MOTION   WS_PREF_MOTION
 #define UI_PREF_TRANSP   WS_PREF_TRANSP
 int ui_pref(int bit);
+unsigned ui_accent_color(int accent, int dark, int contrast);          /* WS_ACCENT_* (ws.h) */
+void ui_wall_gradient(int i, int dark, unsigned *top, unsigned *bottom);   /* the desktop's gradients */
 
 /* Text: anti-aliased (UIFONT.BIN), in a line 16 * scale pixels high whose top is y.
  * Tracking follows the macOS type spec (about -0.025 em below 20 px, -0.031 em

@@ -67,6 +67,7 @@ typedef struct {
     int16_t dx, dy;
     int8_t wheel;
     uint8_t buttons;
+    uint8_t pad;                      /* from the touchpad */
     uint32_t ms;                      /* when it came (timer_ms), for the speed */
 } packet_t;
 
@@ -75,6 +76,34 @@ static packet_t queue[QUEUE_SIZE];
 static volatile uint32_t queue_head, queue_tail;
 
 static int present, packet_size = 3, has_wheel;
+
+static struct os_pointer cfg = {
+    .mouse_speed = 50, .pad_speed = 50, .accel = 1, .scroll_speed = 1,
+    .tap_click = 1, .tap_right = 1, .tap_drag = 1,
+};
+static int saw_mouse, saw_pad;
+
+const struct os_pointer *mouse_settings(void) { return &cfg; }
+
+void mouse_get_settings(struct os_pointer *p) {
+    *p = cfg;
+    p->has_mouse = saw_mouse || (present && packet_size);
+    p->has_pad = saw_pad;
+}
+
+static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+void mouse_set_settings(const struct os_pointer *p) {
+    cfg = *p;
+    cfg.mouse_speed = clampi(cfg.mouse_speed, 0, 100);
+    cfg.pad_speed = clampi(cfg.pad_speed, 0, 100);
+    cfg.scroll_speed = clampi(cfg.scroll_speed, 1, 4);
+}
+
+/* 0..100 to a factor (256 = 1.0): a quarter at 0, normal at 50, four times at 100. */
+static int speed_factor(int s) {
+    return s <= 50 ? 64 + s * 192 / 50 : 256 + (s - 50) * 768 / 50;
+}
 static const char *other_source;      /* "USB", "I2C touchpad": a mouse that is not PS/2 */
 static uint8_t packet[4];
 static int packet_len;
@@ -177,6 +206,7 @@ void mouse_handle_byte(uint8_t byte) {
     p.dx = (b0 & 0xC0) ? 0 : (int16_t)(packet[1] - ((b0 << 4) & 0x100));   // overflow: drop
     p.dy = (b0 & 0xC0) ? 0 : (int16_t)(packet[2] - ((b0 << 3) & 0x100));
     p.wheel = 0;
+    p.pad = 0;
     p.ms = timer_ms();
     if (packet_size == 4) {
         int8_t z = (int8_t)(packet[3] << 4) >> 4;              // low 4 bits, signed
@@ -195,6 +225,9 @@ void mouse_report(const char *source, int buttons, int dx, int dy, int wheel) {
     }
     other_source = source;
     packet_t p;
+    p.pad = source[0] == 'I';                                  /* "I2C touchpad" */
+    if (p.pad) saw_pad = 1;
+    else saw_mouse = 1;
     p.buttons = (uint8_t)(buttons & 7);
     p.dx = (int16_t)dx;
     p.dy = (int16_t)-dy;                                       // queue holds PS/2 sense: up positive
@@ -342,7 +375,9 @@ static void move_by(const packet_t *p) {
     speed16 = dt > 60 ? v16 : (speed16 + v16 + 1) / 2;   /* after a pause: start afresh */
     int w, h, gx, gy, cw, ch;
     geometry(&w, &h, &gx, &gy, &cw, &ch);
-    int64_t k = (int64_t)gain256(speed16) * cw / 8;      /* points to pixels */
+    int gain = cfg.accel ? gain256(speed16) : 384;
+    gain = gain * speed_factor(p->pad ? cfg.pad_speed : cfg.mouse_speed) / 256;
+    int64_t k = (int64_t)gain * cw / 8;                  /* points to pixels */
     sx += p->dx * k;
     sy -= p->dy * k;                                     /* PS/2 sense: up is positive */
 }
@@ -355,6 +390,9 @@ static void take_packets(void) {
     while (queue_tail != queue_head) {
         packet_t p = queue[queue_tail];
         queue_tail = (queue_tail + 1) % QUEUE_SIZE;
+        if (!p.pad && cfg.swap_buttons)
+            p.buttons = (uint8_t)((p.buttons & ~3) | (p.buttons & 1) << 1 | (p.buttons & 2) >> 1);
+        if (p.pad ? cfg.natural : cfg.wheel_reverse) p.wheel = (int8_t)-p.wheel;
         if (!vbox_absolute) {
             move_by(&p);
             moved |= p.dx || p.dy;
@@ -362,10 +400,10 @@ static void take_packets(void) {
         seen = 1;
         if (p.wheel) {
             if (console_owns_mouse()) {
-                if (p.wheel < 0) scroll_up_lines(3);
-                else scroll_down_lines(3);
+                if (p.wheel < 0) scroll_up_lines(3 * cfg.scroll_speed);
+                else scroll_down_lines(3 * cfg.scroll_speed);
             } else {
-                wheel_for_program += p.wheel;
+                wheel_for_program += p.wheel * cfg.scroll_speed;
             }
         }
         if (p.buttons != buttons_held) {

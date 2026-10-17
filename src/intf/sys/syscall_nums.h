@@ -98,6 +98,21 @@
 #define SYSTEM_SETUP_TEXT   8  /* the first-start questions on the console   -> 0 */
 #define SYSTEM_LOG          9  /* a = struct os_log *: the system log         -> bytes copied */
 #define SYSTEM_CPUS        10  /* -> how many cores run programs */
+#define SYSTEM_POINTER     11  /* a = struct os_pointer *, b = 1 set, 0 read -> 0 */
+
+/* The mouse and the touchpad (System Settings). Speeds 0..100, 50 = normal. */
+struct os_pointer {
+    int mouse_speed, pad_speed;
+    int accel;             /* faster movement goes further */
+    int natural;           /* touchpad: the content follows the fingers */
+    int wheel_reverse;     /* mouse: the wheel the other way */
+    int scroll_speed;      /* 1..4: lines (wheel steps) per step */
+    int tap_click;         /* touchpad: tap to click */
+    int tap_right;         /* touchpad: tap with two fingers for a right click */
+    int tap_drag;          /* touchpad: tap, then touch again and move, to drag */
+    int swap_buttons;      /* mouse: the right button is the primary one */
+    int has_mouse, has_pad;   /* read only: what was found */
+};
 
 struct os_log {
     unsigned long from;    /* in: the byte to start at (since power-on); out: past the last copied */

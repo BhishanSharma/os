@@ -153,6 +153,7 @@ int setup_needed(void);                       /* 1: no accounts yet (first start
 int setup_accounts(const char *name, const char *password);   /* 0; -2 bad name, -3 bad password */
 void setup_text(void);                        /* the first-start questions on the console */
 int cpu_count(void);                       /* cores that run programs (threads can use them all) */
+int pointer_settings(struct os_pointer *p, int set);   /* mouse and touchpad: set 1 writes, 0 reads */
 int syslog_read(unsigned long *from, char *buf, int max);   /* the system log from byte *from -> bytes */
 void console_echo(int on);                   /* off: read(0) does not show the typing */
 

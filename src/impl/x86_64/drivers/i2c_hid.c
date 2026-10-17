@@ -640,7 +640,8 @@ static void handle_touchpad(const uint8_t *data, int datalen) {
         pad.gliding = pad.acc_x = pad.acc_y = 0;
         dx = dy = best_dx = best_dy = 0;
         /* Soon after a tap: tap and drag. */
-        pad.dragging = pad.tap_time && (uint32_t)(now - pad.tap_time) < TIMER_FREQ * 3 / 10;
+        pad.dragging = mouse_settings()->tap_drag && pad.tap_time &&
+                       (uint32_t)(now - pad.tap_time) < TIMER_FREQ * 3 / 10;
         pad.tap_time = 0;
     }
     if (n > pad.max_fingers) pad.max_fingers = n;
@@ -684,7 +685,8 @@ static void handle_touchpad(const uint8_t *data, int datalen) {
             pad.dragging = 0;                               /* the end of a tap and drag */
         } else if (!pad.clicked && (uint32_t)(now - pad.since) < TIMER_FREQ / 5 && pad.moved < range / 40) {
             int b = pad.max_fingers == 2 ? MOUSE_RIGHT : MOUSE_LEFT;
-            if (pad.max_fingers <= 2) {
+            const struct os_pointer *s = mouse_settings();
+            if (pad.max_fingers <= 2 && s->tap_click && (b == MOUSE_LEFT || s->tap_right)) {
                 mouse_report("I2C touchpad", b, 0, 0, 0);
                 mouse_report("I2C touchpad", 0, 0, 0, 0);
                 if (b == MOUSE_LEFT) pad.tap_time = now | 1;

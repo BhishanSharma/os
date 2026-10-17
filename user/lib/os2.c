@@ -138,6 +138,7 @@ int setup_accounts(const char *name, const char *password) {
 }
 void setup_text(void)                           { os_syscall(SYS_SYSTEM, SYSTEM_SETUP_TEXT, 0, 0); }
 int cpu_count(void)                             { return (int)os_syscall(SYS_SYSTEM, SYSTEM_CPUS, 0, 0); }
+int pointer_settings(struct os_pointer *p, int set) { return (int)os_syscall(SYS_SYSTEM, SYSTEM_POINTER, (long)p, set); }
 int syslog_read(unsigned long *from, char *buf, int max) {
     struct os_log l = { *from, buf, max };
     int n = (int)os_syscall(SYS_SYSTEM, SYSTEM_LOG, (long)&l, 0);

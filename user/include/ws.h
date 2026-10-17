@@ -8,6 +8,8 @@
 #ifndef WS_H
 #define WS_H
 
+#include "sys/syscall_nums.h"   /* struct os_pointer */
+
 #define WS_SERVICE "windowserver"
 
 /* WS_RESIZE: the program answers a WS_EV_RESIZE with the new size (w, h) and
@@ -48,6 +50,31 @@ struct ws_event {
 #define WS_PREF_CONTRAST 2
 #define WS_PREF_MOTION   4
 #define WS_PREF_TRANSP   8
+#define WS_PREF_ACCENT(p) ((int)((p) >> 8 & 15))   /* the accent colour: WS_ACCENT_* */
+
+enum { WS_ACCENT_BLUE, WS_ACCENT_PURPLE, WS_ACCENT_PINK, WS_ACCENT_RED, WS_ACCENT_ORANGE,
+       WS_ACCENT_YELLOW, WS_ACCENT_GREEN, WS_ACCENT_GRAPHITE, WS_ACCENTS };
+
+/* The desktop's settings, shared (shm_map(WS_SETTINGS, ...)) by the window
+ * server and System Settings: either side changes a field and bumps `seq`;
+ * the window server applies it at once and saves it in the user's home
+ * folder (DESKTOP.CFG). */
+#define WS_SETTINGS "ws.settings"
+#define WS_SETTINGS_MAGIC 0x57535331       /* "WSS1": the window server has filled it in */
+enum { WS_WALL_GRADIENT, WS_WALL_COLOR, WS_WALL_PICTURE };
+#define WS_WALL_GRADIENTS 8                /* gradient 0 is the default (it follows Dark) */
+struct ws_settings {
+    volatile unsigned seq, magic;
+    int dark, contrast, reduce_motion, reduce_transp, accent;
+    int wall_kind, wall_gradient;          /* WS_WALL_*; which gradient */
+    unsigned wall_color;                   /* 0xRRGGBB */
+    char wall_path[160];                   /* a PNG, JPEG, GIF, BMP... */
+    int dock_size;                         /* icons, points: 32..96 */
+    int dock_magnify;                      /* how much an icon grows under the pointer, %: 0 (off)..100 */
+    int dock_autohide, dock_dots, dock_bounce;
+    int clock_24h, clock_date, clock_seconds;
+    struct os_pointer pointer;             /* the mouse and the touchpad (the server passes it to the kernel) */
+};
 
 #define WS_EVENTS 64
 #define WS_HEADER 4096     /* the pixels start here */

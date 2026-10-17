@@ -24,9 +24,11 @@
 // Clicking a Dock icon starts that app (or brings its window back).
 // Ctrl+W closes the front window. Ctrl+Q leaves.
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <os.h>
 #include <ui.h>
+#include <image.h>
 
 #define MAX_WINDOWS 16
 #define MAX_DAMAGE 32
@@ -93,8 +95,14 @@ static const theme_t themes[2] = {
     },
 };
 
-static int dark, reduce_motion, reduce_transp, contrast;
+static int dark, reduce_motion, reduce_transp, contrast, accent;
 static theme_t cur;                                /* the theme in force */
+
+/* The desktop's settings (ws.h), shared with System Settings. */
+static struct ws_settings *cfg, cfg_local;
+static unsigned cfg_seen;
+static unsigned long save_at;                      /* save DESKTOP.CFG then (0: nothing to save) */
+static void save_settings(void);
 #define TH cur
 
 /* The theme for the current settings. Increase Contrast: rims at full opacity
@@ -105,6 +113,7 @@ static unsigned theme_gen;                         /* bumped on each change: win
 static void apply_theme(void) {
     theme_gen++;
     cur = themes[dark];
+    cur.accent = ui_accent_color(accent, dark, contrast);
     if (!contrast) return;
     cur.hair_alpha = 255;
     cur.dock_rim_alpha = 255;
@@ -112,7 +121,6 @@ static void apply_theme(void) {
     cur.hl_alpha += 30;
     cur.bar_alpha = 255;
     cur.secondary = dark ? 0xD1D1D6 : 0x48484A;
-    cur.accent = dark ? 0x409CFF : 0x0040DD;
     cur.edge_on = dark ? 0xAEAEB2 : 0x3A3A3C;
     cur.edge_off = dark ? 0x8E8E93 : 0x636366;
     cur.title_text_off = dark ? 0xAEAEB2 : 0x636366;
@@ -123,7 +131,7 @@ static void apply_theme(void) {
 /* What apps see in their surface header (ws.h). */
 static unsigned prefs_bits(void) {
     return (dark ? WS_PREF_DARK : 0) | (contrast ? WS_PREF_CONTRAST : 0) |
-           (reduce_motion ? WS_PREF_MOTION : 0) | (reduce_transp ? WS_PREF_TRANSP : 0);
+           (reduce_motion ? WS_PREF_MOTION : 0) | (reduce_transp ? WS_PREF_TRANSP : 0) | (unsigned)accent << 8;
 }
 
 /* ---- Springs ---------------------------------------------------------------
@@ -283,7 +291,7 @@ typedef struct {
 static painter_t painters[MAX_PAINTERS];
 static int n_painters = 1;
 static volatile int paint_job, paint_left;            /* the frame's number; painters still at it */
-static unsigned *wallpaper;                       /* one colour per row */
+static unsigned *wallpaper;                       /* W x H: a gradient, a colour or a picture */
 static struct { int x0, y0, x1, y1; } dmg[MAX_DAMAGE];
 static int ndmg;
 static int mouse_x, mouse_y, buttons;
@@ -381,7 +389,7 @@ static int anim_ok(const window_t *w) {
 
 /* ---- The Dock ------------------------------------------------------------ */
 
-static int icon(void) { return 48 * S; }
+static int icon(void) { return cfg->dock_size * S; }
 static int pad(void) { return 8 * S; }
 static int dock_h(void) { return icon() + 2 * pad(); }
 /* A maximised window in front fills the screen and the Dock slides below the
@@ -403,7 +411,7 @@ static int icon_x(int k) {
 }
 
 static void damage_dock(void) {                   /* everything the Dock can cover */
-    int widest = DOCK_APPS * (icon() * 17 / 10 + pad()) + pad();
+    int widest = DOCK_APPS * (icon() * (100 + cfg->dock_magnify) / 100 + pad()) + pad();
     damage((W - widest) / 2 - 4 * S, dock_bottom() - icon() * 2 - 40 * S, widest + 8 * S, icon() * 2 + 40 * S + 8 * S);
 }
 
@@ -433,7 +441,7 @@ static window_t *front(void);
 static int slide_dock(int dt) {
     window_t *f = front();
     int want = 0;
-    if (f && f->zoomed && !f->minimised && !menu_open) {
+    if (((f && f->zoomed && !f->minimised) || cfg->dock_autohide) && !menu_open) {   /* (or always: Automatically hide) */
         int on_dock = dock_hide < 1024 && mouse_y >= dock_bottom() - dock_h() - icon() &&
                       mouse_x >= dock_x() - icon() && mouse_x < dock_x() + dock_w() + icon();
         want = mouse_y >= H - 2 * S || on_dock ? 0 : 1024;
@@ -461,7 +469,7 @@ static int animate_dock(int dt) {
             int centre = icon_x(i) + a->size / 2, d = mouse_x - centre;
             if (d < 0) d = -d;
             int reach = icon() * 5 / 2;
-            if (d < reach) target += icon() * 7 / 10 * (reach - d) / reach;
+            if (d < reach) target += icon() * cfg->dock_magnify / 100 * (reach - d) / reach;
         }
         if (reduce_motion) {
             a->sp.pos = (long)target * FP;
@@ -1004,15 +1012,63 @@ static void damage_cursor(void) {
 
 /* ---- Wallpaper ------------------------------------------------------------ */
 
-static void make_wallpaper(void) {
-    unsigned a = TH.sky_top, b = TH.sky_bottom;
-    for (int y = 0; y < H; y++) {
-        int t = (y * 256) / H;
-        int r = (int)(a >> 16 & 255) + ((int)(b >> 16 & 255) - (int)(a >> 16 & 255)) * t / 256;
-        int gr = (int)(a >> 8 & 255) + ((int)(b >> 8 & 255) - (int)(a >> 8 & 255)) * t / 256;
-        int bl = (int)(a & 255) + ((int)(b & 255) - (int)(a & 255)) * t / 256;
-        wallpaper[y] = (unsigned)(r << 16 | gr << 8 | bl);
+static unsigned mix(unsigned a, unsigned b, int t) {          /* t 0..256 */
+    int r = (int)(a >> 16 & 255) + ((int)(b >> 16 & 255) - (int)(a >> 16 & 255)) * t / 256;
+    int g = (int)(a >> 8 & 255) + ((int)(b >> 8 & 255) - (int)(a >> 8 & 255)) * t / 256;
+    int bl = (int)(a & 255) + ((int)(b & 255) - (int)(a & 255)) * t / 256;
+    return (unsigned)(r << 16 | g << 8 | bl);
+}
+
+/* A picture file, scaled to cover the screen (the middle of it, cropped),
+ * each screen pixel the average of the picture's pixels under it. -> 0 failed. */
+static int wall_picture(const char *path) {
+    image_t img;
+    const char *why;
+    if (image_load(path, &img, &why) != 0) {
+        printf("windowserver: desktop picture %s: %s\n", path, why);
+        return 0;
     }
+    long cw = img.width, ch = img.height, x0 = 0, y0 = 0;
+    if (cw * H > ch * W) {                             /* wider than the screen: crop the sides */
+        cw = ch * W / H;
+        x0 = (img.width - cw) / 2;
+    } else {
+        ch = cw * H / W;
+        y0 = (img.height - ch) / 2;
+    }
+    for (int y = 0; y < H; y++) {
+        long sy0 = y0 + y * ch / H, sy1 = y0 + (y + 1) * ch / H;
+        if (sy1 <= sy0) sy1 = sy0 + 1;
+        for (int x = 0; x < W; x++) {
+            long sx0 = x0 + x * cw / W, sx1 = x0 + (x + 1) * cw / W;
+            if (sx1 <= sx0) sx1 = sx0 + 1;
+            unsigned long r = 0, g = 0, b = 0, n = 0;
+            for (long sy = sy0; sy < sy1; sy++)
+                for (long sx = sx0; sx < sx1; sx++) {
+                    unsigned c = img.pixels[sy * img.width + sx];
+                    r += c >> 16 & 255;
+                    g += c >> 8 & 255;
+                    b += c & 255;
+                    n++;
+                }
+            wallpaper[(long)y * W + x] = (unsigned)(r / n << 16 | g / n << 8 | b / n);
+        }
+    }
+    image_free(&img);
+    return 1;
+}
+
+static void make_wallpaper(void) {
+    if (cfg->wall_kind == WS_WALL_PICTURE && cfg->wall_path[0] && wall_picture(cfg->wall_path)) return;
+    if (cfg->wall_kind == WS_WALL_COLOR) {
+        for (long i = 0; i < (long)W * H; i++) wallpaper[i] = cfg->wall_color & 0xFFFFFF;
+        return;
+    }
+    unsigned a, b;                                     /* a gradient, a little diagonal */
+    ui_wall_gradient(cfg->wall_kind == WS_WALL_GRADIENT ? cfg->wall_gradient : 0, dark, &a, &b);
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++)
+            wallpaper[(long)y * W + x] = mix(a, b, (int)(((long)y * 4 + x) * 256 / ((long)H * 4 + W)));
 }
 
 /* ---- The blur material -------------------------------------------------------
@@ -1035,7 +1091,7 @@ static unsigned backdrop_at(int x, int y) {
             return ((const unsigned *)((char *)w->s + WS_HEADER))[(long)(y - w->y) * w->w + (x - w->x)];
         if (ui_inside(x, y, w->x, w->y - TITLE_H, w->w, TITLE_H)) return TH.title_on;
     }
-    return wallpaper[clampi(y, 0, H - 1)];
+    return wallpaper[(long)clampi(y, 0, H - 1) * W + clampi(x, 0, W - 1)];
 }
 
 static void box3(const unsigned *src, unsigned *dst, int bw, int bh, int horizontal) {
@@ -1485,7 +1541,7 @@ static void draw_dock(painter_t *p) {
             int gw = ui_text_style_width(a->glyph, ts, UI_BOLD);
             ui_text_bold(&p->c, ix + (size - gw) / 2, iy + (size - 16 * ts) / 2, a->glyph, 0xFFFFFF, ts);
         }
-        if (a->pid > 0)                                          /* the running dot */
+        if (a->pid > 0 && cfg->dock_dots)                         /* the running dot */
             ui_circle(&p->c, ix + size / 2, dock_bottom() - pad() / 2 + S, 2 * S, dark ? 0xE5E5E7 : 0x3A3A3E);
         if (i == hot && !menu_open) {                          /* the name, above the icon */
             int ta = (int)(255 * ease_out((long)tip_ms * 1024 / FADE_MS) / 1024);      /* fades in over 120 ms */
@@ -1553,7 +1609,7 @@ static void paint(painter_t *p, int by0, int by1) {
         int x0 = dmg[d].x0, y0 = dmg[d].y0 > by0 ? dmg[d].y0 : by0, x1 = dmg[d].x1, y1 = dmg[d].y1 < by1 ? dmg[d].y1 : by1;
         if (y1 <= y0) continue;
         ui_clip(&p->c, x0, y0, x1 - x0, y1 - y0);
-        for (int y = y0; y < y1; y++) ui_fill(&p->c, x0, y, x1 - x0, 1, wallpaper[y]);
+        ui_copy(&p->c, x0, y0, wallpaper + (long)y0 * W + x0, x1 - x0, y1 - y0, W);
         for (int i = 0; i < norder; i++) draw_window(p, order[i], &wins[order[i]] == f);
         draw_menu_bar(p);
         draw_dock(p);
@@ -1718,7 +1774,7 @@ static void launch(int i) {
     printf("windowserver: open %s: %s\n", apps[i].program, pid > 0 ? "started" : "cannot start");   /* (in the log) */
     if (pid > 0) {
         apps[i].pid = pid;
-        apps[i].launching = !reduce_motion;
+        apps[i].launching = !reduce_motion && cfg->dock_bounce;
         apps[i].launch_at = uptime_ms();
         apps[i].bounce = 0;
         apps[i].bvel = 310L * S * FP;
@@ -1757,23 +1813,17 @@ static void menu_choose(int id) {
     else if (id == M_ACTIVITY) run("activity", 0);
     else if (id == M_TERMINAL) run("terminal", 0);
     else if (id == M_APPEARANCE) {
-        dark = !dark;
-        apply_theme();
-        make_wallpaper();
-        push_prefs();
-        damage(0, 0, W, H);
+        cfg->dark = !cfg->dark;
+        cfg->seq++;                                    /* (applied with the next frame) */
     } else if (id == M_MOTION) {
-        reduce_motion = !reduce_motion;
-        push_prefs();
+        cfg->reduce_motion = !cfg->reduce_motion;
+        cfg->seq++;
     } else if (id == M_TRANSP) {
-        reduce_transp = !reduce_transp;
-        push_prefs();
-        damage(0, 0, W, H);
+        cfg->reduce_transp = !cfg->reduce_transp;
+        cfg->seq++;
     } else if (id == M_CONTRAST) {
-        contrast = !contrast;
-        apply_theme();
-        push_prefs();
-        damage(0, 0, W, H);
+        cfg->contrast = !cfg->contrast;
+        cfg->seq++;
     } else if (id == M_RESTART || id == M_SHUTDOWN) {
         for (int k = 0; k < MAX_WINDOWS; k++)         /* the programs end first (files saved) */
             if (wins[k].used) sigsend(wins[k].pid, SIGTERM);
@@ -2026,6 +2076,7 @@ static void tidy(void) {
     static const char *months[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
     static const char *days[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    if (save_at && uptime_ms() >= save_at) save_settings();   /* (a slider being dragged: once it rests) */
     static unsigned long last_status;
     if (!last_status || uptime_ms() - last_status > 5000) {   /* battery, Wi-Fi, sound */
         last_status = uptime_ms();
@@ -2043,12 +2094,134 @@ static void tidy(void) {
     char now[24];
     gettime(&t);
     int h12 = t.hour % 12 == 0 ? 12 : t.hour % 12;       /* "Tue 13 Oct 5:54 PM" */
-    snprintf(now, sizeof(now), "%s %d %s  %d:%02d %s", days[weekday(t.year, t.month, t.day)], t.day,
-             months[(t.month + 11) % 12], h12, t.minute, t.hour < 12 ? "AM" : "PM");
+    char date[16] = "", hm[16], sec[8] = "";
+    if (cfg->clock_date)
+        snprintf(date, sizeof(date), "%s %d %s  ", days[weekday(t.year, t.month, t.day)], t.day, months[(t.month + 11) % 12]);
+    if (cfg->clock_seconds) snprintf(sec, sizeof(sec), ":%02d", t.second);
+    if (cfg->clock_24h) snprintf(hm, sizeof(hm), "%02d:%02d%s", t.hour, t.minute, sec);
+    else snprintf(hm, sizeof(hm), "%d:%02d%s %s", h12, t.minute, sec, t.hour < 12 ? "AM" : "PM");
+    snprintf(now, sizeof(now), "%s%s", date, hm);
     if (strcmp(now, clock_text)) {
         strcpy(clock_text, now);
         damage_menu_bar();
     }
+}
+
+/* ---- The settings (ws.h): DESKTOP.CFG in the home folder ------------------------- */
+
+static void settings_path(char *out, int n) {
+    struct os_user me;
+    size_t l;
+    if (getuser(&me) == 0 && (l = strlen(me.home)) > 0)
+        snprintf(out, n, "%s%sDESKTOP.CFG", me.home, me.home[l - 1] == '/' ? "" : "/");
+    else snprintf(out, n, "/DESKTOP.CFG");
+}
+
+static void default_settings(struct ws_settings *c) {
+    memset(c, 0, sizeof(*c));
+    c->dock_size = 48;
+    c->dock_magnify = 70;
+    c->dock_dots = c->dock_bounce = c->clock_date = 1;
+    pointer_settings(&c->pointer, 0);                  /* the kernel's (its defaults) */
+}
+
+static const struct { const char *key; int off; } keys[] = {
+#define K(f) { #f, (int)__builtin_offsetof(struct ws_settings, f) }
+    K(dark), K(contrast), K(reduce_motion), K(reduce_transp), K(accent), K(wall_kind), K(wall_gradient),
+    K(dock_size), K(dock_magnify), K(dock_autohide), K(dock_dots), K(dock_bounce), K(clock_24h),
+    K(clock_date), K(clock_seconds),
+#define P(f) { #f, (int)__builtin_offsetof(struct ws_settings, pointer.f) }
+    P(mouse_speed), P(pad_speed), P(accel), P(natural), P(wheel_reverse), P(scroll_speed),
+    P(tap_click), P(tap_right), P(tap_drag), P(swap_buttons),
+#undef P
+#undef K
+};
+
+static void load_settings(void) {
+    default_settings(cfg);
+    char path[96], text[2048];
+    settings_path(path, sizeof(path));
+    int fd = open(path, OPEN_READ);
+    if (fd < 0) return;
+    long n = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (n <= 0) return;
+    text[n] = 0;
+    for (char *line = text; line && *line;) {
+        char *next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        char *eq = strchr(line, '=');
+        if (eq) {
+            *eq = 0;
+            const char *v = eq + 1;
+            if (!strcmp(line, "wall_color")) cfg->wall_color = (unsigned)strtoul(v, 0, 16);
+            else if (!strcmp(line, "wall_path")) snprintf(cfg->wall_path, sizeof(cfg->wall_path), "%s", v);
+            for (unsigned k = 0; k < sizeof(keys) / sizeof(keys[0]); k++)
+                if (!strcmp(line, keys[k].key)) *(int *)((char *)cfg + keys[k].off) = atoi(v);
+        }
+        line = next;
+    }
+}
+
+static void save_settings(void) {
+    save_at = 0;
+    char path[96], text[2048];
+    int n = 0;
+    for (unsigned k = 0; k < sizeof(keys) / sizeof(keys[0]); k++)
+        n += snprintf(text + n, sizeof(text) - n, "%s=%d\n", keys[k].key, *(int *)((char *)cfg + keys[k].off));
+    n += snprintf(text + n, sizeof(text) - n, "wall_color=%06x\nwall_path=%s\n", cfg->wall_color, cfg->wall_path);
+    settings_path(path, sizeof(path));
+    int fd = open(path, OPEN_WRITE);
+    if (fd < 0) return;
+    write(fd, text, (size_t)n);
+    close(fd);
+}
+
+/* Put the settings in force: the look, the wallpaper (if it changed), the
+ * Dock, the clock; every window hears of it (WS_EV_PREFS). */
+static void apply_settings(int first) {
+    static struct ws_settings was;
+    struct ws_settings now = *(struct ws_settings *)cfg;
+    if (now.dock_size < 32) now.dock_size = cfg->dock_size = 32;
+    if (now.dock_size > 96) now.dock_size = cfg->dock_size = 96;
+    if (now.dock_magnify < 0 || now.dock_magnify > 100) now.dock_magnify = cfg->dock_magnify = 70;
+    if (first || memcmp(&now.pointer, &was.pointer, sizeof(now.pointer)))
+        pointer_settings(&cfg->pointer, 1);           /* the kernel moves the pointer */
+    int wall = first || now.wall_kind != was.wall_kind || now.wall_gradient != was.wall_gradient ||
+               now.wall_color != was.wall_color || strcmp(now.wall_path, was.wall_path) ||
+               (now.dark != was.dark && now.wall_kind == WS_WALL_GRADIENT && now.wall_gradient == 0);
+    unsigned before = prefs_bits();
+    dark = now.dark != 0;
+    contrast = now.contrast != 0;
+    reduce_motion = now.reduce_motion != 0;
+    reduce_transp = now.reduce_transp != 0;
+    accent = now.accent >= 0 && now.accent < WS_ACCENTS ? now.accent : 0;
+    int look = first || prefs_bits() != before;
+    if (look) apply_theme();
+    if (wall) make_wallpaper();
+    if (look && !first) push_prefs();                  /* the apps redraw only for a new look */
+    clock_text[0] = 0;                                 /* (its format may have changed) */
+    int dock = now.dock_size != was.dock_size || now.dock_magnify != was.dock_magnify || now.dock_autohide != was.dock_autohide;
+    if (dock)                                          /* a new size: at once (the old Dock is repainted below) */
+        for (int i = 0; i < DOCK_APPS; i++) {
+            apps[i].size = icon();
+            apps[i].sp.pos = (long)icon() * FP;
+            apps[i].sp.vel = 0;
+        }
+    if (look || wall || dock) damage(0, 0, W, H);
+    else {                                             /* the Dock or the clock: just those */
+        damage_dock();
+        damage_menu_bar();
+    }
+    was = now;
+}
+
+/* Each frame: did System Settings (or the menu) change something? */
+static void check_settings(void) {
+    if (cfg->seq == cfg_seen) return;
+    cfg_seen = cfg->seq;
+    apply_settings(0);
+    save_at = uptime_ms() + 1000;
 }
 
 static void quit(void) {
@@ -2078,13 +2251,18 @@ int main(int argc, char **argv) {
     RADIUS = R_WINDOW * S;
     SHADOW = 24 * S;                                   /* design blur 48 / 2 */
     unsigned *px = mmap((size_t)W * H * 4, PROT_READ | PROT_WRITE, -1);
-    wallpaper = mmap((size_t)H * 4, PROT_READ | PROT_WRITE, -1);
+    wallpaper = mmap((size_t)W * H * 4, PROT_READ | PROT_WRITE, -1);
     if (!px || !wallpaper) {
         printf("windowserver: out of memory\n");
         return 1;
     }
     ui_canvas_init(&scr, px, W, H, W);
-    apply_theme();
+    cfg = shm_map(WS_SETTINGS, sizeof(struct ws_settings));
+    if (!cfg) cfg = &cfg_local;                        /* (no shared memory: the defaults, unshared) */
+    load_settings();
+    cfg->magic = WS_SETTINGS_MAGIC;
+    cfg_seen = cfg->seq;
+    apply_settings(1);
     long cap = (long)W * H < (1L << 20) ? (long)W * H : (1L << 20);       /* 4 MB each */
     anim_col = mmap((size_t)cap * 4, PROT_READ | PROT_WRITE, -1);
     anim_mask = mmap((size_t)cap * 4, PROT_READ | PROT_WRITE, -1);
@@ -2108,7 +2286,6 @@ int main(int argc, char **argv) {
         }
         n_painters = k + 1;
     }
-    make_wallpaper();
     make_cursor();
     load_dock();
     for (int i = 0; i < DOCK_APPS; i++) {
@@ -2140,6 +2317,7 @@ int main(int argc, char **argv) {
     damage(0, 0, W, H);
     for (;;) {
         mutex_lock(&lock);
+        check_settings();
         unsigned long now = uptime_ms();
         int dt = (int)(now - last_frame);
         if (dt > 50) dt = 50;
