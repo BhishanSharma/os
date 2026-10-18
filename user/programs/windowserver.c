@@ -1,28 +1,31 @@
-// windowserver [app]... - the desktop: owns the screen, the mouse and the
-// keyboard, and draws the programs' windows (like macOS's WindowServer).
+// windowserver [app]... - DOOR OS's desktop, the Lobby: owns the screen, the
+// mouse and the keyboard, and draws the programs' windows.
 //
 // Programs ask for a window on the "windowserver" port (ws.h, ui.h) and draw
 // into a shared memory surface; the server composites the surfaces back to
 // front, only where something changed (a list of damaged rectangles).
 //
-// Design follows the macOS HIG specification:
-//   * semantic colour tokens with a light and a dark appearance (theme_t),
-//   * an 8-point spacing grid and a radius scale (xsmall 2 ... xxlarge 16),
-//   * spring motion (response 0.55 s, damping 0.75 as the SwiftUI default;
-//     a stiffer spring for the Dock), with Reduce Motion turning it off,
-//   * a blur material (backdrop sampled at 1/4 resolution, 10 pt bleed,
-//     saturation boost, tint) for the Dock and menus; Reduce Transparency
-//     replaces it with a solid colour,
-//   * traffic lights 12 pt wide, 8 pt apart, with glyphs on hover,
-//   * menus with separators, shortcuts, disabled items and key navigation,
-//   * Increase Contrast (rims at full opacity, darker text and accent),
-//   * window motion: open (spring with a 6.8% overshoot, fade 150 ms), close
-//     (ease-in, 150 ms) and minimize (250 ms, shrinking towards the Dock);
-//     menus and Dock labels fade in over 120 ms. Reduce Motion keeps only
-//     the fades.
+// The look is DOOR's "Soft Minimal" (design/tokens.json): quiet navy-grey
+// glass with real depth.
+//   * the Rail on the left edge: Lobby, Apps, Files, Spaces, Create, Settings,
+//     the DOOR mark on top and the account button at the bottom. Every item
+//     has its own states (idle, hover, pressed, active) that change the
+//     colour of its icon and label and fade in and out,
+//   * the Status pill at the top right: search, notifications, Wi-Fi, sound,
+//     battery, the date and time, and the light/dark switch,
+//   * the Launcher, a glass panel next to the Rail with a search field and
+//     the apps (the same panel shows Spaces, the open windows, and Create),
+//   * windows with a quiet title bar and controls on the right (minimise,
+//     maximise, close); they rise out of the glass: shadow, rim, light edge,
+//   * glass: the backdrop sampled at 1/4 resolution, blurred, saturated and
+//     tinted (surface1); Reduce Transparency makes it solid,
+//   * icons are drawn by the server itself from a few lines and circles, in
+//     any colour, so they follow the item's state (no pictures),
+//   * motion (tokens: micro 120 ms, standard 200 ms, major 260 ms; ease-out
+//     in, faster out, no bounce); Reduce Motion keeps only fades.
 //
-// Clicking a Dock icon starts that app (or brings its window back).
-// Ctrl+W closes the front window. Ctrl+Q leaves.
+// Clicking an app starts it (or brings its window back). Ctrl+L opens the
+// Launcher, Ctrl+W closes the front window, Ctrl+Q leaves.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,64 +37,53 @@
 #define MAX_DAMAGE 32
 #define KEY_QUIT 17                    /* Ctrl+Q */
 #define KEY_CLOSE 23                   /* Ctrl+W */
+#define KEY_LAUNCH 12                  /* Ctrl+L */
 
 /* ---- Design tokens ---------------------------------------------------------
  * Sizes are in points; multiply by S (1, or 2 on a large screen) to draw.
- * Spacing: 4, 8, 16, 24, 32 (the 8-point grid). Radii: */
-#define R_XSMALL 2
-#define R_SMALL  4
-#define R_MEDIUM 6
-#define R_LARGE  8
-#define R_WINDOW 16                    /* radius.xxlarge: a window is a very large container */
-#define R_XXL    16
+ * Radii (door.h): micro 4, control 8, card 12, window 16, large 20. */
+#define R_MICRO   DOOR_R_MICRO
+#define R_CONTROL DOOR_R_CONTROL
+#define R_CARD    DOOR_R_CARD
+#define R_WINDOW  DOOR_R_WINDOW
+#define R_LARGE   DOOR_R_LARGE
 
+/* The colours of design/tokens.json for one appearance, plus what the
+ * desktop derives from them (glass, rims, window edges). */
 typedef struct {
-    unsigned label, secondary, accent;
-    unsigned bar_tint; int bar_alpha;                   /* menu bar */
-    unsigned hl; int hl_alpha;                          /* the open menu's title */
-    unsigned menu_tint; int menu_alpha; unsigned menu_solid;
-    unsigned dock_tint; int dock_alpha; unsigned dock_solid;
-    unsigned hair; int hair_alpha;                      /* hairline round a menu */
-    unsigned dock_rim; int dock_rim_alpha;
-    unsigned sep; int sep_alpha;                        /* separators */
+    unsigned canvas, s1, s2, s3;                        /* canvas, surface1..3 */
+    unsigned label, secondary, muted;                   /* textPrimary, textSecondary, textMuted */
+    unsigned accent, on_accent, danger, success;
+    unsigned glass; int glass_alpha;                    /* what tints the glass (surface1) */
+    unsigned hair; int hair_alpha, hair_strong;         /* borderSubtle, borderStrong (alpha) */
+    unsigned sheen; int sheen_alpha;                    /* the light edge at the top of a glass */
     unsigned title_on, title_off, title_text_on, title_text_off;
-    unsigned edge_on, edge_off;                         /* window outline */
-    unsigned light_off;                                 /* an inactive traffic light */
-    unsigned tooltip;
-    unsigned sky_top, sky_bottom;
-    int shadow_on, shadow_off;
+    unsigned edge_on, edge_off;                         /* a window's 1 px outline */
+    int shadow_on, shadow_off, shadow_glass;            /* elevation E2 alphas (0-255) */
 } theme_t;
 
 static const theme_t themes[2] = {
     [0] = {                                             /* light */
-        .label = 0x1D1D1F, .secondary = 0x6E6E73, .accent = 0x007AFF,
-        .bar_tint = 0xF6F6F8, .bar_alpha = 175,
-        .hl = 0x000000, .hl_alpha = 30,
-        .menu_tint = 0xF6F6F8, .menu_alpha = 185, .menu_solid = 0xF2F2F4,
-        .dock_tint = 0xFFFFFF, .dock_alpha = 70, .dock_solid = 0xE6E6EA,
-        .hair = 0x000000, .hair_alpha = 45,
-        .dock_rim = 0xFFFFFF, .dock_rim_alpha = 110,
-        .sep = 0x000000, .sep_alpha = 40,
-        .title_on = 0xE9E9EB, .title_off = 0xF3F3F5, .title_text_on = 0x3A3A3C, .title_text_off = 0xA0A0A6,
-        .edge_on = 0x9C9CA2, .edge_off = 0xC6C6CA,
-        .light_off = 0xD2D2D6, .tooltip = 0x2A2A30,
-        .sky_top = 0x234AC4, .sky_bottom = 0x9B5CC9,
-        .shadow_on = 110, .shadow_off = 60,
+        .canvas = 0xE9EDF2, .s1 = 0xF2F4F8, .s2 = 0xF8F9FB, .s3 = 0xDDE2EA,
+        .label = 0x1A2030, .secondary = 0x465066, .muted = 0x5F6B80,
+        .accent = 0x3B4E6E, .on_accent = 0xF8F9FB, .danger = 0xA83A3A, .success = 0x2F6F4E,
+        .glass = 0xF2F4F8, .glass_alpha = 168,
+        .hair = 0x1A2030, .hair_alpha = 31, .hair_strong = 77,
+        .sheen = 0xFFFFFF, .sheen_alpha = 190,
+        .title_on = 0xF8F9FB, .title_off = 0xEEF1F5, .title_text_on = 0x1A2030, .title_text_off = 0x5F6B80,
+        .edge_on = 0xA9AEB9, .edge_off = 0xD2D6DE,
+        .shadow_on = 80, .shadow_off = 42, .shadow_glass = 70,
     },
     [1] = {                                             /* dark */
-        .label = 0xF5F5F7, .secondary = 0x98989D, .accent = 0x0A84FF,
-        .bar_tint = 0x1E1E20, .bar_alpha = 150,
-        .hl = 0xFFFFFF, .hl_alpha = 40,
-        .menu_tint = 0x2A2A2C, .menu_alpha = 190, .menu_solid = 0x2C2C2E,
-        .dock_tint = 0x2C2C2E, .dock_alpha = 95, .dock_solid = 0x38383A,
-        .hair = 0xFFFFFF, .hair_alpha = 38,
-        .dock_rim = 0xFFFFFF, .dock_rim_alpha = 50,
-        .sep = 0xFFFFFF, .sep_alpha = 38,
-        .title_on = 0x3A3A3C, .title_off = 0x2C2C2E, .title_text_on = 0xE5E5E7, .title_text_off = 0x7A7A7E,
-        .edge_on = 0x636366, .edge_off = 0x48484A,
-        .light_off = 0x4A4A4E, .tooltip = 0x1C1C1E,
-        .sky_top = 0x0F1F5C, .sky_bottom = 0x4A2B72,
-        .shadow_on = 150, .shadow_off = 90,
+        .canvas = 0x131820, .s1 = 0x1A202A, .s2 = 0x232A36, .s3 = 0x2D3543,
+        .label = 0xE8ECF2, .secondary = 0xAAB3C2, .muted = 0x8590A0,
+        .accent = 0xA9B8D0, .on_accent = 0x131820, .danger = 0xE07A7A, .success = 0x7FB89A,
+        .glass = 0x1A202A, .glass_alpha = 150,
+        .hair = 0xE8ECF2, .hair_alpha = 31, .hair_strong = 61,
+        .sheen = 0xFFFFFF, .sheen_alpha = 40,
+        .title_on = 0x232A36, .title_off = 0x1A202A, .title_text_on = 0xE8ECF2, .title_text_off = 0x8590A0,
+        .edge_on = 0x525863, .edge_off = 0x3B414C,
+        .shadow_on = 140, .shadow_off = 80, .shadow_glass = 100,
     },
 };
 
@@ -105,9 +97,8 @@ static unsigned long save_at;                      /* save DESKTOP.CFG then (0: 
 static void save_settings(void);
 #define TH cur
 
-/* The theme for the current settings. Increase Contrast: rims at full opacity
- * and 1 px, separators and the highlight stronger, secondary text and the
- * accent darker (light) or lighter (dark), a solid menu bar. */
+/* The theme for the current settings. Increase Contrast: rims at full
+ * opacity, secondary text and the accent stronger. */
 static unsigned theme_gen;                         /* bumped on each change: window pictures redraw */
 
 static void apply_theme(void) {
@@ -115,23 +106,31 @@ static void apply_theme(void) {
     cur = themes[dark];
     cur.accent = ui_accent_color(accent, dark, contrast);
     if (!contrast) return;
-    cur.hair_alpha = 255;
-    cur.dock_rim_alpha = 255;
-    cur.sep_alpha = 150;
-    cur.hl_alpha += 30;
-    cur.bar_alpha = 255;
-    cur.secondary = dark ? 0xD1D1D6 : 0x48484A;
-    cur.edge_on = dark ? 0xAEAEB2 : 0x3A3A3C;
-    cur.edge_off = dark ? 0x8E8E93 : 0x636366;
-    cur.title_text_off = dark ? 0xAEAEB2 : 0x636366;
-    cur.hair = dark ? 0xFFFFFF : 0x000000;
-    cur.dock_rim = dark ? 0xFFFFFF : 0x000000;
+    cur.hair_alpha = 200;
+    cur.hair_strong = 255;
+    cur.secondary = dark ? 0xD3D9E3 : 0x2E3648;
+    cur.muted = dark ? 0xB4BDCB : 0x465066;
+    cur.edge_on = dark ? 0xAEB5C2 : 0x3A4358;
+    cur.edge_off = dark ? 0x8590A0 : 0x5F6B80;
+    cur.title_text_off = cur.muted;
+    cur.glass_alpha = 255;
 }
 
 /* What apps see in their surface header (ws.h). */
 static unsigned prefs_bits(void) {
     return (dark ? WS_PREF_DARK : 0) | (contrast ? WS_PREF_CONTRAST : 0) |
            (reduce_motion ? WS_PREF_MOTION : 0) | (reduce_transp ? WS_PREF_TRANSP : 0) | (unsigned)accent << 8;
+}
+
+static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+/* t 0..256 */
+static unsigned lerp_rgb(unsigned a, unsigned b, unsigned f) {
+    if (f > 256) f = 256;
+    unsigned r = (((a >> 16) & 255) * (256 - f) + ((b >> 16) & 255) * f) >> 8;
+    unsigned gr = (((a >> 8) & 255) * (256 - f) + ((b >> 8) & 255) * f) >> 8;
+    unsigned bl = ((a & 255) * (256 - f) + (b & 255) * f) >> 8;
+    return r << 16 | gr << 8 | bl;
 }
 
 /* ---- Springs ---------------------------------------------------------------
@@ -166,15 +165,15 @@ static int spring_step(spring_t *s, long target, int dt_ms, int k, int c) {
 /* Window motion. A new window waits (invisible) for its first drawing, then
  * OPENs; closing and minimizing keep the window drawn while it animates. */
 enum { ANIM_NONE, ANIM_WAIT, ANIM_OPEN, ANIM_CLOSE, ANIM_MIN, ANIM_RESTORE };
-#define OPEN_MS   150                  /* opacity: 150 ms ease-out (the spring runs on) */
-#define CLOSE_MS  150                  /* ease-in */
-#define MIN_MS    250                  /* standard transition: 200-350 ms */
-#define FADE_MS   120                  /* menus and Dock labels: micro-interaction */
+#define OPEN_MS   200                  /* opacity: ease-out (the spring runs on) */
+#define CLOSE_MS  150                  /* ease-in: leaving is faster than arriving */
+#define MIN_MS    240
+#define FADE_MS   120                  /* micro: menus, hover */
 
 typedef struct {
     int used, id, pid;
     int x, y, w, h;                    /* the content on the screen */
-    int minimised;
+    int minimised, peek;               /* peek: the Lobby hid it */
     unsigned seen;                     /* the damage count drawn last */
     char title[48];
     struct ws_surface *s;
@@ -186,7 +185,7 @@ typedef struct {
     unsigned drawn;                    /* the damage count the last frame was made from */
     unsigned *lay;                     /* its picture: shadow, rim, title bar (layer_update) */
     long lay_cap;                      /* pixels allocated */
-    int lay_w, lay_h, lay_focus, lay_hover, lay_ok;
+    int lay_w, lay_h, lay_focus, lay_hover, lay_ok, lay_flags;
     unsigned lay_theme;
     char lay_title[48];
 } window_t;
@@ -195,15 +194,12 @@ typedef struct {
     const char *name, *program, *glyph, *icon;
     unsigned color;
     int pid;
-    int size;                          /* now, in pixels (it grows under the pointer) */
-    spring_t sp;                       /* the size, as a spring */
-    long bounce, bvel;                 /* the launch bounce, 1/1024 px */
     int launching;
     unsigned long launch_at;
 } dock_app_t;
 
-/* The Dock's apps come from DOCK.CFG, which the build makes from every
- * apps/NAME/app.cfg (scripts/mkdock.sh): "order|name|program|icon|color". */
+/* The apps (the Launcher's) come from DOCK.CFG, which the build makes from
+ * every apps/NAME/app.cfg (scripts/mkdock.sh): "order|name|program|icon|color". */
 #define MAX_DOCK 24
 static dock_app_t apps[MAX_DOCK];
 static int n_apps;
@@ -213,7 +209,7 @@ static void dock_add(char *name, char *program, char *icon, unsigned color) {
     static char glyphs[MAX_DOCK][2];
     if (n_apps == MAX_DOCK) return;
     dock_app_t *a = &apps[n_apps];
-    glyphs[n_apps][0] = name[0];                       /* the drawn icon, without a picture */
+    glyphs[n_apps][0] = name[0];                       /* the letter, for an app without an icon */
     a->name = name;
     a->program = program;
     a->icon = icon;
@@ -223,7 +219,7 @@ static void dock_add(char *name, char *program, char *icon, unsigned color) {
 }
 
 static void load_installed(void);
-static void damage_dock(void);
+static void damage_launcher(void);
 
 static void load_dock(void) {
     static char text[4096];
@@ -319,8 +315,10 @@ static void load_installed(void) {
     }
 }
 
-/* tapp installed or removed an app (WS_APPS): the Dock again, the apps still
+
+/* tapp installed or removed an app (WS_APPS): the list again, the apps still
  * running keep their state. Under the lock. */
+static void panel_items_changed(void);
 static void reload_dock(void) {
     static dock_app_t old[MAX_DOCK];
     int n_old = n_apps;
@@ -331,21 +329,16 @@ static void reload_dock(void) {
     for (int i = 0; i < n_apps; i++)
         for (int j = 0; j < n_old; j++)
             if (!strcmp(apps[i].program, old[j].program)) {
-                const char *name = apps[i].name, *program = apps[i].program, *glyph = apps[i].glyph, *icon = apps[i].icon;
-                unsigned color = apps[i].color;
-                apps[i] = old[j];
-                apps[i].name = name;
-                apps[i].program = program;
-                apps[i].glyph = glyph;
-                apps[i].icon = icon;
-                apps[i].color = color;
+                apps[i].pid = old[j].pid;
+                apps[i].launching = old[j].launching;
+                apps[i].launch_at = old[j].launch_at;
                 break;
             }
-    damage_dock();
+    panel_items_changed();
 }
 
 enum { M_ABOUT = 1, M_SETTINGS, M_ACTIVITY, M_APPEARANCE, M_MOTION, M_TRANSP, M_TERMINAL,
-       M_CONTRAST, M_RESTART, M_SHUTDOWN, M_LOGOUT, W_MINIMIZE, W_CLOSE, W_FRONT = 100 };
+       M_CONTRAST, M_RESTART, M_SHUTDOWN, M_LOGOUT };
 #define MI_SEP 1
 #define MI_OFF 2
 #define MI_MAX 24
@@ -362,7 +355,7 @@ static mutex_t lock;
 static int next_id = 1, placed;
 
 static struct os_gfx_info g;
-static int W, H, S, MENU_H, TITLE_H, RADIUS, SHADOW;
+static int W, H, S, TITLE_H, RADIUS, SHADOW;
 static ui_canvas scr;                             /* the back buffer */
 
 /* The desktop is drawn by several cores at once (painters), each a band of
@@ -378,35 +371,35 @@ typedef struct {
 static painter_t painters[MAX_PAINTERS];
 static int n_painters = 1;
 static volatile int paint_job, paint_left;            /* the frame's number; painters still at it */
-static unsigned *wallpaper;                       /* W x H: a gradient, a colour or a picture */
+static unsigned *wallpaper;                       /* W x H: the Lobby's picture */
 static struct { int x0, y0, x1, y1; } dmg[MAX_DAMAGE];
 static int ndmg;
 static int mouse_x, mouse_y, buttons;
 static int drag = -1, drag_dx, drag_dy, capture = -1;
-static char clock_text[24];
+static char clock_text[32];
 static int unpresented;                          /* blitted, not yet shown (page flipping) */
-static int tl_hover = -1;                        /* window whose traffic lights show glyphs */
+static int tl_hover = -1, tl_btn = -1;           /* window whose controls the pointer is over, and which */
 static int last_title_win = -1;
 static unsigned long last_title_click;
 
 static int menu_fade_ms = FADE_MS;               /* how long the open menu has been fading in */
-static int tip_hot = -1, tip_ms;                 /* the Dock label: which icon, how long */
 static unsigned frame_no;                        /* compose calls so far */
 
 /* Off-screen buffers (anim_cap pixels each): a window drawn on its own, its
- * shape, and what was behind a fading menu. Missing: no window motion. */
+ * shape, and what was behind a fading panel. Missing: no motion. */
 static unsigned *anim_col, *anim_mask, *snap;
 static long anim_cap;
 static int cache_win = -1, cache_focus;
 static unsigned cache_frame;
 
 static mitem_t mitems[MI_MAX];
-static int n_mitems, menu_open, menu_hot = -1, menu_wpx;   /* menu_open: 0 none, 1 Terminal OS, 2 Window */
-static int bar_x0[3], bar_x1[3];                  /* the menu titles in the bar */
+static int n_mitems, menu_open, menu_hot = -1, menu_wpx;   /* menu_open: 0 none, 1 account, 2 power, 3 notifications */
+static int menu_ax, menu_ay, menu_flags;                   /* where it hangs from */
+#define MA_UP    1                               /* the menu's bottom edge is at menu_ay */
+#define MA_RIGHT 2                               /* the menu's right edge is at menu_ax */
 
-/* The menu bar's right side: battery, Wi-Fi, sound (they open Settings). */
+/* The status pill's data: battery, Wi-Fi, sound. */
 static int bat = -1, wifi_on = -1, vol_level = -1;
-static int status_x[3];                           /* where each one starts */
 
 /* ---- Damage: a short list of rectangles, merged when they overlap -------- */
 
@@ -454,7 +447,6 @@ static void damage_window(window_t *w) {
 }
 
 static void damage_title(window_t *w) { damage(w->x, w->y - TITLE_H, w->w, TITLE_H); }
-static void damage_menu_bar(void) { damage(0, 0, W, MENU_H); }
 
 /* ---- Easing: t in 0..1024 (0..1) -> 0..1024 ------------------------------- */
 
@@ -474,130 +466,590 @@ static int anim_ok(const window_t *w) {
     return anim_cap > 0 && (long)(w->w + 2) * (w->h + TITLE_H + 2) <= anim_cap;
 }
 
-/* ---- The Dock ------------------------------------------------------------ */
+/* ---- Icons ---------------------------------------------------------------------
+ * Drawn here, from a few strokes on a 24 x 24 grid (stroke 1.75, round caps),
+ * so an icon can be any colour: the colour of its item's state. Each pixel's
+ * coverage comes from its distance to the strokes (1/16 pixel, integers
+ * only). Coordinates below are in half grid units (24 -> 48). */
+enum { GL_NONE, GL_DOOR, GL_APPS, GL_FOLDER, GL_LAYERS, GL_COMPASS, GL_GEAR, GL_USER, GL_SEARCH, GL_BELL,
+       GL_WIFI, GL_SOUND, GL_BATTERY, GL_MOON, GL_SUN, GL_POWER, GL_TERM, GL_DOC, GL_MUSIC, GL_GLOBE,
+       GL_VIDEO, GL_PAINT, GL_PULSE, GL_INFO, GL_COMPUTER, GL_IMAGE, GL_MOUSE, GL_LOGO, GL_MIN, GL_MAX,
+       GL_RESTORE, GL_CLOSE, GL_COUNT };
+enum { P_LINE, P_RING, P_DISC, P_RRECT, P_FRECT, P_CUT };
+typedef struct { unsigned char t; short a, b, c, d, e; } prim_t;
+#define GL_MAXP 44
+static struct { prim_t p[GL_MAXP]; int n; } glyphs[GL_COUNT];
+static int gl_cur;
 
-static int icon(void) { return cfg->dock_size * S; }
-static int pad(void) { return 8 * S; }
-static int dock_h(void) { return icon() + 2 * pad(); }
-/* A maximised window in front fills the screen and the Dock slides below the
- * bottom edge (0 shown .. 1024 hidden); the pointer at the bottom edge brings it back. */
-static int dock_hide;
-static int dock_bottom(void) { return H - 8 * S + dock_hide * (dock_h() + icon() + 32 * S) / 1024; }
-
-static int dock_w(void) {
-    int w = pad();
-    for (int i = 0; i < DOCK_APPS; i++) w += apps[i].size + pad();
-    return w;
+static void gp(int t, int a, int b, int c, int d, int e) {
+    if (glyphs[gl_cur].n == GL_MAXP) return;
+    prim_t *p = &glyphs[gl_cur].p[glyphs[gl_cur].n++];
+    p->t = (unsigned char)t;
+    p->a = (short)a; p->b = (short)b; p->c = (short)c; p->d = (short)d; p->e = (short)e;
 }
-static int dock_x(void) { return (W - dock_w()) / 2; }
-
-static int icon_x(int k) {
-    int x = dock_x() + pad();
-    for (int i = 0; i < k; i++) x += apps[i].size + pad();
-    return x;
+static void g_line(int x0, int y0, int x1, int y1) { gp(P_LINE, x0, y0, x1, y1, 0); }
+static void g_ring(int cx, int cy, int r) { gp(P_RING, cx, cy, r, 0, 0); }
+static void g_disc(int cx, int cy, int r) { gp(P_DISC, cx, cy, r, 0, 0); }
+static void g_cut(int cx, int cy, int r) { gp(P_CUT, cx, cy, r, 0, 0); }
+static void g_box(int cx, int cy, int hw, int hh, int r) { gp(P_RRECT, cx, cy, hw, hh, r); }
+static void g_poly(const signed char *xy, int n, int closed) {
+    for (int i = 0; i + 1 < n; i++) g_line(xy[2 * i], xy[2 * i + 1], xy[2 * i + 2], xy[2 * i + 3]);
+    if (closed) g_line(xy[2 * (n - 1)], xy[2 * (n - 1) + 1], xy[0], xy[1]);
 }
 
-static void damage_dock(void) {                   /* everything the Dock can cover */
-    int widest = DOCK_APPS * (icon() * (100 + cfg->dock_magnify) / 100 + pad()) + pad();
-    damage((W - widest) / 2 - 4 * S, dock_bottom() - icon() * 2 - 40 * S, widest + 8 * S, icon() * 2 + 40 * S + 8 * S);
+/* cos of k * 15 degrees, 1/1024; angles run clockwise on the screen */
+static const short cos15[24] = { 1024, 989, 887, 724, 512, 265, 0, -265, -512, -724, -887, -989,
+                                 -1024, -989, -887, -724, -512, -265, 0, 265, 512, 724, 887, 989 };
+static int c15(int k) { return cos15[((k % 24) + 24) % 24]; }
+static int s15(int k) { return c15(k - 6); }
+static void g_arc(int cx, int cy, int rx, int ry, int k0, int k1) {
+    for (int k = k0; k < k1; k++)
+        g_line(cx + rx * c15(k) / 1024, cy + ry * s15(k) / 1024, cx + rx * c15(k + 1) / 1024, cy + ry * s15(k + 1) / 1024);
+}
+static void g_ray(int cx, int cy, int r0, int r1, int k) {
+    g_line(cx + r0 * c15(k) / 1024, cy + r0 * s15(k) / 1024, cx + r1 * c15(k) / 1024, cy + r1 * s15(k) / 1024);
 }
 
-static int dock_hit(int x, int y) {
-    if (y < dock_bottom() - dock_h() - icon() || y >= dock_bottom()) return -1;
-    for (int i = 0; i < DOCK_APPS; i++) {
-        int ix = icon_x(i), iy = dock_bottom() - pad() - apps[i].size;
-        if (ui_inside(x, y, ix, iy, apps[i].size, apps[i].size)) return i;
+#define POLY(a) a, (int)(sizeof(a) / 2)
+static void glyphs_init(void) {
+    static const signed char tab[] = { 8, 16, 8, 12, 16, 12, 19, 16 };
+    static const signed char layer_a[] = { 24, 6, 42, 16, 24, 26, 6, 16 };
+    static const signed char layer_b[] = { 6, 25, 24, 35, 42, 25 };
+    static const signed char layer_c[] = { 6, 33, 24, 43, 42, 33 };
+    static const signed char needle[] = { 31, 17, 27, 27, 17, 31, 21, 21 };
+    static const signed char hex[] = { 24, 5, 40, 14, 40, 34, 24, 43, 8, 34, 8, 14 };
+    static const signed char bell[] = { 9, 35, 12, 32, 12, 22, 15, 15, 20, 11, 24, 10, 28, 11, 33, 15, 36, 22, 36, 32, 39, 35 };
+    static const signed char spk[] = { 7, 19, 14, 19, 22, 12, 22, 36, 14, 29, 7, 29 };
+    static const signed char chev[] = { 14, 18, 21, 24, 14, 30 };
+    static const signed char beam[] = { 20, 13, 38, 9 };
+    static const signed char play[] = { 33, 20, 42, 15, 42, 33, 33, 28 };
+    static const signed char pulse[] = { 5, 24, 14, 24, 19, 11, 28, 37, 33, 24, 43, 24 };
+    static const signed char hill[] = { 8, 34, 17, 25, 24, 32, 30, 27, 40, 35 };
+    static const signed char back[] = { 17, 17, 17, 9, 39, 9, 39, 31, 31, 31 };
+
+    gl_cur = GL_DOOR;     g_box(24, 22, 12, 17, 3); g_disc(30, 23, 2); g_line(6, 43, 42, 43);   /* a door with its knob, on the floor */
+    gl_cur = GL_APPS;     g_box(15, 15, 6, 6, 3); g_box(33, 15, 6, 6, 3); g_box(15, 33, 6, 6, 3); g_box(33, 33, 6, 6, 3);
+    gl_cur = GL_FOLDER;   g_box(24, 28, 18, 12, 5); g_poly(POLY(tab), 0);
+    gl_cur = GL_LAYERS;   g_poly(POLY(layer_a), 1); g_poly(POLY(layer_b), 0); g_poly(POLY(layer_c), 0);
+    gl_cur = GL_COMPASS;  g_ring(24, 24, 18); g_poly(POLY(needle), 1);
+    gl_cur = GL_GEAR;     g_poly(POLY(hex), 1); g_ring(24, 24, 6);
+    gl_cur = GL_USER;     g_ring(24, 17, 7); g_arc(24, 41, 14, 14, 12, 24);
+    gl_cur = GL_SEARCH;   g_ring(21, 21, 13); g_line(31, 31, 41, 41);
+    gl_cur = GL_BELL;     g_poly(POLY(bell), 0); g_line(9, 35, 39, 35); g_arc(24, 37, 4, 4, 0, 12); g_disc(24, 8, 3);
+    gl_cur = GL_WIFI;     g_arc(24, 39, 9, 9, 15, 21); g_arc(24, 39, 18, 18, 15, 21); g_arc(24, 39, 27, 27, 15, 21); g_disc(24, 39, 2);
+    gl_cur = GL_SOUND;    g_poly(POLY(spk), 1); g_arc(25, 24, 9, 9, 21, 27); g_arc(25, 24, 17, 17, 21, 27);
+    gl_cur = GL_BATTERY;  g_box(22, 24, 18, 10, 5); g_line(42, 20, 42, 28);
+    gl_cur = GL_MOON;     g_disc(24, 24, 18); g_cut(33, 16, 15);
+    gl_cur = GL_SUN;      g_ring(24, 24, 7);
+    for (int k = 0; k < 24; k += 3) g_ray(24, 24, 12, 18, k);
+    gl_cur = GL_POWER;    g_arc(24, 26, 16, 16, 21, 39); g_line(24, 6, 24, 22);
+    gl_cur = GL_TERM;     g_box(24, 24, 19, 16, 5); g_poly(POLY(chev), 0); g_line(25, 31, 33, 31);
+    gl_cur = GL_DOC;      g_box(24, 24, 14, 18, 5); g_line(17, 18, 31, 18); g_line(17, 25, 31, 25); g_line(17, 32, 25, 32);
+    gl_cur = GL_MUSIC;    g_disc(15, 36, 5); g_disc(33, 32, 5); g_line(20, 36, 20, 13); g_line(38, 32, 38, 9); g_poly(POLY(beam), 0);
+    gl_cur = GL_GLOBE;    g_ring(24, 24, 18); g_line(6, 24, 42, 24); g_arc(24, 24, 7, 18, 0, 24);
+    gl_cur = GL_VIDEO;    g_box(21, 24, 16, 12, 5); g_poly(POLY(play), 1);
+    gl_cur = GL_PAINT;    g_ring(24, 24, 18); g_disc(16, 20, 2); g_disc(24, 14, 2); g_disc(32, 20, 2); g_disc(17, 31, 2);
+    gl_cur = GL_PULSE;    g_poly(POLY(pulse), 0);
+    gl_cur = GL_INFO;     g_ring(24, 24, 18); g_line(24, 22, 24, 34); g_disc(24, 15, 2);
+    gl_cur = GL_COMPUTER; g_box(24, 21, 18, 12, 4); g_line(18, 40, 30, 40); g_line(24, 33, 24, 40);
+    gl_cur = GL_IMAGE;    g_box(24, 24, 18, 15, 5); g_disc(32, 18, 3); g_poly(POLY(hill), 0);
+    gl_cur = GL_MOUSE;    g_box(24, 24, 10, 17, 10); g_line(24, 7, 24, 19);
+    gl_cur = GL_LOGO;     g_arc(24, 24, 18, 18, 22, 44); g_disc(37, 11, 3);                   /* the DOOR mark */
+    gl_cur = GL_MIN;      g_line(10, 24, 38, 24);
+    gl_cur = GL_MAX;      g_box(24, 24, 13, 13, 4);
+    gl_cur = GL_RESTORE;  g_box(20, 28, 11, 11, 3); g_poly(POLY(back), 0);
+    gl_cur = GL_CLOSE;    g_line(12, 12, 36, 36); g_line(36, 12, 12, 36);
+}
+
+static int isq(long n) {
+    if (n <= 0) return 0;
+    long x = n < 4 ? n : (1L << ((64 - __builtin_clzl((unsigned long)n) + 1) / 2));
+    for (;;) {
+        long y = (x + n / x) / 2;
+        if (y >= x) return (int)x;
+        x = y;
+    }
+}
+
+/* Coverage 0..16 of one stroke or shape at (px, py), all in 1/16 pixel. */
+static int prim_cover(const prim_t *q, int px, int py, int hw) {
+    long dx = px - q->a, dy = py - q->b;
+    int d;
+    switch (q->t) {
+    case P_LINE: {
+        long vx = q->c - q->a, vy = q->d - q->b, l2 = vx * vx + vy * vy, t = dx * vx + dy * vy;
+        if (t < 0) t = 0;
+        else if (t > l2) t = l2;
+        long ex = l2 ? dx - vx * t / l2 : dx, ey = l2 ? dy - vy * t / l2 : dy;
+        d = isq(ex * ex + ey * ey);
+        return clampi(hw - d + 8, 0, 16);
+    }
+    case P_RING:
+        d = isq(dx * dx + dy * dy) - q->c;
+        if (d < 0) d = -d;
+        return clampi(hw - d + 8, 0, 16);
+    case P_DISC:
+    case P_CUT:
+        d = isq(dx * dx + dy * dy) - q->c;
+        return clampi(8 - d, 0, 16);
+    default: {                                          /* P_RRECT outline, P_FRECT filled */
+        long ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
+        long qx = ax - (q->c - q->e), qy = ay - (q->d - q->e);
+        int out = isq((qx > 0 ? qx * qx : 0) + (qy > 0 ? qy * qy : 0));
+        int in = (int)(qx > qy ? qx : qy);
+        if (in > 0) in = 0;
+        int sd = out + in - q->e;
+        if (q->t == P_FRECT) return clampi(8 - sd, 0, 16);
+        if (sd < 0) sd = -sd;
+        return clampi(hw - sd + 8, 0, 16);
+    }
+    }
+}
+
+/* An icon, `size` pixels square (24 * S is the design size), in `color`.
+ * `level` (GL_BATTERY): the charge in percent, drawn inside. */
+static void gl_draw(ui_canvas *cv, int x, int y, int size, int id, unsigned color, int alpha, int level) {
+    if (id <= 0 || id >= GL_COUNT || alpha <= 0 || size <= 0) return;
+    if (x >= cv->cx1 || y >= cv->cy1 || x + size <= cv->cx0 || y + size <= cv->cy0) return;
+    prim_t q[GL_MAXP + 1];
+    int n = glyphs[id].n;
+    for (int i = 0; i < n; i++) {                       /* half grid units -> 1/16 pixel */
+        const prim_t *s = &glyphs[id].p[i];
+        q[i].t = s->t;
+        q[i].a = (short)(s->a * size / 3); q[i].b = (short)(s->b * size / 3);
+        q[i].c = (short)(s->c * size / 3); q[i].d = (short)(s->d * size / 3);
+        q[i].e = (short)(s->e * size / 3);
+    }
+    if (id == GL_BATTERY && level >= 0) {
+        int w = 28 * clampi(level, 4, 100) / 100;       /* inner width in half units */
+        q[n].t = P_FRECT;
+        q[n].a = (short)((8 + w / 2) * size / 3);
+        q[n].b = (short)(24 * size / 3);
+        q[n].c = (short)((w / 2 > 1 ? w / 2 : 1) * size / 3);
+        q[n].d = (short)(6 * size / 3);
+        q[n].e = (short)(2 * size / 3);
+        n++;
+    }
+    int hw = size * 7 / 12;                             /* half the stroke: 0.875 px at 24 */
+    if (hw < 6) hw = 6;
+    int has_cut = 0;
+    for (int i = 0; i < n; i++) if (q[i].t == P_CUT) has_cut = 1;
+    int y0 = y < cv->cy0 ? cv->cy0 - y : 0, y1 = y + size > cv->cy1 ? cv->cy1 - y : size;
+    int x0 = x < cv->cx0 ? cv->cx0 - x : 0, x1 = x + size > cv->cx1 ? cv->cx1 - x : size;
+    for (int iy = y0; iy < y1; iy++)
+        for (int ix = x0; ix < x1; ix++) {
+            int px = ix * 16 + 8, py = iy * 16 + 8, cov = 0, cut = 0;
+            for (int i = 0; i < n && (cov < 16 || has_cut); i++) {
+                int c = prim_cover(&q[i], px, py, hw);
+                if (q[i].t == P_CUT) { if (c > cut) cut = c; }
+                else if (c > cov) cov = c;
+            }
+            if (cut) cov = cov * (16 - cut) / 16;
+            if (cov) ui_blend_pixel(cv, x + ix, y + iy, color, cov * alpha / 16);
+        }
+}
+
+/* The glyph for an app.cfg icon name; 0: none (a picture or a letter instead). */
+static int glyph_for(const char *icon) {
+    static const struct { const char *name; int gl; } map[] = {
+        { "folder", GL_FOLDER }, { "gear", GL_GEAR }, { "terminal", GL_TERM }, { "textedit", GL_DOC },
+        { "file", GL_DOC }, { "paint", GL_PAINT }, { "activity", GL_PULSE }, { "music", GL_MUSIC },
+        { "sound", GL_SOUND }, { "video", GL_VIDEO }, { "info", GL_INFO }, { "computer", GL_COMPUTER },
+        { "picture", GL_IMAGE }, { "browser", GL_GLOBE }, { "user", GL_USER }, { "mouse", GL_MOUSE },
+        { "wifi", GL_WIFI }, { "battery", GL_BATTERY },
+    };
+    if (!icon) return 0;
+    for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++)
+        if (!strcmp(icon, map[i].name)) return map[i].gl;
+    return 0;
+}
+
+/* ---- The shell's layout and state ---------------------------------------------
+ * The Rail (left), the Status pill (top right), the Launcher panel, menus. */
+
+static void launch(int i);
+static void run(const char *program, const char *arg);
+static void restore_window(int k);
+static void minimise_window(int k);
+static void raise(int k);
+static void quit(void);
+
+static int rail_w(void) { return 80 * S; }
+static int win_left(void) { return rail_w() + 12 * S; }          /* least x of a window's content */
+static int win_top(void) { return TITLE_H + 12 * S; }            /* least y of a window's content */
+
+static window_t *front(void) {
+    for (int i = norder - 1; i >= 0; i--)
+        if (live(&wins[order[i]])) return &wins[order[i]];
+    return 0;
+}
+
+enum { R_LOBBY, R_APPS, R_FILES, R_SPACES, R_CREATE, R_SETTINGS, R_COUNT };
+static const char *const rail_label[R_COUNT] = { "Lobby", "Apps", "Files", "Spaces", "Create", "Settings" };
+static const int rail_glyph[R_COUNT] = { GL_DOOR, GL_APPS, GL_FOLDER, GL_LAYERS, GL_COMPASS, GL_GEAR };
+
+/* Every item the pointer can be over: its id indexes the state arrays. */
+enum { H_RAIL0 = 0, H_AVATAR = 6, H_LOGO, H_SEARCH, H_BELL, H_WIFI, H_SOUND, H_BATTERY, H_THEME, H_POWER,
+       H_FIELD, H_TILE0 = 16, MAX_TILES = 32, H_COUNT = H_TILE0 + MAX_TILES };
+static int hov[H_COUNT], act[H_COUNT];             /* hover and active, 0..256: they fade */
+static int press_id = -1, hot = -1;                /* the item held down; the item under the pointer */
+
+static int rail_item_y(int i) { return 92 * S + i * 72 * S; }
+static int rail_item_x(void) { return 8 * S; }
+static int rail_item_w(void) { return rail_w() - 16 * S; }
+static int rail_item_h(void) { return 64 * S; }
+static int avatar_cx(void) { return rail_w() / 2; }
+static int avatar_cy(void) { return H - 40 * S; }
+static int logo_cy(void) { return 44 * S; }
+
+/* The Status pill: buttons left to right, the time between them. */
+static struct { int id, x, w; } pb[8];
+static int pb_n, pill_x, pill_y, pill_w, pill_h, time_x, time_w;
+static char bat_text[8];
+
+static void pill_layout(void) {
+    int bw = 40 * S;
+    pill_h = 48 * S;
+    pill_y = 12 * S;
+    pb_n = 0;
+    time_w = ui_text_width(clock_text, S) + 20 * S;
+    int bat_w = 0;
+    if (bat >= 0) {
+        snprintf(bat_text, sizeof(bat_text), "%d%%", bat & 0xFF);
+        bat_w = 12 * S + 20 * S + 6 * S + ui_text_width(bat_text, S) + 12 * S;
+        if (bat_w < bw) bat_w = bw;
+    }
+    int total = 16 * S + time_w + bw * 3 + (wifi_on >= 0 ? bw : 0) + (vol_level >= 0 ? bw : 0) + bat_w;
+    pill_w = total;
+    pill_x = W - 16 * S - total;
+    int x = pill_x + 8 * S;
+#define PB(i, wd) do { pb[pb_n].id = (i); pb[pb_n].x = x; pb[pb_n].w = (wd); pb_n++; x += (wd); } while (0)
+    PB(H_SEARCH, bw);
+    PB(H_BELL, bw);
+    if (wifi_on >= 0) PB(H_WIFI, bw);
+    if (vol_level >= 0) PB(H_SOUND, bw);
+    if (bat >= 0) PB(H_BATTERY, bat_w);
+    time_x = x;
+    x += time_w;
+    PB(H_THEME, bw);
+#undef PB
+}
+
+/* The Launcher panel: Apps (with a search field), Spaces (the open windows)
+ * and Create share it. */
+enum { PM_APPS, PM_SPACES, PM_CREATE };
+enum { LK_APP, LK_WIN, LK_PANE };
+typedef struct { char label[48]; int kind, idx; } litem_t;
+static litem_t items[MAX_TILES];
+static int n_items, items_dirty;
+static int panel_open, panel_mode, panel_scroll, panel_sel = -1;
+static int lt;                                     /* how open it is: 0..1024 (it animates) */
+static char query[32];
+static int qlen, caret_on;
+
+typedef struct { int x, y, w, h, gx, gy, cw, ch, rows; } panel_geo_t;
+
+static void panel_geo(panel_geo_t *p) {
+    p->cw = 112 * S;
+    p->ch = 104 * S;
+    p->rows = H / S >= 700 ? 3 : 2;
+    p->w = 4 * p->cw + 40 * S;
+    p->gx = 20 * S;
+    p->gy = (20 + 44 + 12) * S;
+    p->h = p->gy + p->rows * p->ch + 12 * S + 60 * S;
+    p->x = rail_w() + 24 * S;
+    p->y = H - 24 * S - p->h;
+    if (p->y < 12 * S) p->y = 12 * S;
+}
+
+static int panel_vis(void) { return lt > 0; }
+static int panel_off(void) { return reduce_motion ? 0 : (1024 - lt) * 16 * S / 1024; }   /* it rises 16 pt as it opens */
+
+static void damage_launcher(void) {
+    panel_geo_t p;
+    panel_geo(&p);
+    damage(p.x - SHADOW, p.y - SHADOW, p.w + 2 * SHADOW, p.h + 2 * SHADOW + 20 * S);
+}
+
+static int has_ci(const char *hay, const char *needle) {                  /* case-blind substring */
+    for (; *hay; hay++) {
+        const char *a = hay, *b = needle;
+        while (*a && *b && ((*a | 32) == (*b | 32))) { a++; b++; }
+        if (!*b) return 1;
+    }
+    return 0;
+}
+
+static const char *const create_progs[] = { "paint", "textedit", "music" };
+static const struct { const char *label, *pane; int glyph; } panes[] = {
+    { "Wi-Fi", "wifi", GL_WIFI }, { "Sound", "sound", GL_SOUND }, { "Battery", "battery", GL_BATTERY },
+};
+
+static void add_litem(int kind, int idx, const char *label) {
+    if (n_items == MAX_TILES) return;
+    litem_t *it = &items[n_items++];
+    it->kind = kind;
+    it->idx = idx;
+    snprintf(it->label, sizeof(it->label), "%s", label);
+}
+
+static void build_items(void) {
+    n_items = 0;
+    if (panel_mode == PM_APPS) {
+        for (int i = 0; i < DOCK_APPS; i++)
+            if (!qlen || has_ci(apps[i].name, query)) add_litem(LK_APP, i, apps[i].name);
+        if (qlen)
+            for (unsigned i = 0; i < sizeof(panes) / sizeof(panes[0]); i++)
+                if (has_ci(panes[i].label, query)) add_litem(LK_PANE, (int)i, panes[i].label);
+    } else if (panel_mode == PM_CREATE) {
+        for (int i = 0; i < DOCK_APPS; i++)
+            for (unsigned k = 0; k < sizeof(create_progs) / sizeof(create_progs[0]); k++)
+                if (!strcmp(apps[i].program, create_progs[k])) add_litem(LK_APP, i, apps[i].name);
+    } else {
+        for (int i = norder - 1; i >= 0; i--) {                              /* the front window first */
+            window_t *w = &wins[order[i]];
+            if (w->used && w->anim != ANIM_CLOSE && w->anim != ANIM_WAIT) add_litem(LK_WIN, order[i], w->title);
+        }
+    }
+    if (panel_sel >= n_items) panel_sel = n_items - 1;
+    panel_geo_t p;
+    panel_geo(&p);
+    int total = (n_items + 3) / 4, most = total > p.rows ? total - p.rows : 0;
+    if (panel_scroll > most) panel_scroll = most;
+    if (panel_scroll < 0) panel_scroll = 0;
+}
+
+static void panel_items_changed(void) {
+    if (!panel_open) return;
+    build_items();
+    damage_launcher();
+}
+
+static void damage_rail(void) { damage(0, 0, rail_w() + SHADOW, H); }
+static void damage_pill(void) {                    /* (wide enough for any width the time and icons make) */
+    int w = W < 780 * S ? W : 780 * S;
+    damage(W - w, 0, w, 12 * S + 48 * S + SHADOW);
+}
+/* The rail and the pill again: focus, running apps and titles changed. */
+static void damage_chrome(void) {
+    damage_rail();
+    damage_pill();
+    if (panel_open && panel_mode == PM_SPACES) items_dirty = 1;
+}
+
+static void close_menu(void);
+static void panel_show(int mode) {
+    close_menu();
+    if (!panel_open || panel_mode != mode) {
+        panel_mode = mode;
+        qlen = 0;
+        query[0] = 0;
+        panel_scroll = 0;
+        panel_sel = -1;
+        build_items();
+    }
+    panel_open = 1;
+    damage_launcher();
+}
+static void panel_hide(void) {
+    if (!panel_open) return;
+    panel_open = 0;
+    damage_launcher();
+}
+static void panel_toggle(int mode) {
+    if (panel_open && panel_mode == mode) panel_hide();
+    else panel_show(mode);
+}
+
+/* Keep the selected tile in view. */
+static void panel_reveal(void) {
+    panel_geo_t p;
+    panel_geo(&p);
+    if (panel_sel < 0) return;
+    int row = panel_sel / 4;
+    if (row < panel_scroll) panel_scroll = row;
+    if (row >= panel_scroll + p.rows) panel_scroll = row - p.rows + 1;
+}
+
+static int tile_rect(int item, const panel_geo_t *p, int *x, int *y) {     /* the tile's cell, if shown */
+    int vi = item - panel_scroll * 4;
+    if (vi < 0 || vi >= p->rows * 4 || item >= n_items) return 0;
+    *x = p->x + p->gx + (vi % 4) * p->cw;
+    *y = p->y + p->gy + (vi / 4) * p->ch;
+    return 1;
+}
+static void power_rect(const panel_geo_t *p, int *x, int *y, int *w, int *h) {
+    *x = p->x + 20 * S;
+    *y = p->y + p->h - 50 * S;
+    *w = *h = 40 * S;
+}
+static void field_rect(const panel_geo_t *p, int *x, int *y, int *w, int *h) {
+    *x = p->x + 20 * S;
+    *y = p->y + 20 * S;
+    *w = p->w - 40 * S;
+    *h = 44 * S;
+}
+
+static int app_index(const char *program) {
+    for (int i = 0; i < DOCK_APPS; i++)
+        if (!strcmp(apps[i].program, program)) return i;
+    return -1;
+}
+static int front_is(const char *program) {
+    window_t *f = front();
+    if (!f) return 0;
+    for (int i = 0; i < DOCK_APPS; i++)
+        if (apps[i].pid > 0 && apps[i].pid == f->pid) return !strcmp(apps[i].program, program);
+    return 0;
+}
+static int app_has_window_by_pid(int pid) {
+    if (pid <= 0) return 0;
+    for (int k = 0; k < MAX_WINDOWS; k++)
+        if (wins[k].used && wins[k].pid == pid) return 1;
+    return 0;
+}
+static int app_running(const char *program) {
+    int i = app_index(program);
+    return i >= 0 && apps[i].pid > 0;
+}
+
+/* Is this item "on"? (the current place, an open panel or menu, a running app) */
+static int ui_active(int id) {
+    window_t *f = front();
+    switch (id) {
+    case H_RAIL0 + R_LOBBY: return !f && !panel_open;
+    case H_RAIL0 + R_APPS: return panel_open && panel_mode == PM_APPS;
+    case H_RAIL0 + R_FILES: return !panel_open && front_is("finder");
+    case H_RAIL0 + R_SPACES: return panel_open && panel_mode == PM_SPACES;
+    case H_RAIL0 + R_CREATE: return panel_open && panel_mode == PM_CREATE;
+    case H_RAIL0 + R_SETTINGS: return !panel_open && front_is("settings");
+    case H_AVATAR: return menu_open == 1;
+    case H_BELL: return menu_open == 3;
+    case H_POWER: return menu_open == 2;
+    default:
+        if (id >= H_TILE0 && id - H_TILE0 < n_items) {
+            litem_t *it = &items[id - H_TILE0];
+            if (it->kind == LK_APP) return apps[it->idx].pid > 0;
+            if (it->kind == LK_WIN) return f == &wins[it->idx];
+        }
+    }
+    return 0;
+}
+
+/* The item at a point: its id; -2 inside the Launcher but on nothing; -1 none. */
+static int ui_hit(int x, int y) {
+    if (menu_open) return -1;
+    if (panel_vis()) {
+        panel_geo_t p;
+        panel_geo(&p);
+        if (ui_inside(x, y, p.x, p.y, p.w, p.h)) {
+            int bx, by, bw, bh;
+            power_rect(&p, &bx, &by, &bw, &bh);
+            if (ui_inside(x, y, bx, by, bw, bh)) return H_POWER;
+            if (panel_mode == PM_APPS) {
+                field_rect(&p, &bx, &by, &bw, &bh);
+                if (ui_inside(x, y, bx, by, bw, bh)) return H_FIELD;
+            }
+            for (int i = 0; i < n_items; i++)
+                if (tile_rect(i, &p, &bx, &by) && ui_inside(x, y, bx, by, p.cw, p.ch)) return H_TILE0 + i;
+            return -2;
+        }
+    }
+    pill_layout();
+    if (y >= pill_y && y < pill_y + pill_h)
+        for (int i = 0; i < pb_n; i++)
+            if (x >= pb[i].x && x < pb[i].x + pb[i].w) return pb[i].id;
+    if (x < rail_w()) {
+        int dx = x - avatar_cx(), dy = y - avatar_cy();
+        if (dx * dx + dy * dy <= 22 * S * 22 * S) return H_AVATAR;
+        if (ui_inside(x, y, avatar_cx() - 24 * S, logo_cy() - 24 * S, 48 * S, 48 * S)) return H_LOGO;
+        for (int i = 0; i < R_COUNT; i++)
+            if (ui_inside(x, y, rail_item_x(), rail_item_y(i), rail_item_w(), rail_item_h())) return H_RAIL0 + i;
     }
     return -1;
 }
 
-static int app_has_window(int i) {
-    if (apps[i].pid <= 0) return 0;
-    for (int k = 0; k < MAX_WINDOWS; k++)
-        if (wins[k].used && wins[k].pid == apps[i].pid) return 1;
-    return 0;
+/* How an item looks now: the icon and label move from secondary through
+ * primary (hover) to the accent (active, pressed); the plate behind fades in. */
+static unsigned ui_fg(int id) {
+    unsigned c = lerp_rgb(TH.secondary, TH.label, (unsigned)hov[id]);
+    c = lerp_rgb(c, TH.accent, (unsigned)act[id]);
+    if (press_id == id) c = TH.accent;
+    return c;
+}
+static int ui_plate(int id) {                      /* alpha of the plate behind it, 0..255 */
+    int a = hov[id] * 70 / 256 + act[id] * 150 / 256 + (press_id == id ? 70 : 0);
+    return a > 255 ? 255 : a;
 }
 
-/* Icons grow towards the pointer on a spring (response ~0.2 s); a launching
- * app bounces until its window appears. Reduce Motion: no spring, no bounce.
- * -> 1 while still moving. */
-static window_t *front(void);
-
-/* Hide the Dock while a maximised window is in front, unless the pointer is
- * at the bottom edge or on the Dock. -> 1 while it moves. */
-static int slide_dock(int dt) {
-    window_t *f = front();
-    int want = 0;
-    if (((f && f->zoomed && !f->minimised) || cfg->dock_autohide) && !menu_open) {   /* (or always: Automatically hide) */
-        int on_dock = dock_hide < 1024 && mouse_y >= dock_bottom() - dock_h() - icon() &&
-                      mouse_x >= dock_x() - icon() && mouse_x < dock_x() + dock_w() + icon();
-        want = mouse_y >= H - 2 * S || on_dock ? 0 : 1024;
+/* Moves every fade on by dt ms: hover, active, the Launcher opening, the caret.
+ * -> 1 while something moves. */
+static int animate_ui(int dt) {
+    int moving = 0, rail = 0, pill = 0, panel = 0;
+    int want = panel_open ? 1024 : 0;
+    if (lt != want) {
+        int ms = reduce_motion ? FADE_MS : panel_open ? 260 : 195;      /* major; leaving is faster */
+        int step = dt * 1024 / ms;
+        if (step < 1) step = 1;
+        lt = want > lt ? (lt + step > want ? want : lt + step) : (lt - step < want ? want : lt - step);
+        panel = 1;
+        moving = 1;
     }
-    if (dock_hide == want) return 0;
-    damage_dock();                                     /* where it was */
-    int step = reduce_motion ? 1024 : dt * 1024 / 200; /* 200 ms */
-    if (step < 1) step = 1;
-    dock_hide = want > dock_hide ? (dock_hide + step > want ? want : dock_hide + step)
-                                 : (dock_hide - step < want ? want : dock_hide - step);
-    damage_dock();
-    return 1;
-}
-
-static int animate_dock(int dt) {
-    slide_dock(dt);
-    int over = mouse_y >= dock_bottom() - dock_h() - icon() / 2 && mouse_y < dock_bottom() &&
-               mouse_x >= dock_x() - icon() && mouse_x < dock_x() + dock_w() + icon();
-    int moving = 0;
+    hot = ui_hit(mouse_x, mouse_y);
+    if (hot < 0) hot = -1;
+    int fade = dt * 256 / FADE_MS;
+    if (fade < 1) fade = 1;
+    for (int id = 0; id < H_COUNT; id++) {
+        int th = id == hot ? 256 : 0, ta = ui_active(id) ? 256 : 0, ch = 0;
+        if (hov[id] != th) { hov[id] = hov[id] < th ? (hov[id] + fade > th ? th : hov[id] + fade) : (hov[id] - fade < th ? th : hov[id] - fade); ch = 1; }
+        if (act[id] != ta) { act[id] = act[id] < ta ? (act[id] + fade > ta ? ta : act[id] + fade) : (act[id] - fade < ta ? ta : act[id] - fade); ch = 1; }
+        if (!ch) continue;
+        moving = 1;
+        if (id < H_SEARCH) rail = 1;
+        else if (id < H_POWER) pill = 1;
+        else panel = 1;
+    }
     unsigned long now = uptime_ms();
-    for (int i = 0; i < DOCK_APPS; i++) {
-        dock_app_t *a = &apps[i];
-        int target = icon();
-        if (over && !menu_open) {
-            int centre = icon_x(i) + a->size / 2, d = mouse_x - centre;
-            if (d < 0) d = -d;
-            int reach = icon() * 5 / 2;
-            if (d < reach) target += icon() * cfg->dock_magnify / 100 * (reach - d) / reach;
-        }
-        if (reduce_motion) {
-            a->sp.pos = (long)target * FP;
-            a->sp.vel = 0;
-        } else if (spring_step(&a->sp, (long)target * FP, dt, 900, 45)) {
+    for (int i = 0; i < DOCK_APPS; i++)                                   /* a starting app pulses */
+        if (apps[i].launching) {
+            if (now - apps[i].launch_at > 8000 || app_has_window_by_pid(apps[i].pid)) apps[i].launching = 0;
+            rail = 1;
+            if (panel_vis()) panel = 1;
             moving = 1;
         }
-        int size = (int)(a->sp.pos / FP);
-        if (size != a->size) {
-            a->size = size;
-            moving = 1;
-        }
-        if (a->launching) {
-            if (reduce_motion || now - a->launch_at > 8000 || app_has_window(i)) {
-                a->launching = 0;
-                a->bounce = a->bvel = 0;
-            } else {                                   /* hops 20 pt high, about 4 per second */
-                a->bvel -= 2400L * S * FP * dt / 1000;
-                a->bounce += a->bvel * dt / 1000;
-                if (a->bounce <= 0) {
-                    a->bounce = 0;
-                    a->bvel = 310L * S * FP;
-                }
-            }
-            moving = 1;
+    if (panel_vis() && panel_mode == PM_APPS) {                           /* the caret blinks */
+        int on = (int)(now / 530 & 1);
+        if (on != caret_on) {
+            caret_on = on;
+            panel_geo_t p;
+            int x, y, w, h;
+            panel_geo(&p);
+            field_rect(&p, &x, &y, &w, &h);
+            damage(x, y, w, h);
         }
     }
-    if (moving) damage_dock();
+    if (rail) damage_rail();
+    if (pill) damage_pill();
+    if (panel) damage_launcher();
     return moving;
 }
 
-/* ---- Menus (the Terminal OS menu and the Window menu) ----------------------- */
+/* ---- Menus (account, power, notifications): a glass list hung from a button ---- */
 
-static int mi_h(int i) { return (mitems[i].flags & MI_SEP) ? 8 * S : 24 * S; }
-static int menu_x(void) { return bar_x0[menu_open ? menu_open : 1]; }
-static int menu_y(void) { return MENU_H; }
+static int mi_h(int i) { return (mitems[i].flags & MI_SEP) ? 8 * S : 32 * S; }
 static int menu_w(void) { return menu_wpx; }
 static int menu_h(void) {
     int h = 8 * S;
     for (int i = 0; i < n_mitems; i++) h += mi_h(i);
     return h;
+}
+static int menu_x(void) {
+    int x = (menu_flags & MA_RIGHT) ? menu_ax - menu_w() : menu_ax;
+    return clampi(x, 8 * S, W - menu_w() - 8 * S);
+}
+static int menu_y(void) {
+    int y = (menu_flags & MA_UP) ? menu_ay - menu_h() : menu_ay;
+    return clampi(y, 8 * S, H - menu_h() - 8 * S);
 }
 static int menu_item_y(int i) {
     int y = menu_y() + 4 * S;
@@ -615,17 +1067,11 @@ static void add_item(const char *label, const char *key, int id, int flags) {
 }
 static void add_sep(void) { add_item("", 0, 0, MI_SEP); }
 
-static window_t *front(void) {
-    for (int i = norder - 1; i >= 0; i--)
-        if (live(&wins[order[i]])) return &wins[order[i]];
-    return 0;
-}
-
 static void build_menu(int kind) {
     char text[44];
     n_mitems = 0;
     if (kind == 1) {
-        add_item("About Terminal OS", 0, M_ABOUT, 0);
+        add_item("About DOOR OS", 0, M_ABOUT, 0);
         add_sep();
         add_item("System Settings...", 0, M_SETTINGS, 0);
         add_item("Activity Monitor", 0, M_ACTIVITY, 0);
@@ -645,16 +1091,15 @@ static void build_menu(int kind) {
         add_item("Shut Down...", 0, M_SHUTDOWN, 0);
         add_sep();
         add_item("Log Out", "Ctrl+Q", M_LOGOUT, 0);
+    } else if (kind == 2) {
+        add_item("Restart...", 0, M_RESTART, 0);
+        add_item("Shut Down...", 0, M_SHUTDOWN, 0);
+        add_sep();
+        add_item("Log Out", "Ctrl+Q", M_LOGOUT, 0);
     } else {
-        int has = front() != 0;
-        add_item("Minimize", 0, W_MINIMIZE, has ? 0 : MI_OFF);
-        add_item("Close Window", "Ctrl+W", W_CLOSE, has ? 0 : MI_OFF);
-        int listed = 0;
-        for (int k = 0; k < MAX_WINDOWS; k++) {
-            if (!wins[k].used || wins[k].anim == ANIM_CLOSE) continue;
-            if (!listed++) add_sep();
-            add_item(wins[k].title, 0, W_FRONT + k, 0);
-        }
+        add_item("Notifications", 0, 0, MI_OFF);
+        add_sep();
+        add_item("You're all caught up", 0, 0, MI_OFF);
     }
     int maxl = 0, maxk = 0;
     for (int i = 0; i < n_mitems; i++) {
@@ -664,17 +1109,21 @@ static void build_menu(int kind) {
         if (kw > maxk) maxk = kw;
     }
     menu_wpx = 16 * S + maxl + (maxk ? 24 * S + maxk : 0) + 16 * S;
-    if (menu_wpx < 192 * S) menu_wpx = 192 * S;
+    if (menu_wpx < 200 * S) menu_wpx = 200 * S;
 }
 
 static void damage_menu(void) {
-    damage(menu_x() - SHADOW, menu_y() - SHADOW, menu_w() + 2 * SHADOW, menu_h() + 2 * SHADOW);
-    damage_menu_bar();
+    damage(menu_x() - SHADOW, menu_y() - SHADOW, menu_w() + 2 * SHADOW, menu_h() + 2 * SHADOW + 8 * S);
+    damage_chrome();
 }
 
-static void open_menu(int kind) {
+static void open_menu(int kind, int ax, int ay, int flags) {
+    if (menu_open) close_menu();
     build_menu(kind);
     menu_open = kind;
+    menu_ax = ax;
+    menu_ay = ay;
+    menu_flags = flags;
     menu_hot = -1;
     menu_fade_ms = 0;                                  /* fades in over 120 ms */
     damage_menu();
@@ -687,13 +1136,6 @@ static void close_menu(void) {
     menu_hot = -1;
 }
 
-/* Moving from one menu to the next: no fade (as on macOS). */
-static void switch_menu(int kind) {
-    close_menu();
-    open_menu(kind);
-    menu_fade_ms = FADE_MS;
-}
-
 static int menu_hit(int x, int y) {
     if (!menu_open || !ui_inside(x, y, menu_x(), menu_y(), menu_w(), menu_h())) return -1;
     for (int i = 0; i < n_mitems; i++) {
@@ -702,14 +1144,6 @@ static int menu_hit(int x, int y) {
     }
     return -1;
 }
-
-static int bar_title_at(int x) {
-    for (int k = 1; k <= 2; k++)
-        if (x >= bar_x0[k] && x < bar_x1[k]) return k;
-    return 0;
-}
-
-/* ---- Windows ------------------------------------------------------------- */
 
 static void raise(int k) {
     window_t *old = front();
@@ -724,7 +1158,7 @@ static void raise(int k) {
     }
     wins[k].s->focused = 1;
     damage_window(&wins[k]);
-    damage_menu_bar();                             /* the app's name */
+    damage_chrome();                             /* the app's name */
 }
 
 static void send_event(window_t *w, int type, int x, int y, int key) {
@@ -740,16 +1174,17 @@ static void send_event(window_t *w, int type, int x, int y, int key) {
     futex(FUTEX_WAKE, (volatile int *)&s->ev_head, 0);   /* the program wakes at once */
 }
 
-/* Where a minimising window goes: its Dock icon (or the middle of the Dock). */
+/* Where a minimising window goes: its app's place on the Rail (Files, Settings), else Spaces. */
 static void dock_target(const window_t *w, int *tx, int *ty) {
+    int item = R_SPACES;
     for (int i = 0; i < DOCK_APPS; i++)
         if (apps[i].pid > 0 && apps[i].pid == w->pid) {
-            *tx = icon_x(i) + apps[i].size / 2;
-            *ty = dock_bottom() - pad() - apps[i].size / 2;
-            return;
+            if (!strcmp(apps[i].program, "finder")) item = R_FILES;
+            else if (!strcmp(apps[i].program, "settings")) item = R_SETTINGS;
+            break;
         }
-    *tx = W / 2;
-    *ty = dock_bottom() - dock_h() / 2;
+    *tx = rail_item_x() + rail_item_w() / 2;
+    *ty = rail_item_y(item) + rail_item_h() / 2;
 }
 
 /* The screen rectangle a window's animation can reach (with its shadow). */
@@ -760,10 +1195,10 @@ static void damage_anim(window_t *w) {
     if (w->anim == ANIM_MIN || w->anim == ANIM_RESTORE) {        /* and the way to the Dock */
         int tx, ty;
         dock_target(w, &tx, &ty);
-        if (tx - 2 * icon() < x0) x0 = tx - 2 * icon();
-        if (tx + 2 * icon() > x1) x1 = tx + 2 * icon();
-        if (ty - 2 * icon() < y0) y0 = ty - 2 * icon();
-        if (ty + 2 * icon() > y1) y1 = ty + 2 * icon();
+        if (tx - (80 * S) < x0) x0 = tx - (80 * S);
+        if (tx + (80 * S) > x1) x1 = tx + (80 * S);
+        if (ty - (80 * S) < y0) y0 = ty - (80 * S);
+        if (ty + (80 * S) > y1) y1 = ty + (80 * S);
     }
     damage(x0, y0, x1 - x0, y1 - y0);
 }
@@ -784,14 +1219,14 @@ static void finish_remove(int k) {
         if (order[i] != k) order[j++] = order[i];
     norder = j;
     if (cache_win == k) cache_win = -1;
-    damage_menu_bar();
+    damage_chrome();
 }
 
 /* A window ends: it fades and shrinks a little (ease-in, 150 ms), then goes. */
 static void remove_window(int k) {
     window_t *w = &wins[k];
     if (w->anim == ANIM_CLOSE) return;
-    if (menu_open == 2) close_menu();
+    if (menu_open) close_menu();
     if (drag == k) drag = -1;
     if (capture == k) capture = -1;
     if (tl_hover == k) tl_hover = -1;
@@ -806,7 +1241,7 @@ static void remove_window(int k) {
     }
     window_t *f = front();
     if (f) raise((int)(f - wins));
-    damage_menu_bar();
+    damage_chrome();
 }
 
 static void close_window_request(int k) {
@@ -830,7 +1265,7 @@ static void minimise_window(int k) {
     }
     window_t *f = front();
     if (f) raise((int)(f - wins));
-    damage_menu_bar();
+    damage_chrome();
 }
 
 /* A minimised window comes back out of the Dock. */
@@ -857,13 +1292,13 @@ static void start_open(window_t *w) {
     }
     w->anim = ANIM_OPEN;
     w->anim_ms = 0;
-    w->sc.pos = 92L * FP;
+    w->sc.pos = 96L * FP;
     w->sc.vel = 0;
     damage_anim(w);
 }
 
 static int create_window(const struct ws_request *q, struct ws_reply *r) {
-    int max_w = W - 2, max_h = H - MENU_H - TITLE_H - 2;
+    int max_w = W - win_left() - 12 * S, max_h = H - win_top() - 12 * S;
     if (q->w < 1 || q->h < 1) return SYSERR_BADCALL;
     struct ws_request fit = *q;                    /* too big for this screen: as big as fits */
     if (fit.w > max_w) fit.w = max_w;
@@ -888,16 +1323,16 @@ static int create_window(const struct ws_request *q, struct ws_reply *r) {
     w->w = q->w;
     w->h = q->h;
     snprintf(w->title, sizeof(w->title), "%s", q->title);
-    int step = 24 * S;                             /* cascade from the top left */
-    w->x = 80 * S + (placed % 8) * step;
-    w->y = MENU_H + TITLE_H + 24 * S + (placed % 8) * step;
+    int step = 24 * S;                             /* cascade from the top left of the free area */
+    w->x = win_left() + 24 * S + (placed % 8) * step;
+    w->y = win_top() + 12 * S + (placed % 8) * step;
     placed++;
-    if (w->x + w->w > W - 1) w->x = W - 1 - w->w;
-    if (w->y + w->h > H - 1) w->y = H - 1 - w->h;
-    if (w->x < 1) w->x = 1;
-    if (w->y < MENU_H + TITLE_H + 1) w->y = MENU_H + TITLE_H + 1;
+    if (w->x + w->w > W - 12 * S) w->x = W - 12 * S - w->w;
+    if (w->y + w->h > H - 12 * S) w->y = H - 12 * S - w->h;
+    if (w->x < win_left()) w->x = win_left();
+    if (w->y < win_top()) w->y = win_top();
     order[norder++] = k;
-    if (menu_open == 2) close_menu();
+    if (menu_open) close_menu();
     raise(k);
     r->id = w->id;
     r->x = w->x;
@@ -907,7 +1342,7 @@ static int create_window(const struct ws_request *q, struct ws_reply *r) {
     return 0;
 }
 
-/* The green button: fill the screen between the menu bar and the Dock, or go
+/* The maximise control: fill the free area (right of the Rail), or go
  * back. The program gets WS_EV_RESIZE and asks for the new surface (WS_RESIZE). */
 static void zoom_window(int k) {
     window_t *w = &wins[k];
@@ -918,10 +1353,10 @@ static void zoom_window(int k) {
         w->saved_y = w->y;
         w->saved_w = w->w;
         w->saved_h = w->h;
-        nx = 1;
-        ny = MENU_H + TITLE_H + 1;
-        nw = W - 2;
-        nh = H - 1 - ny;                               /* to the bottom: the Dock hides (dock_hide) */
+        nx = win_left();                               /* the free area: right of the Rail, a margin round it */
+        ny = win_top();
+        nw = W - nx - 12 * S;
+        nh = H - ny - 12 * S;
     } else {
         nx = w->saved_x;
         ny = w->saved_y;
@@ -938,7 +1373,7 @@ static void zoom_window(int k) {
 
 /* WS_RESIZE: a new surface of the size asked, the events and settings carried over. */
 static int resize_window(const struct ws_request *q, struct ws_reply *r) {
-    int max_w = W - 2, max_h = H - MENU_H - TITLE_H - 2;
+    int max_w = W - win_left() - 12 * S, max_h = H - win_top() - 12 * S;
     if (q->w < 1 || q->h < 1 || q->w > max_w || q->h > max_h) return SYSERR_BADCALL;
     for (int k = 0; k < MAX_WINDOWS; k++) {
         window_t *w = &wins[k];
@@ -958,10 +1393,10 @@ static int resize_window(const struct ws_request *q, struct ws_reply *r) {
         w->x = w->want_x ? w->want_x : w->x;
         w->y = w->want_y ? w->want_y : w->y;
         w->want_x = w->want_y = 0;
-        if (w->x + w->w > W - 1) w->x = W - 1 - w->w;
-        if (w->y + w->h > H - 1) w->y = H - 1 - w->h;
-        if (w->x < 1) w->x = 1;
-        if (w->y < MENU_H + TITLE_H + 1) w->y = MENU_H + TITLE_H + 1;
+        if (w->x + w->w > W - 12 * S) w->x = W - 12 * S - w->w;
+        if (w->y + w->h > H - 12 * S) w->y = H - 12 * S - w->h;
+        if (w->x < win_left()) w->x = win_left();
+        if (w->y < win_top()) w->y = win_top();
         damage_window(w);
         r->id = w->id;
         r->x = w->x;
@@ -1003,21 +1438,13 @@ static void serve(void *arg) {
                 } else if (wins[k].used && wins[k].id == q.id && wins[k].pid == q.pid) {
                     snprintf(wins[k].title, sizeof(wins[k].title), "%s", q.title);
                     damage_window(&wins[k]);
-                    damage_menu_bar();
+                    damage_chrome();
                 }
             mutex_unlock(&lock);
         }
         if (reply >= 0) port_close(reply);
     }
 }
-
-/* The name the menu bar shows: the Dock app the window belongs to, else its title. */
-static const char *app_name(const window_t *w) {
-    for (int i = 0; i < DOCK_APPS; i++)
-        if (apps[i].pid > 0 && apps[i].pid == w->pid) return apps[i].name;
-    return w->title;
-}
-
 /* ---- The pointer: an arrow, anti-aliased, made once ----------------------- */
 
 #define CURSOR_W 14
@@ -1148,14 +1575,72 @@ static int wall_picture(const char *path) {
     return 1;
 }
 
+/* The Lobby's own picture (the default): a ring of light on a quiet navy-grey
+ * wall, a floor that reflects it. Integer maths only. The other gradients and
+ * pictures of System Settings stay as they were. */
+static int glow(int e, int w, int amp) {                 /* a soft peak of height amp, width w, at e = 0 */
+    long ww = (long)w * w;
+    return (int)(amp * ww / (ww + (long)e * e));
+}
+
+static int glow2(int e, int w, int amp) {                /* the same, falling off faster (a halo with no visible end) */
+    long ww = (long)w * w, den = ww + (long)e * e;
+    return (int)((long)amp * ww / den * ww / den);
+}
+
+static void door_wallpaper(void) {
+    int R = H * 55 / 100, cx = W * 85 / 100, cy = H * 14 / 100, yh = H * 72 / 100;
+    int w1 = 2 * S, w2 = 56 * S, w3 = 36 * S;
+    long ro = R + 4 * w2;
+    unsigned bg0, bg1, in_near, in_far, core, halo, fl0, fl1;
+    int core_a, halo_a, refl_a;
+    if (dark) {
+        bg0 = 0x0F141B; bg1 = 0x1D2531; in_far = lerp_rgb(TH.s2, TH.s3, 190); in_near = lerp_rgb(TH.s3, TH.accent, 80);
+        core = TH.label; halo = TH.accent; fl0 = 0x161C25; fl1 = 0x0B0F14;
+        core_a = 235; halo_a = 70; refl_a = 46;
+    } else {
+        bg0 = 0xE9EDF2; bg1 = 0xD2D9E4; in_far = 0xEEF1F6; in_near = 0xFBFCFD;
+        core = TH.accent; halo = 0xFFFFFF; fl0 = 0xDCE1E9; fl1 = 0xC6CDD9;
+        core_a = 130; halo_a = 150; refl_a = 90;
+    }
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            long dx = x - cx, dy = y - cy, d2 = dx * dx + dy * dy;
+            int diag = (int)(((long)y * 3 + (long)(W - x) * 2) * 256 / ((long)H * 3 + (long)W * 2));
+            unsigned c = lerp_rgb(bg0, bg1, (unsigned)diag);
+            if (y > yh) {                                                 /* the floor and the ring's reflection */
+                int tf = (int)((long)(y - yh) * 256 / (H - yh));
+                c = lerp_rgb(fl0, fl1, (unsigned)tf);
+                long ym = (long)2 * yh - y - cy, m2 = dx * dx + ym * ym;
+                int fade = 256 - tf;
+                if (m2 < (long)R * R) c = lerp_rgb(c, in_near, (unsigned)(34 * fade / 256));
+                if (m2 < ro * ro) c = lerp_rgb(c, halo, (unsigned)glow2(isq(m2) - R, w3, refl_a * fade / 256));
+                c = lerp_rgb(c, core, (unsigned)glow(y - yh, 3 * S, 26));    /* the horizon, a hair of light */
+            } else if (d2 < ro * ro) {
+                int d = isq(d2), e = d - R;
+                if (e < 0) {                                              /* inside: lighter towards the ring */
+                    int near = 256 - clampi((-e) * 256 / (R * 70 / 100), 0, 256);
+                    c = lerp_rgb(in_far, in_near, (unsigned)near);
+                }
+                c = lerp_rgb(c, halo, (unsigned)glow2(e, w2, halo_a));
+                c = lerp_rgb(c, core, (unsigned)glow(e, w1, core_a));
+            }
+            wallpaper[(long)y * W + x] = c;
+        }
+}
+
 static void make_wallpaper(void) {
     if (cfg->wall_kind == WS_WALL_PICTURE && cfg->wall_path[0] && wall_picture(cfg->wall_path)) return;
     if (cfg->wall_kind == WS_WALL_COLOR) {
         for (long i = 0; i < (long)W * H; i++) wallpaper[i] = cfg->wall_color & 0xFFFFFF;
         return;
     }
+    if (cfg->wall_kind != WS_WALL_GRADIENT || cfg->wall_gradient == 0) {   /* the default: the ring */
+        door_wallpaper();
+        return;
+    }
     unsigned a, b;                                     /* a gradient, a little diagonal */
-    ui_wall_gradient(cfg->wall_kind == WS_WALL_GRADIENT ? cfg->wall_gradient : 0, dark, &a, &b);
+    ui_wall_gradient(cfg->wall_gradient, dark, &a, &b);
     for (int y = 0; y < H; y++)
         for (int x = 0; x < W; x++)
             wallpaper[(long)y * W + x] = mix(a, b, (int)(((long)y * 4 + x) * 256 / ((long)H * 4 + W)));
@@ -1168,10 +1653,8 @@ static void make_wallpaper(void) {
  * Only the wallpaper and the windows are sampled (not the Dock itself). */
 #define SAMP_W 512
 #define SAMP_H 320
-#define MAT_MAX (1 << 19)
+#define MAT_MAX (1 << 20)
 
-
-static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 static unsigned backdrop_at(int x, int y) {
     for (int i = norder - 1; i >= 0; i--) {
@@ -1198,13 +1681,6 @@ static void box3(const unsigned *src, unsigned *dst, int bw, int bh, int horizon
             }
             dst[y * bw + x] = (r / 3) << 16 | (gr / 3) << 8 | (b / 3);
         }
-}
-
-static unsigned lerp_rgb(unsigned a, unsigned b, unsigned f) {
-    unsigned r = (((a >> 16) & 255) * (256 - f) + ((b >> 16) & 255) * f) >> 8;
-    unsigned gr = (((a >> 8) & 255) * (256 - f) + ((b >> 8) & 255) * f) >> 8;
-    unsigned bl = ((a & 255) * (256 - f) + (b & 255) * f) >> 8;
-    return r << 16 | gr << 8 | bl;
 }
 
 static unsigned saturate_tint(unsigned c, int sat, unsigned tint, int alpha) {
@@ -1262,38 +1738,43 @@ static void material(painter_t *p, int x, int y, int w, int h, int r, int corner
     ui_copy_round(&p->c, x, y, p->mat, w, h, w, r, corners);
 }
 
-/* ---- Drawing ------------------------------------------------------------- */
+/* ---- Drawing: windows ----------------------------------------------------------- */
 
-/* Traffic lights: 12 pt wide, 8 pt apart (centres 22, 42, 62 pt from the left,
- * 16 pt in). Glyphs show while the pointer is over the group (macOS), and the
- * lights are grey when the window is not the front one (unless hovered). The
- * content of the window starts at (cx, cy) on `cv`. */
-#define LIGHT_X(i) ((22 + 20 * (i)) * S)
-static void traffic_lights(ui_canvas *cv, int cx0, int cy0, int focused, int hover) {
-    static const unsigned fill[3] = { 0xFF5F57, 0xFEBC2E, 0x28C840 };
-    static const unsigned ring[3] = { 0xE0443E, 0xDEA123, 0x1AAB29 };
-    static const unsigned ink[3] = { 0x4D0000, 0x995700, 0x006500 };
-    int cy = cy0 - TITLE_H / 2, r = 6 * S, lit = focused || hover;
-    for (int i = 0; i < 3; i++) {
-        int cx = cx0 + LIGHT_X(i);
-        ui_circle(cv, cx, cy, r, lit ? ring[i] : TH.edge_off);
-        ui_circle(cv, cx, cy, r - 1, lit ? fill[i] : TH.light_off);
-        if (!hover) continue;
-        if (i == 0) {
-            for (int t = -2 * S; t <= 2 * S; t++) {
-                ui_fill(cv, cx + t, cy + t, S, S, ink[0]);
-                ui_fill(cv, cx + t, cy - t, S, S, ink[0]);
-            }
-        } else if (i == 1) {
-            ui_fill(cv, cx - 3 * S, cy, 6 * S, S, ink[1]);
-        } else {
-            ui_fill(cv, cx - 3 * S, cy, 6 * S, S, ink[2]);
-            ui_fill(cv, cx, cy - 3 * S, S, 6 * S, ink[2]);
+static void fit_text(char *out, int n, const char *s, int maxw, int style) {
+    snprintf(out, (size_t)n, "%s", s);
+    if (ui_text_style_width(out, S, style) <= maxw) return;
+    int len = (int)strlen(out);
+    while (len > 1) {
+        char t[64];
+        len--;
+        out[len] = 0;
+        snprintf(t, sizeof(t), "%s...", out);
+        if (ui_text_style_width(t, S, style) <= maxw) {
+            snprintf(out, (size_t)n, "%s", t);
+            return;
         }
     }
 }
 
-/* The shadow round an outer rectangle; a255 fades it with the window. */
+/* The window controls (minimise, maximise, close) on the right of the title
+ * bar: 36 x 28 pt, 4 pt apart. x is from the content's left edge. */
+#define CTL_W (36 * S)
+#define CTL_H (28 * S)
+static int ctl_x(const window_t *w, int i) { return w->w - 10 * S - (3 - i) * CTL_W - (2 - i) * 4 * S; }
+static int ctl_y(void) { return (TITLE_H - CTL_H) / 2; }               /* from the title bar's top */
+
+/* Which control is at a point (the whole bar's height counts as its target). */
+static int ctl_at(const window_t *w, int x, int y) {
+    if (y < w->y - TITLE_H || y >= w->y) return -1;
+    for (int i = 0; i < 3; i++) {
+        int bx = w->x + ctl_x(w, i);
+        if (x >= bx - 2 * S && x < bx + CTL_W + 2 * S) return i;
+    }
+    return -1;
+}
+
+/* The shadow round an outer rectangle; a255 fades it with the window: a wide
+ * soft one for height (E2) and a tight dark one where the window meets the wall. */
 static void window_shadow(painter_t *p, int x, int y, int ww, int hh, int focused, int a255) {
     ui_shadow(&p->c, x + 2 * S, y + SHADOW / 3, ww - 4 * S, hh - 2 * S, RADIUS, SHADOW,
               (focused ? TH.shadow_on : TH.shadow_off) * a255 / 255);
@@ -1301,18 +1782,28 @@ static void window_shadow(painter_t *p, int x, int y, int ww, int hh, int focuse
 }
 
 /* The window itself (outline, title bar, content), no shadow, onto `cv` with
- * its content at (cx, cy). */
+ * its content at (cx, cy). hover: 0, or the control under the pointer + 1. */
 static void window_frame(ui_canvas *cv, window_t *w, int cx, int cy, int focused, int hover) {
     ui_round(cv, cx - 1, cy - TITLE_H - 1, w->w + 2, w->h + TITLE_H + 2, RADIUS,
              focused ? TH.edge_on : TH.edge_off);                                  /* the 1 px rim */
     ui_round_ex(cv, cx, cy - TITLE_H, w->w, TITLE_H, RADIUS - 1, focused ? TH.title_on : TH.title_off,
                 255, UI_TL | UI_TR);
-    ui_fill_a(cv, cx, cy - 1, w->w, 1, TH.sep, TH.sep_alpha);
-    traffic_lights(cv, cx, cy, focused, hover);
-    int tw = ui_text_style_width(w->title, S, UI_BOLD), tx = cx + (w->w - tw) / 2;
-    if (tx < cx + 80 * S) tx = cx + 80 * S;
-    ui_text_bold(cv, tx, cy - TITLE_H + (TITLE_H - 16 * S) / 2, w->title,
+    ui_fill_a(cv, cx + RADIUS, cy - TITLE_H, w->w - 2 * RADIUS, S, TH.sheen, TH.sheen_alpha / 3);   /* light from above */
+    ui_fill_a(cv, cx, cy - 1, w->w, 1, TH.hair, TH.hair_alpha);
+    int maxw = ctl_x(w, 0) - 16 * S - 12 * S;
+    char title[56];
+    fit_text(title, sizeof(title), w->title, maxw, UI_BOLD);
+    ui_text_bold(cv, cx + 16 * S, cy - TITLE_H + (TITLE_H - 16 * S) / 2, title,
                  focused ? TH.title_text_on : TH.title_text_off, S);
+    for (int i = 0; i < 3; i++) {
+        int bx = cx + ctl_x(w, i), by = cy - TITLE_H + ctl_y();
+        int on = hover == i + 1, off = i == 1 && !w->resizable;
+        if (on && !off)
+            ui_round_ex(cv, bx, by, CTL_W, CTL_H, R_CONTROL * S, i == 2 ? TH.danger : TH.s3, 255, UI_ALL);
+        unsigned ink = off ? TH.muted : on ? (i == 2 ? TH.on_accent : TH.label) : focused ? TH.secondary : TH.muted;
+        int gl = i == 0 ? GL_MIN : i == 1 ? (w->zoomed ? GL_RESTORE : GL_MAX) : GL_CLOSE;
+        gl_draw(cv, bx + (CTL_W - 18 * S) / 2, by + (CTL_H - 18 * S) / 2, 18 * S, gl, ink, off ? 110 : 255, -1);
+    }
 }
 
 static void window_content(ui_canvas *cv, window_t *w, int cx, int cy) {
@@ -1331,6 +1822,9 @@ static void window_body(ui_canvas *cv, window_t *w, int cx, int cy, int focused,
     window_content(cv, w, cx, cy);
 }
 
+/* The control hover a window is drawn with. */
+static int hover_of(const window_t *w) { return tl_hover >= 0 && &wins[tl_hover] == w ? tl_btn + 1 : 0; }
+
 /* ---- Window pictures -----------------------------------------------------
  * A window's shadow, rim and title bar change rarely (focus, title, size, the
  * traffic lights' hover, the theme) but were drawn again in every frame that
@@ -1345,7 +1839,8 @@ static int lay_margin(void) { return SHADOW + SHADOW / 3 + 2 * S; }
 static int layer_current(const window_t *w, int focused, int hover) {
     int ww = w->w + 2, hh = w->h + TITLE_H + 2, m = lay_margin();
     return w->lay && w->lay_ok && w->lay_w == ww + 2 * m && w->lay_h == hh + 2 * m && w->lay_focus == focused &&
-           w->lay_hover == hover && w->lay_theme == theme_gen && !strcmp(w->lay_title, w->title);
+           w->lay_hover == hover && w->lay_flags == (w->resizable | w->zoomed << 1) &&
+           w->lay_theme == theme_gen && !strcmp(w->lay_title, w->title);
 }
 
 /* Before the painters start (it allocates, and they share the picture). */
@@ -1388,6 +1883,7 @@ static void layer_update(painter_t *p, window_t *w, int focused, int hover) {
     w->lay_h = lh;
     w->lay_focus = focused;
     w->lay_hover = hover;
+    w->lay_flags = w->resizable | w->zoomed << 1;
     w->lay_theme = theme_gen;
     snprintf(w->lay_title, sizeof(w->lay_title), "%s", w->title);
     w->lay_ok = 1;
@@ -1548,7 +2044,7 @@ static void draw_window(painter_t *p, int k, int front_win) {
     if (w->minimised || w->anim == ANIM_WAIT) return;
     int exiting = w->anim == ANIM_CLOSE || w->anim == ANIM_MIN;
     int focused = front_win || exiting;                                          /* keeps its look while leaving */
-    int hover = tl_hover >= 0 && &wins[tl_hover] == w;
+    int hover = hover_of(w);
     if (w->anim != ANIM_NONE && anim_ok(w)) {
         draw_window_anim(p, k, focused, hover);
         return;
@@ -1564,127 +2060,227 @@ static void draw_window(painter_t *p, int k, int front_win) {
     window_body(&p->c, w, w->x, w->y, focused, hover);
 }
 
-static void draw_menu_bar(painter_t *p) {
-    ui_fill_a(&p->c, 0, 0, W, MENU_H, TH.bar_tint, TH.bar_alpha);           /* translucent */
-    ui_fill_a(&p->c, 0, MENU_H - 1, W, 1, TH.sep, TH.sep_alpha);
-    int ty = (MENU_H - 16 * S) / 2, x = 16 * S;
-    int tw = ui_text_style_width("Terminal OS", S, UI_BOLD);
-    bar_x0[1] = x - 8 * S;
-    bar_x1[1] = x + tw + 8 * S;
-    if (menu_open == 1)
-        ui_round_ex(&p->c, bar_x0[1], 2 * S, bar_x1[1] - bar_x0[1], MENU_H - 4 * S, R_SMALL * S, TH.hl, TH.hl_alpha, UI_ALL);
-    ui_text_bold(&p->c, x, ty, "Terminal OS", TH.label, S);
-    window_t *f = front();
-    x = bar_x1[1] + 8 * S;
-    x += ui_text_bold(&p->c, x, ty, f ? app_name(f) : "Desktop", TH.label, S) + 16 * S;
-    int ww = ui_text_width("Window", S);
-    bar_x0[2] = x - 8 * S;
-    bar_x1[2] = x + ww + 8 * S;
-    if (menu_open == 2)
-        ui_round_ex(&p->c, bar_x0[2], 2 * S, bar_x1[2] - bar_x0[2], MENU_H - 4 * S, R_SMALL * S, TH.hl, TH.hl_alpha, UI_ALL);
-    ui_text(&p->c, x, ty, "Window", TH.label, S);
+/* ---- Drawing: the glass shell ------------------------------------------------------- */
 
-    int rx = W - 16 * S - ui_text_width(clock_text, S);
-    ui_text(&p->c, rx, ty, clock_text, TH.label, S);
-    int is = 16 * S, iy = (MENU_H - is) / 2;
-    status_x[0] = status_x[1] = status_x[2] = 0;
-    rx -= 16 * S;
-    if (vol_level >= 0) {                              /* sound */
-        rx -= is;
-        status_x[2] = rx;
-        ui_icon(&p->c, rx, iy, is, "sound", vol_level ? 255 : 90);
-        rx -= 12 * S;
-    }
-    if (wifi_on >= 0) {                                /* Wi-Fi: faded when not connected */
-        rx -= is;
-        status_x[1] = rx;
-        ui_icon(&p->c, rx, iy, is, "wifi", wifi_on ? 255 : 80);
-        rx -= 12 * S;
-    }
-    if (bat >= 0) {                                    /* battery and percent */
-        char pct[8];
-        snprintf(pct, sizeof(pct), "%d%%", bat & 0xFF);
-        int pw = ui_text_width(pct, S);
-        rx -= pw;
-        ui_text(&p->c, rx, ty, pct, TH.label, S);
-        rx -= is + 4 * S;
-        status_x[0] = rx;
-        ui_icon(&p->c, rx, iy, is, "battery", 255);
-    }
+/* A glass panel: depth first (a wide soft shadow for height, a tight one at the
+ * edge), a rim, the frosted backdrop, a light edge on top and a shade under it.
+ * level 2 = E2 (the Rail, the Launcher, menus), 1 = E1 (the pill). */
+static void glass(painter_t *p, int x, int y, int w, int h, int r, int corners, int level, int sheen) {
+    int sz = level == 2 ? 24 * S : 10 * S, dy = level == 2 ? 8 * S : 3 * S;
+    int al = level == 2 ? TH.shadow_glass : TH.shadow_glass * 2 / 3;
+    ui_shadow_ex(&p->c, x, y + dy, w, h, r, sz, al, 1);                           /* height: far and soft */
+    ui_shadow_ex(&p->c, x, y + S, w, h, r, 3 * S, al * 2 / 3, 1);                 /* contact: tight and dark */
+    ui_round_ex(&p->c, x - 1, y - 1, w + 2, h + 2, r + 1, TH.hair, TH.hair_strong, corners);   /* rim */
+    material(p, x, y, w, h, r, corners, TH.glass, TH.glass_alpha, TH.s1);
+    if (sheen && h >= 4 * r)                                                       /* light falling from above */
+        for (int k = 0; k < 5; k++)
+            ui_round_ex(&p->c, x, y, w, h * (5 - k) / 11, r, TH.sheen, TH.sheen_alpha / 14 + 1, corners & (UI_TL | UI_TR));
+    ui_fill_a(&p->c, x + r, y, w - 2 * r, S, TH.sheen, TH.sheen_alpha / 2);        /* the lit top edge */
+    ui_fill_a(&p->c, x + r, y + h - S, w - 2 * r, S, 0x000000, 36);                /* and the shade below */
 }
 
-static void draw_dock(painter_t *p) {
-    int x = dock_x(), w = dock_w(), y = dock_bottom() - dock_h(), r = R_XXL * S;
-    ui_shadow_ex(&p->c, x, y + 2 * S, w, dock_h(), r, 12 * S, 60, 1);          /* not under the glass */
-    ui_round_ex(&p->c, x - 1, y - 1, w + 2, dock_h() + 2, r + 1, TH.dock_rim, TH.dock_rim_alpha, UI_ALL);
-    material(p, x, y, w, dock_h(), r, UI_ALL, TH.dock_tint, TH.dock_alpha, TH.dock_solid);
-    int hot = dock_hit(mouse_x, mouse_y);
-    for (int i = 0; i < DOCK_APPS; i++) {
-        dock_app_t *a = &apps[i];
-        int size = a->size, ix = icon_x(i), iy = dock_bottom() - pad() - size - (int)(a->bounce / FP), rr = size * 22 / 100;
-        if (ui_icon(&p->c, ix, iy, size, a->icon, 255) != 0) {   /* no icon file: a drawn one */
-            ui_shadow(&p->c, ix, iy + size / 30, size, size, rr, size / 12 + 1, 70);
-            ui_round(&p->c, ix, iy, size, size, rr, a->color);
-            int ts = size / 22;
-            if (ts < 1) ts = 1;
-            if (ts > 4) ts = 4;
-            int gw = ui_text_style_width(a->glyph, ts, UI_BOLD);
-            ui_text_bold(&p->c, ix + (size - gw) / 2, iy + (size - 16 * ts) / 2, a->glyph, 0xFFFFFF, ts);
+/* How far an app's start-up pulse is, 0..255 (0: not starting). */
+static int launch_pulse(int i) {
+    if (i < 0 || !apps[i].launching) return 0;
+    int ph = (int)((uptime_ms() - apps[i].launch_at) % 900), tri = ph < 450 ? ph : 900 - ph;
+    return 40 + tri * 150 / 450;
+}
+
+static void draw_rail(painter_t *p) {
+    ui_canvas *c = &p->c;
+    int w = rail_w(), r = 20 * S, ex = r + 4 * S;
+    glass(p, -ex, 0, w + ex, H, r, UI_BR, 2, 0);                          /* (its left edge is off the screen) */
+    ui_fill_a(c, w - S, 0, S, H, TH.sheen, TH.sheen_alpha / 4);
+    int lc = avatar_cx(), ly = logo_cy();
+    gl_draw(c, lc - 16 * S, ly - 16 * S, 32 * S, GL_LOGO, ui_fg(H_LOGO), 255, -1);
+    for (int i = 0; i < R_COUNT; i++) {
+        int id = H_RAIL0 + i, bx = rail_item_x(), by = rail_item_y(i), bw = rail_item_w(), bh = rail_item_h();
+        int a = ui_plate(id), pr = press_id == id ? S : 0;
+        int ai = i == R_FILES ? app_index("finder") : i == R_SETTINGS ? app_index("settings") : -1;
+        int pulse = launch_pulse(ai);
+        if (act[id]) ui_shadow(c, bx, by + 2 * S, bw, bh, R_CARD * S + 4 * S, 8 * S, 46 * act[id] / 256);
+        if (a || pulse) {
+            ui_round_ex(c, bx - 1, by - 1, bw + 2, bh + 2, 17 * S, TH.hair, TH.hair_alpha * (act[id] + hov[id] / 2 > 256 ? 256 : act[id] + hov[id] / 2) / 256, UI_ALL);
+            ui_round_ex(c, bx, by, bw, bh, 16 * S, TH.s3, a, UI_ALL);
+            if (pulse) ui_round_ex(c, bx, by, bw, bh, 16 * S, TH.accent, pulse / 4, UI_ALL);
         }
-        if (a->pid > 0 && cfg->dock_dots)                         /* the running dot */
-            ui_circle(&p->c, ix + size / 2, dock_bottom() - pad() / 2 + S, 2 * S, dark ? 0xE5E5E7 : 0x3A3A3E);
-        if (i == hot && !menu_open) {                          /* the name, above the icon */
-            int ta = (int)(255 * ease_out((long)tip_ms * 1024 / FADE_MS) / 1024);      /* fades in over 120 ms */
-            int lw = ui_text_width(a->name, S) + 16 * S, lh = 24 * S;
-            int lx = ix + size / 2 - lw / 2, ly = dock_bottom() - dock_h() - lh - 8 * S - (size - icon());
-            ui_round_ex(&p->c, lx, ly, lw, lh, R_MEDIUM * S, TH.tooltip, 225 * ta / 255, UI_ALL);
-            ui_text(&p->c, lx + 8 * S, ly + (lh - 16 * S) / 2, a->name,
-                    lerp_rgb(TH.tooltip, 0xFFFFFF, (unsigned)(ta + (ta >> 7))), S);
+        if (act[id])                                                              /* the place marker on the edge */
+            ui_round_ex(c, -3 * S, by + 18 * S, 6 * S, bh - 36 * S, 3 * S, TH.accent, act[id] > 255 ? 255 : act[id], UI_ALL);
+        unsigned fg = ui_fg(id);
+        gl_draw(c, bx + (bw - 24 * S) / 2, by + 9 * S + pr, 24 * S, rail_glyph[i], fg, 255, -1);
+        int tw = ui_text_width(rail_label[i], S);
+        ui_text(c, bx + (bw - tw) / 2, by + 37 * S + pr, rail_label[i], fg, S);
+        if (ai >= 0 && apps[ai].pid > 0 && cfg->dock_dots && !act[id])            /* running, not in front */
+            ui_circle(c, bx + bw - 10 * S, by + 10 * S, 2 * S, TH.accent);
+    }
+    int cx = avatar_cx(), cy = avatar_cy(), pr = press_id == H_AVATAR ? S : 0;
+    ui_round_ex(c, cx - 23 * S, cy - 23 * S, 46 * S, 46 * S, 23 * S, TH.hair, TH.hair_strong, UI_ALL);
+    ui_round_ex(c, cx - 22 * S, cy - 22 * S, 44 * S, 44 * S, 22 * S, lerp_rgb(TH.s2, TH.s3, (unsigned)hov[H_AVATAR]), 255, UI_ALL);
+    gl_draw(c, cx - 11 * S, cy - 11 * S + pr, 22 * S, GL_USER, ui_fg(H_AVATAR), 255, -1);
+}
+
+static void draw_pill(painter_t *p) {
+    ui_canvas *c = &p->c;
+    pill_layout();
+    glass(p, pill_x, pill_y, pill_w, pill_h, pill_h / 2, UI_ALL, 1, 0);
+    int by = pill_y + 4 * S, bh = 40 * S, ty = pill_y + (pill_h - 16 * S) / 2;
+    for (int i = 0; i < pb_n; i++) {
+        int id = pb[i].id, bx = pb[i].x, bw = pb[i].w, a = ui_plate(id), pr = press_id == id ? S : 0;
+        if (a) ui_round_ex(c, bx + 2 * S, by, bw - 4 * S, bh, 20 * S, TH.s3, a, UI_ALL);
+        unsigned fg = ui_fg(id);
+        int gx = bx + (bw - 20 * S) / 2, gy = by + 10 * S + pr;
+        switch (id) {
+        case H_SEARCH: gl_draw(c, gx, gy, 20 * S, GL_SEARCH, fg, 255, -1); break;
+        case H_BELL: gl_draw(c, gx, gy, 20 * S, GL_BELL, fg, 255, -1); break;
+        case H_WIFI: gl_draw(c, gx, gy, 20 * S, GL_WIFI, fg, wifi_on ? 255 : 110, -1); break;
+        case H_SOUND: gl_draw(c, gx, gy, 20 * S, GL_SOUND, fg, vol_level ? 255 : 110, -1); break;
+        case H_THEME: gl_draw(c, gx, gy, 20 * S, dark ? GL_MOON : GL_SUN, fg, 255, -1); break;
+        case H_BATTERY: {
+            int pct = bat & 0xFF, charging = bat & 0x100;
+            unsigned bc = pct <= 15 && !charging ? TH.danger : charging ? TH.success : fg;
+            gl_draw(c, bx + 12 * S, gy, 20 * S, GL_BATTERY, bc, 255, pct);
+            ui_text(c, bx + 12 * S + 20 * S + 6 * S, ty + pr, bat_text, fg, S);
+            break;
+        }
         }
     }
+    ui_text(c, time_x + 10 * S, ty, clock_text, TH.label, S);
+}
+
+/* One tile of the Launcher: a plate that lifts and brightens under the
+ * pointer, an icon that takes the state's colour, a name below. */
+static void draw_tile(painter_t *p, int i, int cx, int cy, const panel_geo_t *g) {
+    ui_canvas *c = &p->c;
+    int id = H_TILE0 + i, size = 56 * S;
+    litem_t *it = &items[i];
+    int tx = cx + (g->cw - size) / 2;
+    int lift = reduce_motion ? 0 : hov[id] * 2 * S / 256, ty = cy + 4 * S - lift + (press_id == id ? S : 0);
+    int pulse = it->kind == LK_APP ? launch_pulse(it->idx) : 0;
+    if (i == panel_sel) ui_round_ex(c, tx - 3 * S, ty - 3 * S, size + 6 * S, size + 6 * S, 19 * S, TH.accent, 190, UI_ALL);
+    ui_shadow_ex(c, tx, ty + 2 * S + lift, size, size, 16 * S, 8 * S + lift, 30 + hov[id] * 60 / 256, 1);   /* it lifts: the shadow grows */
+    ui_round_ex(c, tx - 1, ty - 1, size + 2, size + 2, 17 * S, TH.hair,
+                TH.hair_alpha + hov[id] * (TH.hair_strong - TH.hair_alpha) / 256, UI_ALL);
+    int fa = 150 + hov[id] * 85 / 256 + (press_id == id ? 20 : 0);
+    ui_round_ex(c, tx, ty, size, size, 16 * S, lerp_rgb(TH.s2, TH.s3, (unsigned)hov[id]), fa > 255 ? 255 : fa, UI_ALL);
+    if (act[id]) ui_round_ex(c, tx, ty, size, size, 16 * S, TH.accent, act[id] * 30 / 256, UI_ALL);
+    if (pulse) ui_round_ex(c, tx, ty, size, size, 16 * S, TH.accent, pulse / 3, UI_ALL);
+    ui_fill_a(c, tx + 16 * S, ty, size - 32 * S, S, TH.sheen, TH.sheen_alpha / 3);              /* a lit top edge */
+    unsigned fg = ui_fg(id);
+    int gl = 0;
+    const dock_app_t *a = 0;
+    if (it->kind == LK_APP) a = &apps[it->idx];
+    else if (it->kind == LK_PANE) gl = panes[it->idx].glyph;
+    else {
+        gl = GL_APPS;
+        for (int k = 0; k < DOCK_APPS; k++)
+            if (apps[k].pid > 0 && apps[k].pid == wins[it->idx].pid) { a = &apps[k]; break; }
+    }
+    if (a) gl = glyph_for(a->icon);
+    if (gl) {
+        gl_draw(c, tx + (size - 28 * S) / 2, ty + (size - 28 * S) / 2, 28 * S, gl, fg, 255, a || it->kind == LK_PANE ? 60 : -1);
+    } else if (a && a->icon && a->icon[0] && ui_icon(c, tx + 8 * S, ty + 8 * S, 40 * S, a->icon, 255) == 0) {
+        /* its own picture */
+    } else if (a) {                                                   /* no icon: its first letter */
+        int ts = 2 * S, gw = ui_text_style_width(a->glyph, ts, UI_BOLD);
+        ui_text_bold(c, tx + (size - gw) / 2, ty + (size - 16 * ts) / 2, a->glyph, fg, ts);
+    }
+    char label[48];
+    fit_text(label, sizeof(label), it->label, g->cw - 8 * S, UI_REGULAR);
+    unsigned lc = lerp_rgb(TH.secondary, TH.label, (unsigned)(hov[id] > act[id] ? hov[id] : act[id]));
+    int lw = ui_text_width(label, S);
+    ui_text(c, cx + (g->cw - lw) / 2, cy + 4 * S + size + 8 * S, label, lc, S);
+    if (act[id] && cfg->dock_dots) ui_circle(c, cx + g->cw / 2, cy + g->ch - 5 * S, 2 * S, TH.accent);
+}
+
+static void draw_launcher(painter_t *p) {
+    if (!panel_vis()) return;
+    ui_canvas *c = &p->c;
+    panel_geo_t g;
+    panel_geo(&g);
+    int off = panel_off(), x = g.x, y = g.y + off;
+    glass(p, x, y, g.w, g.h, R_LARGE * S, UI_ALL, 2, 1);
+    int fx, fy, fw, fh;
+    field_rect(&g, &fx, &fy, &fw, &fh);
+    fy += off;
+    if (panel_mode == PM_APPS) {                                       /* the search field: always in focus */
+        int fa = 170 + hov[H_FIELD] * 50 / 256;
+        ui_round_ex(c, fx - 1, fy - 1, fw + 2, fh + 2, 13 * S, TH.accent, 120 + hov[H_FIELD] * 60 / 256, UI_ALL);
+        ui_round_ex(c, fx, fy, fw, fh, 12 * S, TH.s2, fa, UI_ALL);
+        gl_draw(c, fx + 14 * S, fy + 12 * S, 20 * S, GL_SEARCH, qlen ? TH.label : TH.muted, 255, -1);
+        int tx = fx + 46 * S, ty = fy + (fh - 16 * S) / 2;
+        if (qlen) {
+            int tw = ui_text(c, tx, ty, query, TH.label, S);
+            if (caret_on) ui_fill(c, tx + tw + 2 * S, fy + 12 * S, S + S / 2, 20 * S, TH.accent);
+        } else {
+            if (caret_on) ui_fill(c, tx, fy + 12 * S, S + S / 2, 20 * S, TH.accent);
+            ui_text(c, tx + 4 * S, ty, "Search apps and settings", TH.muted, S);
+        }
+    } else {
+        const char *title = panel_mode == PM_SPACES ? "Spaces" : "Create";
+        ui_text_bold(c, fx + 4 * S, fy + (fh - 16 * S) / 2, title, TH.label, S);
+        char cnt[24];
+        snprintf(cnt, sizeof(cnt), panel_mode == PM_SPACES ? "%d open" : "%d apps", n_items);
+        int cw = ui_text_width(cnt, S);
+        ui_text(c, fx + fw - cw - 4 * S, fy + (fh - 16 * S) / 2, cnt, TH.muted, S);
+    }
+    for (int i = 0; i < n_items; i++) {
+        int tx, ty;
+        if (tile_rect(i, &g, &tx, &ty)) draw_tile(p, i, tx, ty + off, &g);
+    }
+    if (!n_items) {
+        const char *msg = panel_mode == PM_SPACES ? "No windows are open" : panel_mode == PM_APPS ? "Nothing found" : "No apps here yet";
+        int mw = ui_text_width(msg, S);
+        ui_text(c, x + (g.w - mw) / 2, y + g.gy + g.rows * g.ch / 2 - 8 * S, msg, TH.muted, S);
+    }
+    int total = (n_items + 3) / 4;                                     /* more rows than fit: the handle shows where */
+    ui_fill_a(c, x + 20 * S, y + g.h - 60 * S, g.w - 40 * S, S, TH.hair, TH.hair_alpha);
+    int bx, by, bw, bh;
+    power_rect(&g, &bx, &by, &bw, &bh);
+    by += off;
+    int a = ui_plate(H_POWER);
+    if (a) ui_round_ex(c, bx, by, bw, bh, 20 * S, TH.s3, a, UI_ALL);
+    gl_draw(c, bx + 10 * S, by + 10 * S + (press_id == H_POWER ? S : 0), 20 * S, GL_POWER, ui_fg(H_POWER), 255, -1);
+    int hw = 36 * S, hx = x + g.w / 2 - hw / 2 + (total > g.rows ? (panel_scroll * 24 * S / total - 12 * S) : 0);
+    ui_round_ex(c, hx, y + g.h - 16 * S, hw, 4 * S, 2 * S, TH.muted, 130, UI_ALL);
 }
 
 static void draw_menu(painter_t *p) {
     if (!menu_open) return;
-    int x = menu_x(), y = menu_y(), w = menu_w(), h = menu_h(), r = R_LARGE * S;
-    ui_shadow_ex(&p->c, x, y + 4 * S, w, h, r, 14 * S, 90, 1);                  /* blur 28 / 2 */
-    ui_round_ex(&p->c, x - 1, y - 1, w + 2, h + 2, r + 1, TH.hair, TH.hair_alpha, UI_ALL);
-    material(p, x, y, w, h, r, UI_ALL, TH.menu_tint, TH.menu_alpha, TH.menu_solid);
+    ui_canvas *c = &p->c;
+    int x = menu_x(), y = menu_y(), w = menu_w(), h = menu_h(), r = R_CARD * S;
+    glass(p, x, y, w, h, r, UI_ALL, 2, 0);
     for (int i = 0; i < n_mitems; i++) {
         int iy = menu_item_y(i), ih = mi_h(i);
         if (mitems[i].flags & MI_SEP) {
-            ui_fill_a(&p->c, x + 8 * S, iy + ih / 2, w - 16 * S, 1, TH.sep, TH.sep_alpha);
+            ui_fill_a(c, x + 8 * S, iy + ih / 2, w - 16 * S, S, TH.hair, TH.hair_alpha);
             continue;
         }
-        int off = mitems[i].flags & MI_OFF, hot = i == menu_hot && !off;
-        if (hot) ui_round(&p->c, x + 4 * S, iy, w - 8 * S, ih, R_SMALL * S, TH.accent);   /* 8 - 4 padding */
-        unsigned fg = hot ? 0xFFFFFF : off ? TH.secondary : TH.label;
+        int off = mitems[i].flags & MI_OFF, hl = i == menu_hot && !off;
+        if (hl) ui_round(c, x + 4 * S, iy + 2 * S, w - 8 * S, ih - 4 * S, R_CONTROL * S, TH.accent);
+        unsigned fg = hl ? TH.on_accent : off ? TH.muted : TH.label;
         int ty = iy + (ih - 16 * S) / 2;
-        ui_text(&p->c, x + 16 * S, ty, mitems[i].label, fg, S);
+        ui_text(c, x + 16 * S, ty, mitems[i].label, fg, S);
         if (mitems[i].key[0]) {
             int kw = ui_text_width(mitems[i].key, S);
-            ui_text(&p->c, x + w - 16 * S - kw, ty, mitems[i].key, hot ? 0xFFFFFF : TH.secondary, S);
+            ui_text(c, x + w - 16 * S - kw, ty, mitems[i].key, hl ? TH.on_accent : TH.muted, S);
         }
     }
 }
 
-/* The menu, fading in over 120 ms (ease-out): what is behind it is saved, the
- * menu drawn, then the two mixed. A micro-interaction, so Reduce Motion keeps it. */
-static void draw_menu_faded(painter_t *p) {
-    if (!menu_open) return;
-    int a = (int)(255 * ease_out((long)menu_fade_ms * 1024 / FADE_MS) / 1024);
-    int x0 = menu_x() - SHADOW, y0 = menu_y() - SHADOW, x1 = menu_x() + menu_w() + SHADOW, y1 = menu_y() + menu_h() + SHADOW;
+/* A panel fading in (ease-out): what is behind it is saved, the panel drawn,
+ * then the two mixed. Micro and major motion, so Reduce Motion keeps the fade. */
+static void draw_faded(painter_t *p, int x0, int y0, int x1, int y1, int a, void (*fn)(painter_t *)) {
     if (x0 < p->c.cx0) x0 = p->c.cx0;
     if (y0 < p->c.cy0) y0 = p->c.cy0;
     if (x1 > p->c.cx1) x1 = p->c.cx1;
     if (y1 > p->c.cy1) y1 = p->c.cy1;
     if (a >= 255 || !snap || x1 <= x0 || y1 <= y0 || (long)(x1 - x0) * (y1 - y0) > anim_cap) {
-        draw_menu(p);
+        fn(p);
         return;
     }
     for (int y = y0; y < y1; y++)
         memcpy(snap + (long)(y - y0) * (x1 - x0), p->c.px + (long)y * p->c.stride + x0, (size_t)(x1 - x0) * 4);
-    draw_menu(p);
+    fn(p);
     for (int y = y0; y < y1; y++) {
         unsigned *row = p->c.px + (long)y * p->c.stride + x0;
         const unsigned *old = snap + (long)(y - y0) * (x1 - x0);
@@ -1692,7 +2288,20 @@ static void draw_menu_faded(painter_t *p) {
     }
 }
 
-/* The damaged parts of rows [by0, by1). */
+static void draw_launcher_faded(painter_t *p) {
+    if (!panel_vis()) return;
+    panel_geo_t g;
+    panel_geo(&g);
+    int a = (int)(255 * ease_out(lt) / 1024);
+    draw_faded(p, g.x - SHADOW, g.y - SHADOW, g.x + g.w + SHADOW, g.y + g.h + SHADOW + 20 * S, a, draw_launcher);
+}
+
+static void draw_menu_faded(painter_t *p) {
+    if (!menu_open) return;
+    int a = (int)(255 * ease_out((long)menu_fade_ms * 1024 / FADE_MS) / 1024);
+    draw_faded(p, menu_x() - SHADOW, menu_y() - SHADOW, menu_x() + menu_w() + SHADOW, menu_y() + menu_h() + SHADOW + 8 * S, a, draw_menu);
+}
+
 static void paint(painter_t *p, int by0, int by1) {
     window_t *f = front();
     for (int d = 0; d < ndmg; d++) {
@@ -1701,8 +2310,9 @@ static void paint(painter_t *p, int by0, int by1) {
         ui_clip(&p->c, x0, y0, x1 - x0, y1 - y0);
         ui_copy(&p->c, x0, y0, wallpaper + (long)y0 * W + x0, x1 - x0, y1 - y0, W);
         for (int i = 0; i < norder; i++) draw_window(p, order[i], &wins[order[i]] == f);
-        draw_menu_bar(p);
-        draw_dock(p);
+        draw_rail(p);
+        draw_pill(p);
+        draw_launcher_faded(p);
         draw_menu_faded(p);
         if (!kernel_cursor) draw_cursor(p);
     }
@@ -1724,6 +2334,7 @@ static void painter(void *arg) {
 /* Window motion and the menu's fade share scratch buffers: one core then. */
 static int motion(void) {
     if (menu_open && menu_fade_ms < FADE_MS) return 1;
+    if (lt != (panel_open ? 1024 : 0)) return 1;
     for (int k = 0; k < MAX_WINDOWS; k++)
         if (wins[k].used && wins[k].anim != ANIM_NONE) return 1;
     return 0;
@@ -1740,35 +2351,28 @@ static int overlaps(int ax0, int ay0, int ax1, int ay1, int bx, int by, int bw, 
     return ax0 < bx + bw && bx < ax1 && ay0 < by + bh && by < ay1;
 }
 
-/* The highest row the Dock draws on now: magnified and bouncing icons (and
- * their shadows), the name shown above the one under the pointer. */
-static int dock_reach(void) {
-    int top = dock_bottom() - dock_h();
-    for (int i = 0; i < DOCK_APPS; i++) {
-        int size = apps[i].size;
-        int iy = dock_bottom() - pad() - size - (int)(apps[i].bounce / FP) - size / 12 - 2;
-        int ly = dock_bottom() - dock_h() - 24 * S - 8 * S - (size - icon());   /* as draw_dock places it */
-        if (iy < top) top = iy;
-        if (ly < top) top = ly;
-    }
-    return top - 2 * S;
-}
-
 static void plan_gpu_copies(void) {
     static struct os_copy items[64];
     int n = 0;
     for (int k = 0; k < MAX_WINDOWS; k++) wins[k].gpu_body = 0;
     if (!gpu_frames || !kernel_cursor || motion()) return;
-    int dock_top = dock_reach();
+    int dock_top = H;
+    pill_layout();
     for (int i = 0; i < norder; i++) {
         window_t *w = &wins[order[i]];
         if (!live(w) || w->minimised || w->anim != ANIM_NONE) continue;
-        int x0 = w->x < 0 ? 0 : w->x, x1 = w->x + w->w > W ? W : w->x + w->w;
-        int y0 = w->y < MENU_H ? MENU_H : w->y, y1 = w->y + w->h - RADIUS;
+        if (w->x < rail_w() + SHADOW) continue;                   /* under the Rail's shadow: the CPU draws it */
+        int x0 = w->x, x1 = w->x + w->w > W ? W : w->x + w->w;
+        int y0 = w->y, y1 = w->y + w->h - RADIUS;
+        if (x1 > pill_x - SHADOW && y0 < pill_y + pill_h + SHADOW) y0 = pill_y + pill_h + SHADOW;   /* the pill stays with the CPU */
         if (y1 > dock_top) y1 = dock_top;
         if (x1 <= x0 || y1 <= y0) continue;
-        int covered = menu_open && overlaps(x0, y0, x1, y1, menu_x() - SHADOW, menu_y() - SHADOW,
-                                            menu_w() + 2 * SHADOW, menu_h() + 2 * SHADOW);
+        panel_geo_t pg;
+        panel_geo(&pg);
+        int covered = (menu_open && overlaps(x0, y0, x1, y1, menu_x() - SHADOW, menu_y() - SHADOW,
+                                             menu_w() + 2 * SHADOW, menu_h() + 2 * SHADOW)) ||
+                      (panel_vis() && overlaps(x0, y0, x1, y1, pg.x - SHADOW, pg.y - SHADOW,
+                                               pg.w + 2 * SHADOW, pg.h + 2 * SHADOW + 20 * S));
         for (int j = i + 1; j < norder && !covered; j++) {
             window_t *u = &wins[order[j]];
             int ox, oy, ow, oh;
@@ -1809,7 +2413,7 @@ static int compose(void) {
     for (int i = 0; i < norder; i++) {                 /* window pictures, before the painters share them */
         window_t *w = &wins[order[i]];
         if (w->used && !w->minimised && w->anim == ANIM_NONE)
-            layer_update(&painters[0], w, w == f, tl_hover >= 0 && &wins[tl_hover] == w);
+            layer_update(&painters[0], w, w == f, hover_of(w));
     }
     long area = 0;
     for (int d = 0; d < ndmg; d++) area += (long)(dmg[d].x1 - dmg[d].x0) * (dmg[d].y1 - dmg[d].y0);
@@ -1844,12 +2448,43 @@ static int window_at(int x, int y) {
     return -1;
 }
 
-/* The window whose traffic-light group the pointer is over, or -1. */
-static int traffic_hover(void) {
+/* The window control under the pointer, if any: tl_hover (the window) and tl_btn. */
+static void control_hover(int *win, int *btn) {
+    *win = *btn = -1;
     int k = window_at(mouse_x, mouse_y);
-    if (k < 0) return -1;
-    window_t *w = &wins[k];
-    return ui_inside(mouse_x, mouse_y, w->x + 12 * S, w->y - TITLE_H, 60 * S, TITLE_H) ? k : -1;
+    if (k < 0) return;
+    int b = ctl_at(&wins[k], mouse_x, mouse_y);
+    if (b < 0) return;
+    *win = k;
+    *btn = b;
+}
+
+static int lobby_peek;                           /* the Lobby is showing: the windows are hidden */
+
+/* Lobby: step back from the windows to the bare wall, and again to bring them back. */
+static void lobby_toggle(void) {
+    close_menu();
+    panel_hide();
+    if (!lobby_peek) {
+        int any = 0;
+        for (int k = 0; k < MAX_WINDOWS; k++)
+            if (live(&wins[k])) {
+                wins[k].peek = 1;
+                minimise_window(k);
+                any = 1;
+            }
+        lobby_peek = any;
+        return;
+    }
+    int list[MAX_WINDOWS], n = 0;
+    for (int i = 0; i < norder; i++)                       /* back to front, so the stack comes back as it was */
+        if (wins[order[i]].used && wins[order[i]].peek) list[n++] = order[i];
+    for (int i = 0; i < n; i++) {
+        wins[list[i]].peek = 0;
+        restore_window(list[i]);
+        raise(list[i]);
+    }
+    lobby_peek = 0;
 }
 
 static void launch(int i) {
@@ -1859,20 +2494,18 @@ static void launch(int i) {
             raise(k);
             return;
         }
+    if (apps[i].pid > 0 && apps[i].launching) return;     /* a second click while it starts */
     char *argv[] = { (char *)apps[i].program, 0 };
     int pid = spawn(apps[i].program, argv, 0);
     printf("windowserver: open %s: %s\n", apps[i].program, pid > 0 ? "started" : "cannot start");   /* (in the log) */
     if (pid > 0) {
         apps[i].pid = pid;
-        apps[i].launching = !reduce_motion && cfg->dock_bounce;
+        apps[i].launching = cfg->dock_bounce != 0;       /* "Animate opening apps": the item pulses meanwhile */
         apps[i].launch_at = uptime_ms();
-        apps[i].bounce = 0;
-        apps[i].bvel = 310L * S * FP;
     }
-    damage_dock();
+    damage_chrome();
+    damage_launcher();
 }
-
-static void quit(void);
 
 /* The programs run() started, by pid: a crash report can name them. */
 static struct { int pid; char name[16]; } started[16];
@@ -1886,6 +2519,12 @@ static void run(const char *program, const char *arg) {
     int k = n_started++ % 16;
     started[k].pid = pid;
     snprintf(started[k].name, sizeof(started[k].name), "%s", program);
+}
+
+static void open_program(const char *program) {
+    int i = app_index(program);
+    if (i >= 0) launch(i);
+    else run(program, 0);
 }
 
 /* Tell every window (ws.h `prefs`) when a setting changes. */
@@ -1921,25 +2560,13 @@ static void menu_choose(int id) {
         power(id == M_RESTART);
     } else if (id == M_LOGOUT) {
         quit();
-    } else if (id == W_MINIMIZE || id == W_CLOSE) {
-        window_t *f = front();
-        if (f && id == W_MINIMIZE) minimise_window((int)(f - wins));
-        else if (f) close_window_request((int)(f - wins));
-    } else if (id >= W_FRONT) {
-        int k = id - W_FRONT;
-        if (k >= 0 && k < MAX_WINDOWS && wins[k].used) {
-            restore_window(k);
-            raise(k);
-        }
     }
 }
 
-/* Keys while a menu is open: Esc, Left/Right (the other menu), Up/Down, Enter. */
+/* Keys while a menu is open: Esc, Up/Down, Enter. */
 static void menu_key(int key) {
     if (key == 27) {
         close_menu();
-    } else if (key == KEYCODE_LEFT || key == KEYCODE_RIGHT) {
-        switch_menu(menu_open == 1 ? 2 : 1);
     } else if (key == KEYCODE_UP || key == KEYCODE_DOWN) {
         int step = key == KEYCODE_DOWN ? 1 : -1, i = menu_hot;
         for (int tries = 0; tries <= n_mitems; tries++) {
@@ -1959,60 +2586,147 @@ static void menu_key(int key) {
     }
 }
 
+/* A tile of the Launcher was chosen. */
+static void activate_item(int i) {
+    if (i < 0 || i >= n_items) return;
+    litem_t it = items[i];
+    panel_hide();
+    if (it.kind == LK_APP) {
+        launch(it.idx);
+    } else if (it.kind == LK_WIN) {
+        if (wins[it.idx].used) {
+            restore_window(it.idx);
+            raise(it.idx);
+        }
+    } else {
+        run("settings", panes[it.idx].pane);
+    }
+}
+
+/* Keys while the Launcher is open: type to search, arrows to choose, Enter, Esc. */
+static void panel_key(int key) {
+    if (key == 27) {
+        panel_hide();
+        return;
+    }
+    if (key == '\n' || key == '\r') {
+        int i = panel_sel >= 0 ? panel_sel : (qlen && n_items ? 0 : -1);
+        if (i >= 0) activate_item(i);
+        return;
+    }
+    if (key == KEYCODE_LEFT || key == KEYCODE_RIGHT || key == KEYCODE_UP || key == KEYCODE_DOWN) {
+        if (!n_items) return;
+        if (panel_sel < 0) panel_sel = 0;
+        else panel_sel += key == KEYCODE_RIGHT ? 1 : key == KEYCODE_LEFT ? -1 : key == KEYCODE_DOWN ? 4 : -4;
+        panel_sel = clampi(panel_sel, 0, n_items - 1);
+        panel_reveal();
+        damage_launcher();
+        return;
+    }
+    if (panel_mode != PM_APPS) return;
+    int changed = 0;
+    if ((key == '\b' || key == 127) && qlen) {
+        query[--qlen] = 0;
+        changed = 1;
+    } else if (key >= 32 && key < 127 && qlen < (int)sizeof(query) - 1) {
+        query[qlen++] = (char)key;
+        query[qlen] = 0;
+        changed = 1;
+    }
+    if (changed) {
+        panel_sel = qlen ? 0 : -1;
+        panel_scroll = 0;
+        build_items();
+        damage_launcher();
+    }
+}
+
+static void damage_for(int id) {
+    if (id < H_SEARCH) damage_rail();
+    else if (id <= H_THEME) damage_pill();
+    else damage_launcher();
+}
+
+/* A rail item, a pill button or a Launcher tile was clicked (pressed and released on it). */
+static void activate(int id) {
+    if (id >= H_TILE0) {
+        activate_item(id - H_TILE0);
+        return;
+    }
+    switch (id) {
+    case H_RAIL0 + R_LOBBY: lobby_toggle(); break;
+    case H_RAIL0 + R_APPS: panel_toggle(PM_APPS); break;
+    case H_RAIL0 + R_FILES: panel_hide(); open_program("finder"); break;
+    case H_RAIL0 + R_SPACES: panel_toggle(PM_SPACES); break;
+    case H_RAIL0 + R_CREATE: panel_toggle(PM_CREATE); break;
+    case H_RAIL0 + R_SETTINGS: panel_hide(); open_program("settings"); break;
+    case H_AVATAR: open_menu(1, rail_w() + 8 * S, H - 16 * S, MA_UP); break;
+    case H_LOGO: run("about", 0); break;
+    case H_SEARCH: panel_show(PM_APPS); break;
+    case H_BELL:
+        pill_layout();
+        for (int i = 0; i < pb_n; i++)
+            if (pb[i].id == H_BELL) open_menu(3, pb[i].x + pb[i].w, pill_y + pill_h + 8 * S, MA_RIGHT);
+        break;
+    case H_WIFI: run("settings", "wifi"); break;
+    case H_SOUND: run("settings", "sound"); break;
+    case H_BATTERY: run("settings", "battery"); break;
+    case H_THEME:
+        cfg->dark = !cfg->dark;
+        cfg->seq++;
+        break;
+    case H_POWER: {
+        panel_geo_t g;
+        int bx, by, bw, bh;
+        panel_geo(&g);
+        power_rect(&g, &bx, &by, &bw, &bh);
+        open_menu(2, bx, by - 8 * S, MA_UP);
+        break;
+    }
+    default: break;
+    }
+}
+
 static void press(void) {
     printf("windowserver: click at %d,%d\n", mouse_x, mouse_y);   /* (for the tests) */
     if (menu_open) {                                   /* any click closes the menu */
-        int i = menu_hit(mouse_x, mouse_y), was = menu_open;
-        int t = mouse_y < MENU_H ? bar_title_at(mouse_x) : 0;
+        int i = menu_hit(mouse_x, mouse_y);
         int id = i >= 0 && !(mitems[i].flags & MI_OFF) ? mitems[i].id : 0;
         close_menu();
         if (id) menu_choose(id);
-        else if (t && t != was) {
-            open_menu(t);
-            menu_fade_ms = FADE_MS;                    /* from one menu to the next: no fade */
-        }
         return;
     }
-    if (mouse_y < MENU_H) {                            /* the status icons */
-        static const char *panes[] = { "battery", "wifi", "sound" };
-        for (int k = 0; k < 3; k++)
-            if (status_x[k] && mouse_x >= status_x[k] && mouse_x < status_x[k] + (k ? 24 : 72) * S) {
-                run("settings", panes[k]);
-                return;
-            }
-        int t = bar_title_at(mouse_x);
-        if (t) {
-            open_menu(t);
-            return;
-        }
-    }
-    int d = dock_hit(mouse_x, mouse_y);
-    if (d >= 0) {
-        launch(d);
+    int h = ui_hit(mouse_x, mouse_y);
+    if (h == -2) return;                               /* in the Launcher, on nothing */
+    if (h >= 0) {                                      /* acts when the button comes up over it */
+        press_id = h;
+        damage_for(h);
         return;
     }
+    if (panel_open) panel_hide();                      /* a click anywhere else puts the Launcher away */
     int k = window_at(mouse_x, mouse_y);
     if (k < 0) return;
     window_t *w = &wins[k];
     raise(k);
     if (mouse_y < w->y) {                              /* the title bar */
-        int cy = w->y - TITLE_H / 2, r = 8 * S;
-        if (ui_inside(mouse_x, mouse_y, w->x + LIGHT_X(0) - r, cy - r, 2 * r, 2 * r)) {
+        int b = ctl_at(w, mouse_x, mouse_y);
+        if (b == 0) {
+            minimise_window(k);
+            return;
+        }
+        if (b == 1) {
+            if (w->resizable) zoom_window(k);
+            return;
+        }
+        if (b == 2) {
             close_window_request(k);
             return;
         }
-        if (ui_inside(mouse_x, mouse_y, w->x + LIGHT_X(1) - r, cy - r, 2 * r, 2 * r)) {
-            minimise_window(k);
-            return;
-        }
-        if (ui_inside(mouse_x, mouse_y, w->x + LIGHT_X(2) - r, cy - r, 2 * r, 2 * r)) {
-            zoom_window(k);                            /* the green button */
-            return;
-        }
         unsigned long now = uptime_ms();
-        if (last_title_win == k && now - last_title_click < 400) {   /* double-click: minimise */
+        if (last_title_win == k && now - last_title_click < 400) {   /* double-click: zoom (or minimise) */
             last_title_win = -1;
-            minimise_window(k);
+            if (w->resizable) zoom_window(k);
+            else minimise_window(k);
             return;
         }
         last_title_win = k;
@@ -2032,35 +2746,33 @@ static void handle_mouse(void) {
     int was = buttons;
     if (m.x != mouse_x || m.y != mouse_y) {
         damage_cursor();
-        int old_hot = dock_hit(mouse_x, mouse_y);
         mouse_x = m.x;
         mouse_y = m.y;
         damage_cursor();
-        if (dock_hit(mouse_x, mouse_y) != old_hot) damage_dock();   /* the name label */
         if (menu_open) {
-            int hot = menu_hit(mouse_x, mouse_y);
-            if (hot >= 0 && (mitems[hot].flags & MI_OFF)) hot = -1;
-            if (hot != menu_hot) {
-                menu_hot = hot;
+            int hl = menu_hit(mouse_x, mouse_y);
+            if (hl >= 0 && (mitems[hl].flags & MI_OFF)) hl = -1;
+            if (hl != menu_hot) {
+                menu_hot = hl;
                 damage_menu();
             }
-            if (mouse_y < MENU_H) {                    /* sliding along the bar switches menus */
-                int t = bar_title_at(mouse_x);
-                if (t && t != menu_open) switch_menu(t);
-            }
         }
-        int th = menu_open ? -1 : traffic_hover();
-        if (th != tl_hover) {
+        int tw, tb;
+        if (menu_open) tw = tb = -1;
+        else control_hover(&tw, &tb);
+        if (tw != tl_hover || tb != tl_btn) {
             if (tl_hover >= 0 && wins[tl_hover].used) damage_title(&wins[tl_hover]);
-            tl_hover = th;
-            if (th >= 0) damage_title(&wins[th]);
+            tl_hover = tw;
+            tl_btn = tb;
+            if (tw >= 0) damage_title(&wins[tw]);
         }
         if (drag >= 0) {
             window_t *w = &wins[drag];
             damage_window(w);
             w->x = mouse_x - drag_dx;
             w->y = mouse_y - drag_dy;
-            if (w->y < MENU_H + TITLE_H) w->y = MENU_H + TITLE_H;
+            if (w->y < TITLE_H + 4 * S) w->y = TITLE_H + 4 * S;
+            if (w->x < rail_w() + 8 * S) w->x = rail_w() + 8 * S;
             damage_window(w);
         } else if (capture >= 0 && (m.buttons & MOUSE_BUTTON_LEFT)) {
             send_event(&wins[capture], WS_EV_MOVE, mouse_x - wins[capture].x, mouse_y - wins[capture].y, 0);
@@ -2069,13 +2781,30 @@ static void handle_mouse(void) {
     buttons = m.buttons;
     if ((buttons & MOUSE_BUTTON_LEFT) && !(was & MOUSE_BUTTON_LEFT)) press();
     if (!(buttons & MOUSE_BUTTON_LEFT) && (was & MOUSE_BUTTON_LEFT)) {
+        if (press_id >= 0) {
+            int id = press_id, over = ui_hit(mouse_x, mouse_y);
+            press_id = -1;
+            damage_for(id);
+            if (over == id) activate(id);
+        }
         if (capture >= 0)
             send_event(&wins[capture], WS_EV_UP, mouse_x - wins[capture].x, mouse_y - wins[capture].y, 0);
         drag = capture = -1;
     }
     if (m.wheel) {
-        int k = window_at(mouse_x, mouse_y);
-        if (k >= 0) send_event(&wins[k], WS_EV_WHEEL, mouse_x - wins[k].x, mouse_y - wins[k].y, m.wheel);
+        panel_geo_t g;
+        panel_geo(&g);
+        if (panel_vis() && !menu_open && ui_inside(mouse_x, mouse_y, g.x, g.y, g.w, g.h)) {
+            int total = (n_items + 3) / 4, most = total > g.rows ? total - g.rows : 0;
+            int next = clampi(panel_scroll + (m.wheel > 0 ? 1 : -1), 0, most);
+            if (next != panel_scroll) {
+                panel_scroll = next;
+                damage_launcher();
+            }
+        } else {
+            int k = window_at(mouse_x, mouse_y);
+            if (k >= 0) send_event(&wins[k], WS_EV_WHEEL, mouse_x - wins[k].x, mouse_y - wins[k].y, m.wheel);
+        }
     }
 }
 
@@ -2089,7 +2818,8 @@ static int weekday(int y, int m, int d) {
 }
 
 /* Moves every animation on by dt ms: windows (opening, closing, minimizing,
- * restoring), the menu's fade and the Dock label's fade. */
+ * restoring) and the open menu's fade. The Rail, the pill and the Launcher
+ * move in animate_ui. */
 static void animate_windows(int dt) {
     for (int k = 0; k < MAX_WINDOWS; k++) {
         window_t *w = &wins[k];
@@ -2101,7 +2831,7 @@ static void animate_windows(int dt) {
         }
         int done = 0;
         if (w->anim == ANIM_OPEN) {
-            int moving = spring_step(&w->sc, 100L * FP, dt, 130, 15);   /* response 0.55, damping 0.65 */
+            int moving = spring_step(&w->sc, 100L * FP, dt, 200, 28);   /* critically damped: no overshoot */
             done = w->anim_ms >= OPEN_MS && (reduce_motion || !moving);
         } else if (w->anim == ANIM_CLOSE) {
             done = w->anim_ms >= CLOSE_MS;
@@ -2118,14 +2848,6 @@ static void animate_windows(int dt) {
     if (menu_open && menu_fade_ms < FADE_MS) {
         menu_fade_ms += dt;
         damage_menu();
-    }
-    int hot = menu_open ? -1 : dock_hit(mouse_x, mouse_y);
-    if (hot != tip_hot) {
-        tip_hot = hot;
-        tip_ms = 0;
-    } else if (hot >= 0 && tip_ms < FADE_MS) {
-        tip_ms += dt;
-        damage_dock();
     }
 }
 
@@ -2154,8 +2876,8 @@ static void tidy(void) {
                 name = apps[i].name;
                 apps[i].pid = 0;
                 apps[i].launching = 0;
-                apps[i].bounce = apps[i].bvel = 0;
-                damage_dock();
+                damage_chrome();
+                damage_launcher();
             }
         if (name) printf("windowserver: %s quit (%d)\n", name, status);
         if (status == 139 || status == 132 || status == 136)   /* EXIT_SEGFAULT, _ILLEGAL, _ARITHMETIC */
@@ -2177,23 +2899,23 @@ static void tidy(void) {
             bat = nb;
             wifi_on = nw;
             vol_level = nv;
-            damage_menu_bar();
+            damage_pill();
         }
     }
     struct os_time t;
-    char now[24];
+    char now[40];
     gettime(&t);
     int h12 = t.hour % 12 == 0 ? 12 : t.hour % 12;       /* "Tue 13 Oct 5:54 PM" */
     char date[16] = "", hm[16], sec[8] = "";
     if (cfg->clock_date)
-        snprintf(date, sizeof(date), "%s %d %s  ", days[weekday(t.year, t.month, t.day)], t.day, months[(t.month + 11) % 12]);
+        snprintf(date, sizeof(date), "%s, %d %s   ", days[weekday(t.year, t.month, t.day)], t.day, months[(t.month + 11) % 12]);
     if (cfg->clock_seconds) snprintf(sec, sizeof(sec), ":%02d", t.second);
     if (cfg->clock_24h) snprintf(hm, sizeof(hm), "%02d:%02d%s", t.hour, t.minute, sec);
     else snprintf(hm, sizeof(hm), "%d:%02d%s %s", h12, t.minute, sec, t.hour < 12 ? "AM" : "PM");
     snprintf(now, sizeof(now), "%s%s", date, hm);
     if (strcmp(now, clock_text)) {
         strcpy(clock_text, now);
-        damage_menu_bar();
+        damage_pill();
     }
 }
 
@@ -2268,7 +2990,8 @@ static void save_settings(void) {
 }
 
 /* Put the settings in force: the look, the wallpaper (if it changed), the
- * Dock, the clock; every window hears of it (WS_EV_PREFS). */
+ * clock; every window hears of it (WS_EV_PREFS). (The Dock's size and
+ * magnification of System Settings no longer apply: the Rail has one size.) */
 static void apply_settings(int first) {
     static struct ws_settings was;
     struct ws_settings now = *(struct ws_settings *)cfg;
@@ -2291,18 +3014,8 @@ static void apply_settings(int first) {
     if (wall) make_wallpaper();
     if (look && !first) push_prefs();                  /* the apps redraw only for a new look */
     clock_text[0] = 0;                                 /* (its format may have changed) */
-    int dock = now.dock_size != was.dock_size || now.dock_magnify != was.dock_magnify || now.dock_autohide != was.dock_autohide;
-    if (dock)                                          /* a new size: at once (the old Dock is repainted below) */
-        for (int i = 0; i < DOCK_APPS; i++) {
-            apps[i].size = icon();
-            apps[i].sp.pos = (long)icon() * FP;
-            apps[i].sp.vel = 0;
-        }
-    if (look || wall || dock) damage(0, 0, W, H);
-    else {                                             /* the Dock or the clock: just those */
-        damage_dock();
-        damage_menu_bar();
-    }
+    if (look || wall) damage(0, 0, W, H);
+    else damage_chrome();                              /* the clock's format, the running dots */
     was = now;
 }
 
@@ -2323,6 +3036,7 @@ static void quit(void) {
     exit(0);
 }
 
+
 int main(int argc, char **argv) {
     if (gfx_info(&g) < 0) {
         printf("windowserver: the desktop needs a graphics screen\n");
@@ -2336,8 +3050,7 @@ int main(int argc, char **argv) {
     W = g.width;
     H = g.height;
     S = g.cell_w >= 16 ? 2 : 1;
-    MENU_H = 24 * S;                                   /* the macOS menu bar is 24 pt */
-    TITLE_H = 32 * S;                                  /* 8-point grid */
+    TITLE_H = 36 * S;
     RADIUS = R_WINDOW * S;
     SHADOW = 24 * S;                                   /* design blur 48 / 2 */
     unsigned *px = mmap((size_t)W * H * 4, PROT_READ | PROT_WRITE, -1);
@@ -2353,7 +3066,7 @@ int main(int argc, char **argv) {
     cfg->magic = WS_SETTINGS_MAGIC;
     cfg_seen = cfg->seq;
     apply_settings(1);
-    long cap = (long)W * H < (1L << 20) ? (long)W * H : (1L << 20);       /* 4 MB each */
+    long cap = (long)W * H < (1L << 21) ? (long)W * H : (1L << 21);       /* 8 MB each */
     anim_col = mmap((size_t)cap * 4, PROT_READ | PROT_WRITE, -1);
     anim_mask = mmap((size_t)cap * 4, PROT_READ | PROT_WRITE, -1);
     snap = mmap((size_t)cap * 4, PROT_READ | PROT_WRITE, -1);
@@ -2377,11 +3090,8 @@ int main(int argc, char **argv) {
         n_painters = k + 1;
     }
     make_cursor();
+    glyphs_init();
     load_dock();
-    for (int i = 0; i < DOCK_APPS; i++) {
-        apps[i].size = icon();
-        apps[i].sp.pos = (long)icon() * FP;
-    }
     ctrlc(CTRLC_KEY);
     if (gfx_begin_full() < 0) {
         printf("windowserver: cannot take the screen\n");
@@ -2416,8 +3126,16 @@ int main(int argc, char **argv) {
         int key;
         while ((key = getkey()) != 0) {
             if (key == KEY_QUIT) quit();
+            if (key == KEY_LAUNCH) {
+                panel_toggle(PM_APPS);
+                continue;
+            }
             if (menu_open) {
                 menu_key(key);
+                continue;
+            }
+            if (panel_open) {
+                panel_key(key);
                 continue;
             }
             window_t *f = front();
@@ -2443,7 +3161,12 @@ int main(int argc, char **argv) {
                 }
             }
         }
-        animate_dock(dt);
+        animate_ui(dt);
+        if (items_dirty && panel_open) {
+            items_dirty = 0;
+            build_items();
+            damage_launcher();
+        }
         animate_windows(dt);
         if (uptime_ms() - last_tidy >= 500) {
             last_tidy = uptime_ms();
