@@ -53,8 +53,9 @@ struct ws_event {
 #define WS_PREF_TRANSP   8
 #define WS_PREF_ACCENT(p) ((int)((p) >> 8 & 15))   /* the accent colour: WS_ACCENT_* */
 
-enum { WS_ACCENT_BLUE, WS_ACCENT_PURPLE, WS_ACCENT_PINK, WS_ACCENT_RED, WS_ACCENT_ORANGE,
-       WS_ACCENT_YELLOW, WS_ACCENT_GREEN, WS_ACCENT_GRAPHITE, WS_ACCENTS };
+/* DOOR accent presets (design/tokens.json); 0 (slate, monochrome) is the default. */
+enum { WS_ACCENT_SLATE, WS_ACCENT_SAGE, WS_ACCENT_CLAY, WS_ACCENT_SKY, WS_ACCENT_ROSE,
+       WS_ACCENT_LILAC, WS_ACCENT_MINT, WS_ACCENT_STONE, WS_ACCENTS };
 
 /* The desktop's settings, shared (shm_map(WS_SETTINGS, ...)) by the window
  * server and System Settings: either side changes a field and bumps `seq`;

@@ -602,50 +602,62 @@ int ui_icon(ui_canvas *c, int x, int y, int size, const char *name, int alpha) {
 
 /* ---- Widgets ------------------------------------------------------------- */
 
-/* Semantic colours: [Increase Contrast][Dark][token]. The light and dark values
- * match the window server's tokens (windowserver.c). */
+/* Semantic colours: [High Contrast][Dark][token]. DOOR default = monochrome navy-grey
+ * (design/tokens.json): hue ~215 deg, low saturation, no pure black or white anywhere. */
 static const unsigned color_table[2][2][UI_C_COUNT] = {
-    [0][0] = {   /* light */
-        [UI_C_LABEL] = 0x1D1D1F,   [UI_C_SECONDARY] = 0x6E6E73,   [UI_C_TERTIARY] = 0xA1A1A6,
-        [UI_C_WINDOW] = 0xF2F2F4,  [UI_C_TOOLBAR] = 0xE9E9EB,     [UI_C_CONTENT] = 0xFFFFFF,
-        [UI_C_SIDEBAR] = 0xEDEDF0, [UI_C_SEPARATOR] = 0xD8D8DC,   [UI_C_ACCENT] = 0x007AFF,
-        [UI_C_ROW_ALT] = 0xF5F5F7, [UI_C_FIELD] = 0xFFFFFF,       [UI_C_CONTROL] = 0xFFFFFF,
-        [UI_C_CONTROL_EDGE] = 0xD0D0D4, [UI_C_CONTROL_OFF] = 0xE8E8EC,
+    [0][0] = {
+        [UI_C_LABEL] = 0x1A2030,   [UI_C_SECONDARY] = 0x465066,   [UI_C_TERTIARY] = 0x5F6B80,
+        [UI_C_WINDOW] = 0xF2F4F8,  [UI_C_TOOLBAR] = 0xF2F4F8,     [UI_C_CONTENT] = 0xF8F9FB,
+        [UI_C_SIDEBAR] = 0xE9EDF2, [UI_C_SEPARATOR] = 0xD8DBE0,   [UI_C_ACCENT] = 0x3B4E6E,
+        [UI_C_ROW_ALT] = 0xF1F2F5, [UI_C_FIELD] = 0xF8F9FB,       [UI_C_CONTROL] = 0xF8F9FB,
+        [UI_C_CONTROL_EDGE] = 0xB1B4BC, [UI_C_CONTROL_OFF] = 0xDDE2EA,
+        [UI_C_SURFACE1] = 0xF2F4F8, [UI_C_SURFACE2] = 0xF8F9FB, [UI_C_SURFACE3] = 0xDDE2EA,
+        [UI_C_BORDER_STRONG] = 0xB1B4BC, [UI_C_ON_ACCENT] = 0xF8F9FB,
+        [UI_C_DANGER] = 0xA83A3A,  [UI_C_SUCCESS] = 0x2F6F4E,
     },
-    [0][1] = {   /* dark */
-        [UI_C_LABEL] = 0xF5F5F7,   [UI_C_SECONDARY] = 0x98989D,   [UI_C_TERTIARY] = 0x636366,
-        [UI_C_WINDOW] = 0x2C2C2E,  [UI_C_TOOLBAR] = 0x3A3A3C,     [UI_C_CONTENT] = 0x1E1E20,
-        [UI_C_SIDEBAR] = 0x262628, [UI_C_SEPARATOR] = 0x444447,   [UI_C_ACCENT] = 0x0A84FF,
-        [UI_C_ROW_ALT] = 0x262629, [UI_C_FIELD] = 0x1E1E20,       [UI_C_CONTROL] = 0x5C5C60,
-        [UI_C_CONTROL_EDGE] = 0x6B6B70, [UI_C_CONTROL_OFF] = 0x3A3A3C,
+    [0][1] = {
+        [UI_C_LABEL] = 0xE8ECF2,   [UI_C_SECONDARY] = 0xAAB3C2,   [UI_C_TERTIARY] = 0x8590A0,
+        [UI_C_WINDOW] = 0x1A202A,  [UI_C_TOOLBAR] = 0x1A202A,     [UI_C_CONTENT] = 0x131820,
+        [UI_C_SIDEBAR] = 0x1A202A, [UI_C_SEPARATOR] = 0x333842,   [UI_C_ACCENT] = 0xA9B8D0,
+        [UI_C_ROW_ALT] = 0x1C2028, [UI_C_FIELD] = 0x131820,       [UI_C_CONTROL] = 0x232A36,
+        [UI_C_CONTROL_EDGE] = 0x4B515A, [UI_C_CONTROL_OFF] = 0x1A202A,
+        [UI_C_SURFACE1] = 0x1A202A, [UI_C_SURFACE2] = 0x232A36, [UI_C_SURFACE3] = 0x2D3543,
+        [UI_C_BORDER_STRONG] = 0x4B515A, [UI_C_ON_ACCENT] = 0x131820,
+        [UI_C_DANGER] = 0xE07A7A,  [UI_C_SUCCESS] = 0x7FB89A,
     },
-    [1][0] = {   /* light, Increase Contrast: darker text, accent and outlines */
-        [UI_C_LABEL] = 0x000000,   [UI_C_SECONDARY] = 0x48484A,   [UI_C_TERTIARY] = 0x6E6E73,
-        [UI_C_WINDOW] = 0xF2F2F4,  [UI_C_TOOLBAR] = 0xE9E9EB,     [UI_C_CONTENT] = 0xFFFFFF,
-        [UI_C_SIDEBAR] = 0xEDEDF0, [UI_C_SEPARATOR] = 0x8E8E93,   [UI_C_ACCENT] = 0x0058D0,
-        [UI_C_ROW_ALT] = 0xF2F2F4, [UI_C_FIELD] = 0xFFFFFF,       [UI_C_CONTROL] = 0xFFFFFF,
-        [UI_C_CONTROL_EDGE] = 0x6E6E73, [UI_C_CONTROL_OFF] = 0xE0E0E4,
+    [1][0] = {
+        [UI_C_LABEL] = 0x0B0F17,   [UI_C_SECONDARY] = 0x232B3B,   [UI_C_TERTIARY] = 0x465066,
+        [UI_C_WINDOW] = 0xF2F4F8,  [UI_C_TOOLBAR] = 0xF2F4F8,     [UI_C_CONTENT] = 0xF8F9FB,
+        [UI_C_SIDEBAR] = 0xE9EDF2, [UI_C_SEPARATOR] = 0xB1B4BC,   [UI_C_ACCENT] = 0x2A3A56,
+        [UI_C_ROW_ALT] = 0xE9EDF2, [UI_C_FIELD] = 0xF8F9FB,       [UI_C_CONTROL] = 0xF8F9FB,
+        [UI_C_CONTROL_EDGE] = 0x465066, [UI_C_CONTROL_OFF] = 0xDDE2EA,
+        [UI_C_SURFACE1] = 0xF2F4F8, [UI_C_SURFACE2] = 0xF8F9FB, [UI_C_SURFACE3] = 0xDDE2EA,
+        [UI_C_BORDER_STRONG] = 0x465066, [UI_C_ON_ACCENT] = 0xF8F9FB,
+        [UI_C_DANGER] = 0x8A2626,  [UI_C_SUCCESS] = 0x1F5236,
     },
-    [1][1] = {   /* dark, Increase Contrast */
-        [UI_C_LABEL] = 0xFFFFFF,   [UI_C_SECONDARY] = 0xC7C7CC,   [UI_C_TERTIARY] = 0x98989D,
-        [UI_C_WINDOW] = 0x2C2C2E,  [UI_C_TOOLBAR] = 0x3A3A3C,     [UI_C_CONTENT] = 0x1E1E20,
-        [UI_C_SIDEBAR] = 0x262628, [UI_C_SEPARATOR] = 0xAEAEB2,   [UI_C_ACCENT] = 0x409CFF,
-        [UI_C_ROW_ALT] = 0x2C2C2E, [UI_C_FIELD] = 0x1E1E20,       [UI_C_CONTROL] = 0x5C5C60,
-        [UI_C_CONTROL_EDGE] = 0xAEAEB2, [UI_C_CONTROL_OFF] = 0x3A3A3C,
+    [1][1] = {
+        [UI_C_LABEL] = 0xF7F9FC,   [UI_C_SECONDARY] = 0xD3D9E3,   [UI_C_TERTIARY] = 0xAAB3C2,
+        [UI_C_WINDOW] = 0x1A202A,  [UI_C_TOOLBAR] = 0x1A202A,     [UI_C_CONTENT] = 0x131820,
+        [UI_C_SIDEBAR] = 0x1A202A, [UI_C_SEPARATOR] = 0x4B515A,   [UI_C_ACCENT] = 0xC4D0E2,
+        [UI_C_ROW_ALT] = 0x232A36, [UI_C_FIELD] = 0x131820,       [UI_C_CONTROL] = 0x232A36,
+        [UI_C_CONTROL_EDGE] = 0xAAB3C2, [UI_C_CONTROL_OFF] = 0x1A202A,
+        [UI_C_SURFACE1] = 0x1A202A, [UI_C_SURFACE2] = 0x232A36, [UI_C_SURFACE3] = 0x2D3543,
+        [UI_C_BORDER_STRONG] = 0xAAB3C2, [UI_C_ON_ACCENT] = 0x131820,
+        [UI_C_DANGER] = 0xF09A9A,  [UI_C_SUCCESS] = 0xA0D3B5,
     },
 };
 
-/* The accent colours of System Settings > Appearance, as macOS's:
- * [accent][Increase Contrast][Dark]. */
+/* The accent presets (System Settings > Appearance): [accent][High Contrast][Dark].
+ * Dark values are light tints, light values are darkened for 4.5:1 on surface1. */
 static const unsigned accents[WS_ACCENTS][2][2] = {
-    [WS_ACCENT_BLUE]     = { { 0x007AFF, 0x0A84FF }, { 0x0058D0, 0x409CFF } },
-    [WS_ACCENT_PURPLE]   = { { 0xAF52DE, 0xBF5AF2 }, { 0x8944AB, 0xDA8FFF } },
-    [WS_ACCENT_PINK]     = { { 0xFF2D55, 0xFF375F }, { 0xD30F45, 0xFF6482 } },
-    [WS_ACCENT_RED]      = { { 0xFF3B30, 0xFF453A }, { 0xD70015, 0xFF6961 } },
-    [WS_ACCENT_ORANGE]   = { { 0xFF9500, 0xFF9F0A }, { 0xC93400, 0xFFB340 } },
-    [WS_ACCENT_YELLOW]   = { { 0xFFCC00, 0xFFD60A }, { 0xB25000, 0xFFD426 } },
-    [WS_ACCENT_GREEN]    = { { 0x28CD41, 0x32D74B }, { 0x248A3D, 0x30DB5B } },
-    [WS_ACCENT_GRAPHITE] = { { 0x8E8E93, 0x98989D }, { 0x6C6C70, 0xAEAEB2 } },
+    [WS_ACCENT_SLATE] = { { 0x3B4E6E, 0xA9B8D0 }, { 0x2A3A56, 0xC4D0E2 } },
+    [WS_ACCENT_SAGE]  = { { 0x2F6B4A, 0x9DC4A8 }, { 0x1F5236, 0xB5D6BE } },
+    [WS_ACCENT_CLAY]  = { { 0x8A4A32, 0xD9A38C }, { 0x6B3622, 0xEBBBA7 } },
+    [WS_ACCENT_SKY]   = { { 0x2D5F8E, 0x9BB9D6 }, { 0x1E4A74, 0xB5CEE6 } },
+    [WS_ACCENT_ROSE]  = { { 0x8A3D55, 0xD6A0B0 }, { 0x6B2A40, 0xE8BAC8 } },
+    [WS_ACCENT_LILAC] = { { 0x5B4A8A, 0xB7A8D6 }, { 0x45366E, 0xCDC1E6 } },
+    [WS_ACCENT_MINT]  = { { 0x1F6F62, 0x8FCFC0 }, { 0x14564B, 0xAADDD1 } },
+    [WS_ACCENT_STONE] = { { 0x4D5565, 0xB6BCC8 }, { 0x2F3644, 0xD3D8E1 } },
 };
 
 unsigned ui_accent_color(int accent, int dark, int contrast) {
@@ -700,7 +712,7 @@ void ui_button_ex(ui_canvas *c, int x, int y, int w, int h, const char *label, i
     int off = flags & UI_BTN_DISABLED, down = (flags & UI_BTN_PRESSED) && !off;
     int accent = (down || ((flags & UI_BTN_DEFAULT) && !off));
     unsigned face = off ? ui_color(UI_C_CONTROL_OFF) : accent ? (down ? shade(UI_ACCENT, 20) : UI_ACCENT) : ui_color(UI_C_CONTROL);
-    unsigned ink = off ? ui_color(UI_C_TERTIARY) : accent ? UI_WHITE : UI_TEXT;
+    unsigned ink = off ? ui_color(UI_C_TERTIARY) : accent ? ui_color(UI_C_ON_ACCENT) : UI_TEXT;
     if ((flags & UI_BTN_FOCUSED) && !off) ui_focus_ring(c, x, y, w, h, r > h / 2 ? h / 2 : r, scale);
     if (!off) ui_shadow(c, x, y + scale, w, h, r > h / 2 ? h / 2 : r, 2 * scale, 40);
     ui_round(c, x, y, w, h, r, accent ? face : ui_color(UI_C_CONTROL_EDGE));
@@ -742,7 +754,7 @@ void ui_list_icons(ui_canvas *c, int x, int y, int w, int h, const char *const *
         else if (k % 2) ui_fill(c, x, ry, w, rh, ui_color(UI_C_ROW_ALT));
         if (icon_names && icon_names[k] && ui_icon(c, tx, ry + (rh - is) / 2, is, icon_names[k], 255) == 0)
             tx += is + 8 * scale;
-        ui_text(c, tx, ry + (rh - 16 * scale) / 2, items[k], k == selected ? UI_WHITE : UI_TEXT, scale);
+        ui_text(c, tx, ry + (rh - 16 * scale) / 2, items[k], k == selected ? ui_color(UI_C_ON_ACCENT) : UI_TEXT, scale);
     }
 }
 

@@ -10,8 +10,9 @@
 #define UI_H
 
 #include <ws.h>
+#include <door.h>
 
-/* Colours, 0x00RRGGBB. Semantic tokens (the macOS way): a token says what a colour
+/* Colours, 0x00RRGGBB. Semantic tokens (DOOR design, design/tokens.json): a token says what a colour
  * is FOR, and resolves for the current appearance (light, dark, Increase Contrast).
  * Ask when you draw and never keep the value: the look can change while the program
  * runs (WS_EV_PREFS), so redraw on that event. */
@@ -30,6 +31,13 @@ enum {
     UI_C_CONTROL,        /* a button's face */
     UI_C_CONTROL_EDGE,   /* a control's outline */
     UI_C_CONTROL_OFF,    /* a disabled control's face */
+    UI_C_SURFACE1,       /* DOOR surface1: windows, panels */
+    UI_C_SURFACE2,       /* surface2: raised controls, cards */
+    UI_C_SURFACE3,       /* surface3: hover, pressed, tracks */
+    UI_C_BORDER_STRONG,  /* strong border: focus-adjacent edges, inputs */
+    UI_C_ON_ACCENT,      /* text and glyphs ON the accent (never white: the accent is light) */
+    UI_C_DANGER,
+    UI_C_SUCCESS,
     UI_C_COUNT
 };
 unsigned ui_color(int token);
@@ -71,13 +79,14 @@ void ui_shadow_ex(ui_canvas *c, int x, int y, int w, int h, int r, int size, int
 void ui_copy(ui_canvas *c, int x, int y, const unsigned *src, int w, int h, int stride);
 void ui_copy_round(ui_canvas *c, int x, int y, const unsigned *src, int w, int h, int stride, int r, int corners);
 
-/* Radius tokens (points; multiply by the window's scale): the macOS scale. */
-#define UI_R_XSMALL 2
-#define UI_R_SMALL  4
-#define UI_R_MEDIUM 6
-#define UI_R_LARGE  8
-#define UI_R_XXL    16
-#define UI_R_FULL   999       /* a capsule: the radius is clamped to half the height */
+/* Radius tokens (points; multiply by the window's scale): DOOR's scale (door.h).
+ * The old names stay so existing apps compile; new code uses DOOR_R_*. */
+#define UI_R_XSMALL DOOR_R_MICRO
+#define UI_R_SMALL  DOOR_R_MICRO
+#define UI_R_MEDIUM DOOR_R_CONTROL
+#define UI_R_LARGE  DOOR_R_CARD
+#define UI_R_XXL    DOOR_R_WINDOW
+#define UI_R_FULL   DOOR_R_FULL   /* a capsule: the radius is clamped to half the height */
 
 /* Appearance settings last seen from the window server (WS_PREF_*), updated by
  * ui_open, ui_present, ui_poll and ui_wait. */
