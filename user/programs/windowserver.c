@@ -3049,7 +3049,8 @@ int main(int argc, char **argv) {
     }
     W = g.width;
     H = g.height;
-    S = g.cell_w >= 16 ? 2 : 1;
+    /* The scale follows the screen, not the console font: 2x only on very tall (4K-class) screens. */
+    S = (H >= 1600 && W >= 2560) ? 2 : 1;
     TITLE_H = 36 * S;
     RADIUS = R_WINDOW * S;
     SHADOW = 24 * S;                                   /* design blur 48 / 2 */
