@@ -553,6 +553,37 @@ static void glide(int *dx, int *dy, uint32_t now, int range) {
     }
 }
 
+/* Every finger is off (`last`: the tick of the touch's last report): was it
+ * a tap? Some pads (Sensel) send no "lifted" report: the touch then ends
+ * when they go quiet, timed up to their last report. */
+static void touch_ended(uint32_t now, uint32_t last) {
+    int range = (int)(tp_layout.tp_x_max ? tp_layout.tp_x_max : 4096);
+    pad.touching = 0;
+    pad.primary = -1;
+    if (pad.held || pad.dragging) {                         /* (a release the pad never sent) */
+        pad.held = pad.press = 0;
+        if (pad.dragging) {
+            pad.dragging = 0;                               /* the end of a tap and drag */
+            mouse_report("I2C touchpad", 0, 0, 0, 0);
+            return;
+        }
+        mouse_report("I2C touchpad", 0, 0, 0, 0);
+    }
+    if (!pad.clicked && (uint32_t)(last - pad.since) < TIMER_FREQ / 5 && pad.moved < range / 40) {
+        int b = pad.max_fingers == 2 ? MOUSE_RIGHT : MOUSE_LEFT;
+        const struct os_pointer *s = mouse_settings();
+        if (pad.max_fingers <= 2 && s->tap_click && (b == MOUSE_LEFT || s->tap_right)) {
+            char line[96];
+            k_snprintf(line, sizeof(line), "touchpad: tap (fingers %d, moved %d, %u ms)\n",
+                       pad.max_fingers, pad.moved, (last - pad.since) * (1000 / TIMER_FREQ));
+            print_log(line);
+            mouse_report("I2C touchpad", b, 0, 0, 0);
+            mouse_report("I2C touchpad", 0, 0, 0, 0);
+            if (b == MOUSE_LEFT) pad.tap_time = now | 1;
+        }
+    }
+}
+
 static void handle_touchpad(const uint8_t *data, int datalen) {
     const layout_t *L = &tp_layout;
     uint32_t now = get_tick();
@@ -561,6 +592,31 @@ static void handle_touchpad(const uint8_t *data, int datalen) {
     int dx = 0, dy = 0, wheel = 0, scroll_dy = 0, scrolled = 0;
     int best = -1, best_dx = 0, best_dy = 0;                /* the finger that moved most */
     int range = (int)(L->tp_x_max ? L->tp_x_max : 4096);
+
+    /* Polled without the interrupt line, a pad waking from its idle mode
+     * can answer the first read with garbage under a valid header (Sensel:
+     * 70-176 "fingers" and the button bit set, a click nobody made). A
+     * report no pad could send is dropped. */
+    int bad = cc > L->tp_fingers;
+    for (int k = 0; k < (cc > 0 ? cc : 1) && k < L->tp_fingers && !bad; k++) {
+        if (!get_bits(data, datalen, L->f_tip[k], 1, 0)) continue;
+        uint32_t x = (uint32_t)get_bits(data, datalen, L->f_x[k], L->tp_x_size, 0);
+        uint32_t y = (uint32_t)get_bits(data, datalen, L->f_y[k], L->tp_y_size, 0);
+        if ((L->tp_x_max && x > L->tp_x_max) || (L->tp_y_max && y > L->tp_y_max)) bad = 1;
+    }
+    if (bad) {
+        static int logged;
+        if (logged < 8) {
+            logged++;
+            char line[128];
+            int o = k_snprintf(line, sizeof(line), "touchpad: dropped a garbled report (count %d):", cc);
+            for (int i = 0; i < datalen && i < 16 && o < (int)sizeof(line) - 4; i++)
+                o += k_snprintf(line + o, sizeof(line) - (size_t)o, " %02x", data[i]);
+            k_snprintf(line + o, sizeof(line) - (size_t)o, "\n");
+            print_log(line);
+        }
+        return;
+    }
     pad.last_report = now;
 
     /* Finger blocks in use: the contact count's worth (one block if this is a
@@ -650,6 +706,10 @@ static void handle_touchpad(const uint8_t *data, int datalen) {
      * is always the left button (a thumb on the pad while another finger
      * drags is two fingers, but a selection, not a right click). */
     if (press != pad.press) {
+        char line[96];                                      /* (diagnostics: what makes clicks) */
+        k_snprintf(line, sizeof(line), "touchpad: press %d (fingers %d, moved %d, touching %u ms)\n",
+                   press, n, pad.moved, (now - pad.since) * (1000 / TIMER_FREQ));
+        print_log(line);
         pad.press = press;
         pad.still_until = now + TIMER_FREQ / 6;
     }
@@ -678,21 +738,7 @@ static void handle_touchpad(const uint8_t *data, int datalen) {
     int buttons = pad.held | (pad.dragging && n ? MOUSE_LEFT : 0);
     mouse_report("I2C touchpad", buttons, mdx, mdy, wheel);
 
-    if (!n && pad.touching) {                               /* all lifted: was it a tap? */
-        pad.touching = 0;
-        pad.primary = -1;
-        if (pad.dragging) {
-            pad.dragging = 0;                               /* the end of a tap and drag */
-        } else if (!pad.clicked && (uint32_t)(now - pad.since) < TIMER_FREQ / 5 && pad.moved < range / 40) {
-            int b = pad.max_fingers == 2 ? MOUSE_RIGHT : MOUSE_LEFT;
-            const struct os_pointer *s = mouse_settings();
-            if (pad.max_fingers <= 2 && s->tap_click && (b == MOUSE_LEFT || s->tap_right)) {
-                mouse_report("I2C touchpad", b, 0, 0, 0);
-                mouse_report("I2C touchpad", 0, 0, 0, 0);
-                if (b == MOUSE_LEFT) pad.tap_time = now | 1;
-            }
-        }
-    }
+    if (!n && pad.touching) touch_ended(now, now);         /* all lifted */
 }
 
 static void handle_report(const uint8_t *buf, int n) {
@@ -741,14 +787,9 @@ static void touchpad_poll_locked(void) {
     for (int i = 0; i < 4; i++) {                           /* drain a few */
         int n = read_input(tp_buf, sizeof(tp_buf));
         if (n == 0 && pad.touching && (uint32_t)(get_tick() - pad.last_report) > TIMER_FREQ * 3 / 10) {
-            /* Quiet for 300 ms while touching: the "lifted" report was lost. */
+            /* Quiet for 300 ms while touching: lifted, unreported. */
             for (int k = 0; k < TP_CONTACTS; k++) pad.c[k].down = 0;
-            pad.touching = 0;
-            pad.primary = -1;
-            if (pad.held || pad.dragging) {
-                pad.held = pad.press = pad.dragging = 0;
-                mouse_report("I2C touchpad", 0, 0, 0, 0);
-            }
+            touch_ended(get_tick(), pad.last_report);
             return;
         }
         if (n <= 0) return;

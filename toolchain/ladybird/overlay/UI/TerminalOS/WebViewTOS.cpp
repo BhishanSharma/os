@@ -8,6 +8,8 @@
  */
 
 #include <AK/LexicalPath.h>
+#include <string.h>
+#include <LibCore/StandardPaths.h>
 #include <LibCore/System.h>
 #include <LibCore/Timer.h>
 #include <LibGfx/Bitmap.h>
@@ -26,6 +28,7 @@
 #include <core/SkFont.h>
 #include <core/SkFontMgr.h>
 #include <core/SkPaint.h>
+#include <core/SkPathBuilder.h>
 #include <core/SkRRect.h>
 #include <core/SkSurface.h>
 #include <core/SkTypeface.h>
@@ -69,7 +72,7 @@ class BrowserWindow {
 public:
     static ErrorOr<NonnullOwnPtr<BrowserWindow>> create(Vector<URL::URL> const& urls)
     {
-        auto window = TRY(TOSWindow::open("Ladybird"sv, 1100, 760));
+        auto window = TRY(TOSWindow::open("Pointer"sv, 1100, 760));
         auto browser = adopt_own(*new BrowserWindow(move(window)));
         TRY(browser->initialize(urls));
         return browser;
@@ -94,7 +97,7 @@ private:
         m_view->on_ready_to_paint = [this] { draw_page(); };
         m_view->on_title_change = [this](Utf16String const& title) {
             auto text = title.to_utf8();
-            m_window.set_title(text.is_empty() ? "Ladybird"sv : text.bytes_as_string_view());
+            m_window.set_title(text.is_empty() ? "Pointer"sv : text.bytes_as_string_view());
         };
         m_view->on_url_change = [this](URL::URL const& url) {
             if (!m_editing) {
@@ -145,7 +148,7 @@ private:
             return;
         auto prefix = LexicalPath(LexicalPath(program.value()).dirname()).dirname();
         auto manager = SkFontMgr_New_Custom_Empty();
-        for (auto name : { "Inter.ttf"sv, "INTER.TTF"sv, "SerenitySans-Regular.ttf"sv }) {
+        for (auto name : { "Inter.ttf"sv, "LiberationSans-Regular.ttf"sv, "SerenitySans-Regular.ttf"sv }) {   // (Serenity's: a pixel font)
             auto path = ByteString::formatted("{}/share/fonts/{}", prefix, name);
             if (auto data = SkData::MakeFromFileName(path.characters())) {
                 m_typeface = manager->makeFromData(move(data));
@@ -172,8 +175,8 @@ private:
         return { 0xFFF1F1F4, 0xFFFFFFFF, 0xFFC9C9D1, 0xFF1D1D1F, 0xFF707078, 0xFF2A6CF0 };
     }
 
-    // Buttons: back, forward, reload; then the address field.
-    static constexpr int BUTTON = 30, FIELD_X = 8 + 3 * (BUTTON + 4) + 6;
+    // Buttons: back, forward, reload, downloads; then the address field.
+    static constexpr int BUTTONS = 4, BUTTON = 30, FIELD_X = 8 + BUTTONS * (BUTTON + 4) + 6;
 
     void draw_toolbar()
     {
@@ -193,14 +196,21 @@ private:
 
         SkFont font(m_typeface, 14);
         SkFont icons(m_typeface, 17);
-        char const* labels[] = { "\xE2\x86\x90", "\xE2\x86\x92", m_loading ? "\xC3\x97" : "\xE2\x86\xBB" };   // ← → × ↻
-        char const* fallback[] = { "<", ">", m_loading ? "x" : "R" };
-        for (int i = 0; i < 3; i++) {
+        font.setSubpixel(true);
+        icons.setSubpixel(true);
+        char const* labels[] = { "\xE2\x86\x90", "\xE2\x86\x92", m_loading ? "\xC3\x97" : "\xE2\x86\xBB", "\xE2\x86\x93" };   // ← → × ↻ ↓
+        char const* fallback[] = { "<", ">", m_loading ? "x" : "R", "v" };
+        SkUnichar const glyphs[] = { 0x2190, 0x2192, m_loading ? 0xD7 : 0x21BB, 0x2193 };
+        for (int i = 0; i < BUTTONS; i++) {
             int x = 8 + i * (BUTTON + 4);
             paint.setColor(c.field);
             canvas->drawRRect(SkRRect::MakeRectXY(SkRect::MakeXYWH(x, 5, BUTTON, BUTTON), 6, 6), paint);
             paint.setColor(c.text);
-            char const* label = m_typeface && m_typeface->unicharToGlyph(i == 2 && !m_loading ? 0x21BB : 0x2190) ? labels[i] : fallback[i];
+            if (i == 2 && !m_loading && !(m_typeface && m_typeface->unicharToGlyph(0x21BB))) {
+                draw_reload_icon(canvas, x + BUTTON / 2.0f, 20, paint);   // (few fonts have ↻)
+                continue;
+            }
+            char const* label = m_typeface && m_typeface->unicharToGlyph(glyphs[i]) ? labels[i] : fallback[i];
             SkRect bounds;
             icons.measureText(label, strlen(label), SkTextEncoding::kUTF8, &bounds);
             canvas->drawSimpleText(label, strlen(label), SkTextEncoding::kUTF8, x + (BUTTON - bounds.width()) / 2 - bounds.left(), 26, icons, paint);
@@ -232,6 +242,31 @@ private:
         m_window.damage(0, 0, w, TOOLBAR_HEIGHT);
     }
 
+    void open_downloads()
+    {
+        if (auto url = WebView::sanitize_url("about:downloads"sv); url.has_value())
+            m_view->load(*url);
+    }
+
+    // ↻, drawn: an open circle with an arrowhead where it starts.
+    static void draw_reload_icon(SkCanvas* canvas, float cx, float cy, SkPaint const& color)
+    {
+        SkPaint paint(color);
+        paint.setAntiAlias(true);
+        paint.setStyle(SkPaint::kStroke_Style);
+        paint.setStrokeWidth(1.8f);
+        float r = 6.5f;
+        canvas->drawArc(SkRect::MakeLTRB(cx - r, cy - r, cx + r, cy + r), -60, 300, false, paint);
+        paint.setStyle(SkPaint::kFill_Style);
+        float hx = cx + r * 0.5f, hy = cy - r * 0.866f;     // (the arc's start, at -60 degrees)
+        SkPathBuilder head;
+        head.moveTo(hx + 4.5f, hy - 1.5f);
+        head.lineTo(hx - 1.0f, hy - 4.0f);
+        head.lineTo(hx + 0.5f, hy + 3.5f);
+        head.close();
+        canvas->drawPath(head.detach(), paint);
+    }
+
     void clear_page()
     {
         u32* px = m_window.pixels();
@@ -250,12 +285,8 @@ private:
         int w = min(frame->width(), m_window.width());
         int h = min(frame->height(), m_window.height() - TOOLBAR_HEIGHT);
         u32* out = m_window.pixels();
-        for (int y = 0; y < h; y++) {
-            auto const* row = frame->scanline(y);
-            u32* dst = out + (y + TOOLBAR_HEIGHT) * m_window.width();
-            for (int x = 0; x < w; x++)
-                dst[x] = row[x] & 0xFFFFFF;
-        }
+        for (int y = 0; y < h; y++)          // (whole rows: the page is opaque)
+            memcpy(out + (y + TOOLBAR_HEIGHT) * m_window.width(), frame->scanline(y), w * sizeof(u32));
         m_window.damage(0, TOOLBAR_HEIGHT, w, h);
         m_window.present();
     }
@@ -346,15 +377,17 @@ private:
         if (event.y < TOOLBAR_HEIGHT && !m_dragging_page) {
             if (type != Type::MouseDown)
                 return false;
-            for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < BUTTONS; i++) {
                 int x = 8 + i * (BUTTON + 4);
                 if (event.x >= x && event.x < x + BUTTON) {
                     if (i == 0)
                         m_view->traverse_the_history_by_delta(-1);
                     else if (i == 1)
                         m_view->traverse_the_history_by_delta(1);
-                    else
+                    else if (i == 2)
                         m_view->reload();
+                    else
+                        open_downloads();
                     return false;
                 }
             }
@@ -494,6 +527,18 @@ Optional<WebView::ViewImplementation&> Application::active_web_view() const
     if (!m_window)
         return {};
     return m_window->view();
+}
+
+// No save dialog: downloads go to ~/Downloads (made if missing), listed on
+// about:downloads (the toolbar's ↓).
+Optional<ByteString> Application::ask_user_for_download_path(ByteString const& file) const
+{
+    auto directory = Core::StandardPaths::downloads_directory();
+    (void)Core::System::mkdir(directory, 0755);
+    auto path = default_path_for_downloaded_file(file);
+    if (path.is_error())
+        return {};
+    return path.value().string();
 }
 
 }

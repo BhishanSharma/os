@@ -140,8 +140,15 @@ void cpu_wait(void) {
 /* ---- The other cores ---------------------------------------------------------------- */
 
 /* Their timer: preemption of user programs, like the boot core's. */
+static uint8_t ap_sub[MAX_CPUS];
+
+/* 1 kHz: in between ticks it only wakes the core (idle, it then looks for a
+ * task that became ready, or whose sleep ended, without waiting 10 ms). */
 void ap_timer_interrupt(uint64_t cs) {
     apic_eoi();
+    int me = cpu_index();
+    if (++ap_sub[me] < TIMER_HW_FREQ / TIMER_FREQ) return;
+    ap_sub[me] = 0;
     bkl_enter();
     task_tick();
     if (cs & 3) user_check_interrupt();

@@ -298,7 +298,7 @@ void apic_setup_core(uint32_t per_second, uint8_t timer_vector) {
     lapic_write(LAPIC_LVT_LINT1, DELIVERY_NMI);
     lapic_write(LAPIC_TIMER_DIV, 0x3);
     lapic_write(LAPIC_LVT_TIMER, LVT_PERIODIC | timer_vector);
-    lapic_write(LAPIC_TIMER_INIT, per_second / TIMER_FREQ);
+    lapic_write(LAPIC_TIMER_INIT, per_second / TIMER_HW_FREQ);   /* (ap_timer_interrupt: every 10th a tick) */
 }
 
 int apic_is_x2(void) { return x2apic; }

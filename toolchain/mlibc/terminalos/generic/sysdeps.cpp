@@ -221,17 +221,21 @@ pid_t Sysdeps<FutexTid>::operator()() {
 	return (pid_t)sc(TOS_GETPID);   // every thread is its own task, with its own id
 }
 
-// The kernel's wait ends after at most 100 ms (or a wake); a timed wait loops
-// until its deadline, an untimed one returns (callers re-check the word).
+// The kernel's wait ends after at most 100 ms, the time given (in ms), or a
+// wake; a timed wait loops until its deadline, an untimed one returns
+// (callers re-check the word).
 int Sysdeps<FutexWait>::operator()(int *pointer, int expected, const struct timespec *time) {
 	if (!time) {
 		long r = sc(TOS_FUTEX, TOS_FUTEX_WAIT, (long)pointer, expected);
 		return r == TOS_ERR_AGAIN ? EAGAIN : r < 0 ? to_errno(r) : 0;
 	}
 	unsigned long start = (unsigned long)sc(TOS_UPTIME);
-	unsigned long limit = (unsigned long)time->tv_sec * 1000 + (unsigned long)time->tv_nsec / 1000000;
+	unsigned long limit = (unsigned long)time->tv_sec * 1000 + ((unsigned long)time->tv_nsec + 999999) / 1000000;
+	if (limit == 0)
+		return ETIMEDOUT;
 	for (;;) {
-		long r = sc(TOS_FUTEX, TOS_FUTEX_WAIT, (long)pointer, expected);
+		unsigned long spent = (unsigned long)sc(TOS_UPTIME) - start;
+		long r = sc(TOS_FUTEX, TOS_FUTEX_WAIT, (long)pointer, expected, (long)(spent < limit ? limit - spent : 1));
 		if (r == TOS_ERR_AGAIN)
 			return EAGAIN;
 		if (r < 0)
@@ -342,8 +346,24 @@ int Sysdeps<SetRlimit>::operator()(int resource, const struct rlimit *limit) {
 	return 0;
 }
 
+// The main thread's stack: the kernel's 8 MiB just under the top of the
+// address space (process.c: USER_TOP, USER_STACK_SIZE). Other threads' stacks
+// are mlibc's own, which it knows.
+int Sysdeps<GetCurrentStackInfo>::operator()(void **stack_base, size_t *stack_size) {
+	constexpr uintptr_t top = 0x00007FFFFFFFF000ULL, size = 8ULL << 20;
+	*stack_base = reinterpret_cast<void *>(top - size);
+	*stack_size = size;
+	return 0;
+}
+
 // Thread names are for debuggers; Terminal OS keeps none.
 int Sysdeps<ThreadSetname>::operator()(void *, const char *) {
+	return 0;
+}
+
+int Sysdeps<ThreadGetname>::operator()(void *, char *name, size_t size) {
+	if (size)
+		name[0] = 0;
 	return 0;
 }
 
@@ -517,6 +537,36 @@ int Sysdeps<Seek>::operator()(int fd, off_t offset, int whence, off_t *new_offse
 		return r == TOS_ERR_BADFD ? ESPIPE : to_errno(r);
 	*new_offset = r;
 	return 0;
+}
+
+// pread/pwrite: at an offset, leaving the position as it was. The kernel has
+// only a position per descriptor, so: seek there, read or write, seek back,
+// under one lock (Ladybird's threads read large messages out of shared
+// memory this way).
+static int positioned_lock;
+
+template <typename F>
+static int at_offset(int fd, off_t offset, F transfer) {
+	while (__atomic_exchange_n(&positioned_lock, 1, __ATOMIC_ACQUIRE))
+		sc(TOS_YIELD);
+	off_t old, now;
+	int e = mlibc::sysdep<Seek>(fd, 0, SEEK_CUR, &old);
+	if (!e)
+		e = mlibc::sysdep<Seek>(fd, offset, SEEK_SET, &now);
+	if (!e) {
+		e = transfer();
+		mlibc::sysdep<Seek>(fd, old, SEEK_SET, &now);
+	}
+	__atomic_store_n(&positioned_lock, 0, __ATOMIC_RELEASE);
+	return e;
+}
+
+int Sysdeps<Pread>::operator()(int fd, void *buf, size_t count, off_t offset, ssize_t *bytes_read) {
+	return at_offset(fd, offset, [&] { return mlibc::sysdep<Read>(fd, buf, count, bytes_read); });
+}
+
+int Sysdeps<Pwrite>::operator()(int fd, const void *buf, size_t count, off_t offset, ssize_t *bytes_written) {
+	return at_offset(fd, offset, [&] { return mlibc::sysdep<Write>(fd, buf, count, bytes_written); });
 }
 
 int Sysdeps<Close>::operator()(int fd) {

@@ -37,4 +37,7 @@ if ! grep -q allow-multiple-definition /build/lb/CMakeCache.txt 2>/dev/null; the
         -DLIBAVIF_DIR=/port/cmake \
         -DLADYBIRD_CACHE_DIR=/build/caches
 fi
+# The C library is not among ninja's inputs: a newer one (the image's mlibc
+# changed) means linking the program again.
+[ /opt/terminalos/sysroot/usr/lib/libc.a -nt /build/lb/bin/Ladybird ] && rm -f /build/lb/bin/Ladybird
 ninja -C /build/lb -j"$JOBS" -k 0 "${@:-ladybird}"

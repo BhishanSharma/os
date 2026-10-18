@@ -57,6 +57,13 @@
 #define TOS_MMAPAT     72
 #define TOS_FDPATH     73
 
+// sound(op, a, b): one 48 kHz, 16-bit stereo output stream (kernel SYS_SOUND).
+#define TOS_SOUND      35
+#define TOS_SOUND_OPEN    0   // -> 0, or an error (no sound card, or in use)
+#define TOS_SOUND_WRITE   1   // (frames, count): waits for room -> frames queued
+#define TOS_SOUND_QUEUED  2   // -> frames written but not heard yet
+#define TOS_SOUND_CLOSE   3
+
 #define TOS_SOCK_READABLE  1
 #define TOS_SOCK_WRITABLE  2
 #define TOS_SOCK_HANGUP    4

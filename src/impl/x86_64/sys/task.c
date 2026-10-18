@@ -192,7 +192,7 @@ int task_block(const void *chan, uint32_t timeout_ms) {
     if (!me) return -1;
     me->wait_chan = chan;
     me->has_deadline = timeout_ms != 0;
-    me->wake_tick = get_tick() + (timeout_ms * TIMER_FREQ + 999) / 1000;
+    me->wake_tick = timer_ms() + timeout_ms;   /* (milliseconds: idle cores look every one) */
     me->state = TASK_BLOCKED;
     schedule();
     int timed_out = me->wait_chan != 0;     /* task_wakeup clears it */
@@ -246,7 +246,7 @@ static void schedule(void) {
     uint64_t flags = irq_save();
     int me = cpu_index();
     task_t *prev = cur[me];
-    uint32_t now = get_tick();
+    uint32_t now = timer_ms();
     for (int i = 0; i < MAX_TASKS; i++)
         if ((tasks[i].state == TASK_SLEEPING || (tasks[i].state == TASK_BLOCKED && tasks[i].has_deadline))
             && (int32_t)(now - tasks[i].wake_tick) >= 0)
@@ -295,7 +295,7 @@ void task_sleep(uint32_t ms) {
         sleep(ms);
         return;
     }
-    me->wake_tick = get_tick() + (ms * TIMER_FREQ + 999) / 1000;
+    me->wake_tick = timer_ms() + ms;
     me->state = TASK_SLEEPING;
     schedule();
 }

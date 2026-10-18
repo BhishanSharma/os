@@ -50,7 +50,10 @@ param(
     [switch]$NoBrowser
 )
 
-$ErrorActionPreference = "Stop"
+# Every step checks its exit code ($LASTEXITCODE). "Continue", not "Stop": with
+# the output redirected, Windows PowerShell takes anything a tool prints on
+# stderr (CMake's warnings, the ISO tool's banner) for an error and would stop.
+$ErrorActionPreference = "Continue"
 Set-Location $PSScriptRoot
 
 function Fail($msg) { Write-Host $msg -ForegroundColor Red; exit 1 }
@@ -154,13 +157,8 @@ if ($withBrowser) { $make += "LADYBIRD=build/ladybird" }
 $makeCommand = "make " + ($make -join " ")
 $buildImage = if ($haveLadybirdImage) { "myos-ladybird" } else { "myos-buildenv" }
 Step "Building Terminal OS ($makeCommand, in $buildImage)..."
-# (The ISO tool prints its banner on stderr: with output redirected, Windows
-# PowerShell would take that for an error and stop. The exit code decides.)
-$ErrorActionPreference = "Continue"
 docker run --rm -v "${PWD}:/root/env" -w /root/env $buildImage sh -c $makeCommand
-$buildExit = $LASTEXITCODE
-$ErrorActionPreference = "Stop"
-if ($buildExit -ne 0) { Fail "Build failed." }
+if ($LASTEXITCODE -ne 0) { Fail "Build failed." }
 $what = if ($withBrowser) { " (with the Ladybird browser)" } else { "" }
 Write-Host "Build OK: dist\x86_64\terminalos.img (USB stick), dist\x86_64\kernel.iso (virtual machines)$what" -ForegroundColor Green
 

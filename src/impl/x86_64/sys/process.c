@@ -125,6 +125,7 @@ typedef struct {
 
 static int graphics_owner;            // pid drawing pixels (gfx), 0: the console
 static int sound_owner;               // pid streaming sound (sys_sound), 0: none
+static void *sound_process;           // its process: whichever of its threads ends last frees it
 static int foreground_pid;            // 0: the kernel (login, kernel shell) has the keyboard
 
 /* ---- ELF ---------------------------------------------------------------- */
@@ -787,9 +788,10 @@ static void __attribute__((noreturn)) finish(int code, int whole) {
     }
     process_reap_orphans();                             /* threads that ended before it */
     tcp_close_owned_by(t->pid);                         /* its connections end with it */
-    if (sound_owner == t->pid) {                        /* and its sound */
+    if (sound_owner == t->pid || (p && (void *)p == sound_process)) {   /* and its sound */
         sound_stream_close();
         sound_owner = 0;
+        sound_process = 0;
     }
     uint64_t root = t->root;
     if (p) {
@@ -1069,6 +1071,7 @@ static int64_t sys_sound(uint64_t op, uint64_t a, uint64_t b) {
         if (r == -2) return SYSERR_INUSE;
         if (r != 0) return SYSERR_NOENT;
         sound_owner = pid;
+        sound_process = task_current()->process;
         return 0;
     }
     if (sound_owner != pid) return SYSERR_BADFD;
@@ -1090,6 +1093,7 @@ static int64_t sys_sound(uint64_t op, uint64_t a, uint64_t b) {
     if (op == SOUND_CLOSE) {
         sound_stream_close();
         sound_owner = 0;
+        sound_process = 0;
         return 0;
     }
     return SYSERR_BADCALL;
@@ -1114,11 +1118,10 @@ static int64_t sys_sbrk(int64_t increment) {
 }
 
 static int64_t sys_sleep(uint64_t ms) {
-    uint32_t end = get_tick() + (uint32_t)((ms + 9) / 10);   // 100 Hz timer
-    while ((int32_t)(end - get_tick()) > 0) {
+    uint32_t end = timer_ms() + (uint32_t)ms;
+    for (int32_t left; (left = (int32_t)(end - timer_ms())) > 0;) {
         check_killed();
-        uint32_t left = (end - get_tick()) * 10;
-        task_sleep(left > 50 ? 50 : left);
+        task_sleep(left > 50 ? 50 : (uint32_t)left);
     }
     check_killed();
     return 0;
@@ -1298,7 +1301,7 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg);
 static int64_t sys_fork(struct exc_frame *f);
 static int64_t sys_exec(struct exc_frame *f, uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr);
 static int64_t sys_thread(uint64_t entry, uint64_t arg, uint64_t stack);
-static int64_t sys_futex(uint64_t op, uint64_t addr, uint64_t value);
+static int64_t sys_futex(uint64_t op, uint64_t addr, uint64_t value, uint64_t ms);
 static int64_t sys_mmap(uint64_t len, uint64_t prot, int64_t fd);
 static int64_t sys_mmap2(uint64_t len, uint64_t prot, int64_t fd, uint64_t offset);
 static int64_t sys_mmapat(uint64_t addr, uint64_t len, uint64_t prot, int64_t fd);
@@ -1430,7 +1433,7 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
         case SYS_EXEC:    r = sys_exec(f, f->rdi, f->rsi, f->rdx); if (r == 0) return; break;
         case SYS_THREAD:  r = sys_thread(f->rdi, f->rsi, f->rdx); break;
         case SYS_THREAD_EXIT: finish((int)(int32_t)f->rdi, 0);
-        case SYS_FUTEX:   r = sys_futex(f->rdi, f->rsi, f->rdx); break;
+        case SYS_FUTEX:   r = sys_futex(f->rdi, f->rsi, f->rdx, f->r10); break;
         case SYS_PORT_CREATE: case SYS_PORT_SEND: case SYS_PORT_RECEIVE:
         case SYS_PORT_REGISTER: case SYS_PORT_LOOKUP: case SYS_PORT_CLOSE:
                           r = sys_port(f); break;
@@ -1819,7 +1822,16 @@ static uint8_t *find_program_from(const char *dir, const char *name, uint32_t *s
     int has_folder = 0;
     for (const char *c = name; *c; c++)
         if (*c == '/') has_folder = 1;
-    if (data || has_folder) return data;
+    if (data) return data;
+    /* An absolute path that is not here may be one of the system's own files
+     * (the RAM disk's /ladybird/bin/Ladybird): when the system folder is not
+     * "/" (an installed system: files on the disk, the RAM disk at /SYS), look
+     * there too. */
+    if (name[0] == '/' && strcmp(vfs_system_dir(), "/")) {
+        k_snprintf(path, sizeof(path), "%s%s", vfs_system_dir(), name);
+        return read_program_file(path, size, big_path);
+    }
+    if (has_folder) return 0;
     /* Not here: the system folder (the RAM disk's programs). */
     k_snprintf(path, sizeof(path), "%s/%s", strcmp(vfs_system_dir(), "/") ? vfs_system_dir() : "", name);
     return read_program_file(path, size, big_path);
@@ -2482,7 +2494,8 @@ static int64_t sys_thread(uint64_t entry, uint64_t arg, uint64_t stack) {
     return t->pid;
 }
 
-static int64_t sys_futex(uint64_t op, uint64_t addr, uint64_t value) {
+/* FUTEX_WAIT: at most `ms` (1..100; 0 = 100) so Ctrl+C is noticed; callers loop. */
+static int64_t sys_futex(uint64_t op, uint64_t addr, uint64_t value, uint64_t ms) {
     if ((addr & 3) || !user_range_ok(addr, 4, 0)) return SYSERR_FAULT;
     /* Keyed on the physical address: the same word in shared memory is the
        same futex in every program that maps it (the window server's events). */
@@ -2495,7 +2508,7 @@ static int64_t sys_futex(uint64_t op, uint64_t addr, uint64_t value) {
     }
     if (op != FUTEX_WAIT) return SYSERR_BADCALL;
     if (*(volatile uint32_t *)addr != (uint32_t)value) return SYSERR_AGAIN;
-    task_block(chan, 100);                              /* (wakes to notice Ctrl+C) */
+    task_block(chan, ms && ms < 100 ? (uint32_t)ms : 100);   /* (wakes to notice Ctrl+C) */
     check_killed();
     return 0;
 }

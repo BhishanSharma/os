@@ -9,7 +9,10 @@
 
 #include <AK/LexicalPath.h>
 #include <LibMain/Main.h>
+#include <stdlib.h>
+#include <strings.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <unicode/putil.h>
 
 #define HELPER(name) ErrorOr<int> name##_main(Main::Arguments);
@@ -32,6 +35,16 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     // on an installed system, else at the top of the RAM disk.
     struct stat st;
     u_setDataDirectory(stat("/SYS/ICUDT78L.DAT", &st) == 0 ? "/SYS" : "/");
+
+    // Where Ladybird keeps its settings and cache ($HOME/.config...) and its
+    // runtime files: an everyday user may write only in their home folder and
+    // /TMP. A program starts in its user's home folder (/HOME/NAME).
+    if (!getenv("HOME")) {
+        char cwd[256];
+        if (getcwd(cwd, sizeof(cwd)) && strncasecmp(cwd, "/HOME/", 6) == 0)
+            setenv("HOME", cwd, 0);
+    }
+    setenv("XDG_RUNTIME_DIR", "/TMP", 0);
 
     struct Helper {
         StringView name;

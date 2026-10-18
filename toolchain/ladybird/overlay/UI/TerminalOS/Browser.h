@@ -29,6 +29,7 @@ private:
     Application();
 
     virtual bool should_coordinate_browser_process() const override { return false; }
+    virtual Optional<ByteString> ask_user_for_download_path(ByteString const& file) const override;
 
     OwnPtr<BrowserWindow> m_window;
 };

@@ -27,7 +27,7 @@ typedef struct task {
     int is_user;              /* runs a user program */
     int parent;               /* pid that waits for it */
     int exit_code;
-    uint32_t wake_tick;       /* TASK_SLEEPING until then; TASK_BLOCKED's deadline */
+    uint32_t wake_tick;       /* TASK_SLEEPING until then; TASK_BLOCKED's deadline (timer_ms) */
     const void *wait_chan;    /* TASK_BLOCKED on this (task_block) */
     int has_deadline;
     int is_thread;            /* a second (third...) thread of a program */

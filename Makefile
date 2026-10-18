@@ -278,7 +278,7 @@ $(RAMDISK_GZ): scripts/mkramdisk.sh scripts/mkdock.sh $(wildcard $(RAMDISK_DIR)/
 	mkdir -p $(RAMDISK_STAGE)
 	cp $(RAMDISK_DIR)/* $(USER_ELFS) $(APP_ELFS) $(PORT_ELFS) $(RAMDISK_STAGE)/
 	# With Ladybird the Dock gets the Browser too, after Terminal.
-	{ sh scripts/mkdock.sh apps; $(if $(LADYBIRD),echo "2.5|Browser|/ladybird/bin/Ladybird|browser|2F6FDE";) } | \
+	{ sh scripts/mkdock.sh apps; $(if $(LADYBIRD),echo "2.5|Pointer|/ladybird/bin/Ladybird|browser|2F6FDE";) } | \
 	    sort -t '|' -k1,1n > $(RAMDISK_STAGE)/DOCK.CFG
 	$(if $(LADYBIRD),cp -r $(LADYBIRD) $(RAMDISK_STAGE)/ladybird)
 	sh scripts/mkramdisk.sh $(RAMDISK_STAGE) $(RAMDISK_SIZE) $@

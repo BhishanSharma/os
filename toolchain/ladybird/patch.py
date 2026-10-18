@@ -105,6 +105,21 @@ edit('Services/RequestServer/Request.cpp', '''    if (m_alternative_service.has_
 edit('Services/RequestServer/Request.cpp', '''            dbgln("Request::handle_start_fetch_state: Failed to set curl option: {}", curl_easy_strerror(result));''',
      '''            dbgln("Request::handle_start_fetch_state: Failed to set curl option {}: {}", to_underlying(option), curl_easy_strerror(result));''')
 
+# The stack's bounds, as on Linux (pthread_getattr_np): the JavaScript garbage
+# collector scans the stack up to its top, and without them it ran past it.
+edit('AK/StackInfo.cpp', '#elif defined(AK_OS_LINUX) || defined(AK_LIBC_GLIBC) || defined(AK_OS_MACOS) || defined(AK_OS_IOS) || defined(AK_OS_NETBSD) || defined(AK_OS_SOLARIS) || defined(AK_OS_HAIKU)\n#    include <pthread.h>',
+     '#elif defined(AK_OS_LINUX) || defined(AK_LIBC_GLIBC) || defined(AK_OS_MACOS) || defined(AK_OS_IOS) || defined(AK_OS_NETBSD) || defined(AK_OS_SOLARIS) || defined(AK_OS_HAIKU) || defined(AK_OS_TERMINALOS)\n#    include <pthread.h>')
+edit('AK/StackInfo.cpp', '#elif defined(AK_OS_LINUX) or defined(AK_LIBC_GLIBC) or defined(AK_OS_FREEBSD) or defined(AK_OS_NETBSD) or defined(AK_OS_SOLARIS) or defined(AK_OS_HAIKU)\n',
+     '#elif defined(AK_OS_LINUX) or defined(AK_LIBC_GLIBC) or defined(AK_OS_FREEBSD) or defined(AK_OS_NETBSD) or defined(AK_OS_SOLARIS) or defined(AK_OS_HAIKU) or defined(AK_OS_TERMINALOS)\n')
+edit('AK/StackInfo.cpp', '#    if defined(AK_OS_LINUX) or defined(AK_LIBC_GLIBC) or defined(AK_OS_HAIKU)\n',
+     '#    if defined(AK_OS_LINUX) or defined(AK_LIBC_GLIBC) or defined(AK_OS_HAIKU) or defined(AK_OS_TERMINALOS)\n')
+
+# Sound: AudioServer's Terminal OS backend (overlay: PlaybackStreamTerminalOS.cpp).
+edit('Services/AudioServer/CMakeLists.txt', 'if (LADYBIRD_AUDIO_BACKEND STREQUAL "PULSE")\n',
+     'if (TERMINALOS)\n    target_sources(audioserverservice PRIVATE PlaybackStreamTerminalOS.cpp)\n'
+     '    target_compile_definitions(audioserverservice PRIVATE AUDIOSERVER_PLAYBACK_BACKEND=1)\n'
+     'elseif (LADYBIRD_AUDIO_BACKEND STREQUAL "PULSE")\n')
+
 # Thread IDs: gettid(), as on Linux (otherwise every thread is "none").
 edit('AK/ThreadID.cpp', '''static u64 query_current_thread_id()
 {
@@ -205,9 +220,19 @@ edit('AK/Random.cpp', '''#if defined(AK_OS_WINDOWS)
 #    include <unistd.h>
 #endif''')
 
-# Web servers see Linux: the pages they send Linux are the ones that work.
+# The User-Agent names Terminal OS, but keeps "X11; ... Linux x86_64": web
+# servers only know the frozen tokens of major platforms, and send anything
+# else degraded or broken pages. Ladybird's own pages (about:version) say
+# Terminal OS.
+edit('Libraries/LibWebCommon/Loader/UserAgent.h', '#elif defined(AK_OS_LINUX) || defined(AK_OS_TERMINALOS)\n#    define OS_STRING "Linux"',
+     '#elif defined(AK_OS_LINUX)\n#    define OS_STRING "Linux"', optional=True)   # (what an earlier version made)
 edit('Libraries/LibWebCommon/Loader/UserAgent.h', '#elif defined(AK_OS_LINUX)\n#    define OS_STRING "Linux"',
-     '#elif defined(AK_OS_LINUX) || defined(AK_OS_TERMINALOS)\n#    define OS_STRING "Linux"')
+     '#elif defined(AK_OS_TERMINALOS)\n#    define OS_STRING "Terminal OS"\n#elif defined(AK_OS_LINUX)\n#    define OS_STRING "Linux"')
+# On Terminal OS the browser is called Pointer (it is Ladybird, BSD-2-Clause).
+edit('Libraries/LibWebCommon/Loader/UserAgent.h', '#define BROWSER_NAME "Ladybird"',
+     '#if defined(AK_OS_TERMINALOS)\n#    define BROWSER_NAME "Pointer"\n#else\n#    define BROWSER_NAME "Ladybird"\n#endif')
+edit('Libraries/LibWebCommon/Loader/UserAgent.h', '#else\n#    define UA_PLATFORM_STRING "X11; Linux x86_64"',
+     '#elif defined(AK_OS_TERMINALOS)\n#    define UA_PLATFORM_STRING "X11; Terminal OS; Linux x86_64"\n#else\n#    define UA_PLATFORM_STRING "X11; Linux x86_64"')
 edit('Libraries/LibWebCommon/Loader/UserAgent.h', '#    if defined(AK_OS_ANDROID) || defined(AK_OS_LINUX)\n#        define NAVIGATOR_PLATFORM_SYSTEM_NAME "Linux"',
      '#    if defined(AK_OS_ANDROID) || defined(AK_OS_LINUX) || defined(AK_OS_TERMINALOS)\n#        define NAVIGATOR_PLATFORM_SYSTEM_NAME "Linux"')
 

@@ -180,19 +180,11 @@ void TOSWindow::damage(int x, int y, int w, int h)
 
 void TOSWindow::present()
 {
+    // A new frame: the server copies the surface when it next draws. No
+    // waiting for it here: this is the browser's main thread, and a frame
+    // drawn over one not yet copied is just the newer picture.
     auto* s = (WS::Surface*)m_surface;
-    unsigned frame = s->damage + 1;
-    s->damage = frame;
-    // Wait (50 ms at most) until the server has read the frame.
-    timespec start;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    while ((int)(s->released - frame) < 0) {
-        timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        if ((now.tv_sec - start.tv_sec) * 1000 + (now.tv_nsec - start.tv_nsec) / 1000000 > 50)
-            break;
-        usleep(1000);
-    }
+    s->damage = s->damage + 1;
 }
 
 ErrorOr<void> TOSWindow::resize(int width, int height)
