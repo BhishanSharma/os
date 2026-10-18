@@ -40,7 +40,7 @@ using tos::DIR_BASE;
 
 // ---- What the kernel does not remember: each fd's path, open directories ----
 
-constexpr int MAX_FDS = 256;      // the kernel's limit is lower
+constexpr int MAX_FDS = 1024;     // the kernel's limit (process.c)
 constexpr int MAX_DIRS = 64;
 
 char *fd_path[MAX_FDS];

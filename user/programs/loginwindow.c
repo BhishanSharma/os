@@ -94,7 +94,7 @@ static void desktop(const struct os_user *u) {
     printf("loginwindow: %s logged in\n", u->name);
     if (chdir(u->home) != 0) chdir("/");
     gfx_end();                                         /* the desktop takes the screen */
-    char *argv[] = { "windowserver", "finder", 0 };
+    char *argv[] = { "windowserver", 0 };             /* the desktop, no app opened */
     int pid = spawn("windowserver", argv, u->name), status;
     if (pid > 0) wait(pid, &status, WAIT_FOREGROUND);
     exit(0);                                           /* launchd shows a new login */

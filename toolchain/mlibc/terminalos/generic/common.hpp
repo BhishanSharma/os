@@ -44,8 +44,8 @@ inline int to_errno(long r) {
 
 // File descriptors: the kernel's are below 256 (files, pipes, local sockets);
 // the port's are above.
-constexpr int SOCK_BASE = 256, MAX_SOCKS = 64;    // 256..319: sockets
-constexpr int VF_BASE = 320, MAX_VFILES = 32;     // 320..351: /dev/null, /etc/services...
+constexpr int SOCK_BASE = 1024, MAX_SOCKS = 64;   // 1024..1087: sockets (above the kernel's descriptors)
+constexpr int VF_BASE = 1088, MAX_VFILES = 32;    // 1088..1119: /dev/null, /etc/services...
 constexpr int DIR_BASE = 4096;                    // open directories (never in select())
 
 bool is_socket(int fd);

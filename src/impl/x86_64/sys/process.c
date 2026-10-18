@@ -49,7 +49,7 @@
 #define USER_MMAP_LOW    0x100000000ULL     /* mmapat: never below 4 GiB (the program is there) */
 #define USER_HEAP_MAX    (64ULL << 30)     /* in practice: as much as RAM gives */
 #define MAX_ARGS         64   /* argv and environment strings together */
-#define MAX_FDS          256
+#define MAX_FDS          1024
 #define MAX_PATH         256              /* FAT32_MAX_PATH: long names */
 #define PAGE_UP(x)       (((x) + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1))
 #define PAGE_DOWN(x)     ((x) & ~(uint64_t)(PAGE_SIZE - 1))
