@@ -22,7 +22,8 @@ FONTS = os.path.join(ROOT, "third_party", "fonts")
 OUT = os.path.join(ROOT, "targets", "x86_64", "ramdisk", "ICONS.BIN")
 SIZES = (48, 96, 192)
 NAMES = ["folder", "mouse", "file", "info", "picture", "video", "gear", "computer", "user",
-         "paint", "textedit", "activity", "sound", "wifi", "battery", "music", "terminal"]
+         "paint", "textedit", "activity", "sound", "wifi", "battery", "music", "terminal",
+         "browser"]   # browser: the globe with meridians
 
 
 def terminal_icon(size=512):
