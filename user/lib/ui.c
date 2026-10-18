@@ -6,6 +6,8 @@
 // file, the console's 8x16 font is used.
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <image.h>
 #include <os.h>
 #include <ui.h>
 
@@ -476,7 +478,63 @@ static const icon_t *find_icon(const char *name) {
     return 0;
 }
 
-int ui_has_icon(const char *name) { return find_icon(name) != 0; }
+/* An icon from a picture file (an installed app's icon.png): `name` is its
+ * path. Square, halved (averaged) down to 256 pixels at most; kept once read. */
+#define FILE_ICONS 24
+static struct { char path[128]; int s; unsigned *px; } file_icons[FILE_ICONS];
+static int n_file_icons;
+
+static const unsigned *file_icon(const char *path, int *s) {
+    for (int i = 0; i < n_file_icons; i++)
+        if (!strcmp(file_icons[i].path, path)) {
+            *s = file_icons[i].s;
+            return file_icons[i].px;
+        }
+    if (n_file_icons == FILE_ICONS || strlen(path) >= sizeof(file_icons[0].path)) return 0;
+    int k = n_file_icons++;
+    snprintf(file_icons[k].path, sizeof(file_icons[k].path), "%s", path);   /* (a failed one: px 0) */
+    struct os_stat st;
+    if (stat(path, &st) != 0 || st.is_dir || !st.size || st.size > 4 * 1024 * 1024) return 0;
+    unsigned char *data = malloc(st.size);
+    int fd = data ? open(path, OPEN_READ) : -1;
+    long got = fd >= 0 ? read(fd, data, st.size) : -1;
+    if (fd >= 0) close(fd);
+    image_t img;
+    const char *error;
+    int ok = got == (long)st.size && image_decode_rgba(data, st.size, &img, &error) == 0;
+    free(data);
+    if (!ok) return 0;
+    int n = img.width < img.height ? img.width : img.height;        /* the middle square */
+    unsigned *px = malloc((size_t)n * n * 4);
+    if (!px) {
+        image_free(&img);
+        return 0;
+    }
+    for (int y = 0; y < n; y++)
+        memcpy(px + (long)y * n, img.pixels + (long)(y + (img.height - n) / 2) * img.width + (img.width - n) / 2, (size_t)n * 4);
+    image_free(&img);
+    while (n > 256) {                                  /* halve: each pixel the average of four */
+        int h = n / 2;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < h; x++) {
+                unsigned q[4] = { px[2 * y * n + 2 * x], px[2 * y * n + 2 * x + 1], px[(2 * y + 1) * n + 2 * x], px[(2 * y + 1) * n + 2 * x + 1] };
+                unsigned out = 0;
+                for (int b = 0; b < 32; b += 8)
+                    out |= (((q[0] >> b & 255) + (q[1] >> b & 255) + (q[2] >> b & 255) + (q[3] >> b & 255) + 2) / 4) << b;
+                px[y * h + x] = out;
+            }
+        n = h;
+    }
+    file_icons[k].s = n;
+    file_icons[k].px = px;
+    *s = n;
+    return px;
+}
+
+int ui_has_icon(const char *name) {
+    int s;
+    return name[0] == '/' ? file_icon(name, &s) != 0 : find_icon(name) != 0;
+}
 
 /* Premultiplied 0xAARRGGBB of texel (x, y). */
 static inline unsigned texel(const unsigned *px, int s, int x, int y) {
@@ -500,12 +558,19 @@ static inline unsigned lerp4(unsigned a, unsigned b, unsigned f) {   /* each byt
 /* The icon `name` in a size x size square at (x, y), smoothly scaled from
  * the nearest stored size; alpha 0-255 fades it. -> 0, -1 if there is none. */
 int ui_icon(ui_canvas *c, int x, int y, int size, const char *name, int alpha) {
-    const icon_t *ic = find_icon(name);
-    if (!ic || size <= 0) return -1;
-    int k = 0;
-    while (k < 2 && (int)ic->m[k].size < size) k++;
-    int s = (int)ic->m[k].size;
-    const unsigned *px = (const unsigned *)(icons + ic->m[k].offset);
+    int s;
+    const unsigned *px;
+    if (size <= 0) return -1;
+    if (name[0] == '/') {                              /* a picture file (file_icon) */
+        if (!(px = file_icon(name, &s))) return -1;
+    } else {
+        const icon_t *ic = find_icon(name);
+        if (!ic) return -1;
+        int k = 0;
+        while (k < 2 && (int)ic->m[k].size < size) k++;
+        s = (int)ic->m[k].size;
+        px = (const unsigned *)(icons + ic->m[k].offset);
+    }
     int y0 = y < c->cy0 ? c->cy0 : y, y1 = y + size > c->cy1 ? c->cy1 : y + size;
     int x0 = x < c->cx0 ? c->cx0 : x, x1 = x + size > c->cx1 ? c->cx1 : x + size;
     touch(c, x0, y0, x1, y1);

@@ -22,6 +22,10 @@ int image_load(const char *path, image_t *img, const char **error);
 
 void image_free(image_t *img);
 
+/* PNG, JPEG, GIF, TGA or PSD with its transparency: 0xAARRGGBB, not
+ * premultiplied (icons). */
+int image_decode_rgba(const unsigned char *data, size_t size, image_t *img, const char **error);
+
 /* JPEG, GIF, TGA, PSD (stb_image; image_decode calls it). */
 int image_decode_stb(const unsigned char *data, size_t size, image_t *img, const char **error);
 

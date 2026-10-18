@@ -15,6 +15,7 @@
 #define STBI_ONLY_GIF
 #define STBI_ONLY_TGA
 #define STBI_ONLY_PSD
+#define STBI_ONLY_PNG                     /* (for image_decode_rgba: app icons keep their transparency) */
 #define STBI_ASSERT(x) ((void)0)
 #define STBI_MALLOC(n) malloc(n)
 #define STBI_REALLOC(p, n) realloc(p, n)
@@ -42,5 +43,29 @@ int image_decode_stb(const unsigned char *data, size_t size, image_t *img, const
     img->height = h;
     img->pixels = pixels;
     img->format = data[0] == 0xFF ? "JPEG" : data[0] == 'G' ? "GIF" : data[0] == '8' ? "PSD" : "TGA";
+    return 0;
+}
+
+/* Any of the formats above, keeping transparency: 0xAARRGGBB (not premultiplied). */
+int image_decode_rgba(const unsigned char *data, size_t size, image_t *img, const char **error) {
+    int w, h, n;
+    if (size > 0x7FFFFFFF) { *error = "too big"; return -1; }
+    unsigned char *rgba = stbi_load_from_memory(data, (int)size, &w, &h, &n, 4);
+    if (!rgba) { *error = stbi_failure_reason(); return -1; }
+    unsigned int *pixels = malloc((size_t)w * h * 4);
+    if (!pixels) {
+        stbi_image_free(rgba);
+        *error = "out of memory";
+        return -1;
+    }
+    for (long i = 0; i < (long)w * h; i++) {
+        unsigned char *q = rgba + 4 * i;
+        pixels[i] = (unsigned)q[3] << 24 | (unsigned)q[0] << 16 | (unsigned)q[1] << 8 | q[2];
+    }
+    stbi_image_free(rgba);
+    img->width = w;
+    img->height = h;
+    img->pixels = pixels;
+    img->format = "RGBA";
     return 0;
 }

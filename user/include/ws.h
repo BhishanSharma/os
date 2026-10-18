@@ -15,7 +15,8 @@
 /* WS_RESIZE: the program answers a WS_EV_RESIZE with the new size (w, h) and
  * gets a new surface (the UI library does it). WS_RESIZABLE: the program can
  * redraw at any size, so the green button (zoom) may resize it. */
-enum { WS_CREATE = 1, WS_TITLE = 2, WS_RESIZE = 3, WS_RESIZABLE = 4 };
+/* WS_APPS: the installed apps (~/Apps, tapp) changed: the Dock reads them again. */
+enum { WS_CREATE = 1, WS_TITLE = 2, WS_RESIZE = 3, WS_RESIZABLE = 4, WS_APPS = 5 };
 
 struct ws_request {
     int op;

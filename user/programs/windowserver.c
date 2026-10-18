@@ -204,7 +204,7 @@ typedef struct {
 
 /* The Dock's apps come from DOCK.CFG, which the build makes from every
  * apps/NAME/app.cfg (scripts/mkdock.sh): "order|name|program|icon|color". */
-#define MAX_DOCK 16
+#define MAX_DOCK 24
 static dock_app_t apps[MAX_DOCK];
 static int n_apps;
 #define DOCK_APPS n_apps
@@ -221,6 +221,9 @@ static void dock_add(char *name, char *program, char *icon, unsigned color) {
     a->color = color;
     n_apps++;
 }
+
+static void load_installed(void);
+static void damage_dock(void);
 
 static void load_dock(void) {
     static char text[4096];
@@ -255,6 +258,90 @@ static void load_dock(void) {
         dock_add(files, finder, folder, 0x2F7BF5);
         dock_add(term, terminal, terminal, 0x30323A);
     }
+    load_installed();
+}
+
+/* The apps this user installed (tapp: docs/PACKAGES.md), after the built-in
+ * ones: ~/Apps/ID/app.cfg ("name = ...", "color = RRGGBB", "icon = NAME"),
+ * the program ~/Apps/ID/ID, its picture ~/Apps/ID/icon.png. */
+static void load_installed(void) {
+    static char text[MAX_DOCK][3][128];               /* name, program, icon */
+    static struct os_dirent ents[MAX_DOCK];
+    struct os_user u;
+    char dir[64];
+    if (getuser(&u) != 0) return;
+    size_t hl = strlen(u.home);
+    snprintf(dir, sizeof(dir), "%s%sApps", u.home, hl && u.home[hl - 1] == '/' ? "" : "/");
+    int n = listdir(dir, ents, MAX_DOCK);
+    for (int i = 0, k = 0; i < n && n_apps < MAX_DOCK; i++) {
+        const char *id = ents[i].name;
+        if (!ents[i].is_dir || id[0] == '.') continue;
+        char path[200], cfg[1024];
+        snprintf(path, sizeof(path), "%s/%s/app.cfg", dir, id);
+        int fd = open(path, OPEN_READ);
+        long len = fd >= 0 ? read(fd, cfg, sizeof(cfg) - 1) : -1;
+        if (fd >= 0) close(fd);
+        if (len <= 0) continue;
+        cfg[len] = 0;
+        char *name = text[k][0], *program = text[k][1], *icon = text[k][2];
+        snprintf(name, 128, "%s", id);
+        icon[0] = 0;
+        unsigned color = 0x8E8E93;
+        for (char *line = cfg, *next; line && *line; line = next) {   /* key = value  # comment */
+            next = strchr(line, '\n');
+            if (next) *next++ = 0;
+            char *eq = strchr(line, '=');
+            if (!eq || line[0] == '#') continue;
+            char *key = line, *value = eq + 1, *end = eq;
+            while (end > key && (end[-1] == ' ' || end[-1] == '\t')) end--;
+            *end = 0;
+            while (*value == ' ' || *value == '\t') value++;
+            char *hash = strstr(value, " #");
+            if (hash) *hash = 0;
+            end = value + strlen(value);
+            while (end > value && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r')) end--;
+            *end = 0;
+            if (!strcmp(key, "name") && *value) snprintf(name, 128, "%s", value);
+            else if (!strcmp(key, "icon")) snprintf(icon, 128, "%s", value);
+            else if (!strcmp(key, "color")) {
+                color = 0;
+                for (char *p = value; *p; p++)
+                    color = color * 16 + (unsigned)(*p <= '9' ? *p - '0' : (*p | 32) - 'a' + 10);
+            }
+        }
+        snprintf(program, 128, "%s/%s/%s", dir, id, id);
+        struct os_stat st;
+        snprintf(path, sizeof(path), "%s/%s/icon.png", dir, id);
+        if (stat(path, &st) == 0 && !st.is_dir) snprintf(icon, 128, "%s", path);
+        if (icon[0]) ui_has_icon(icon);                /* read it now, not while painters draw */
+        dock_add(name, program, icon, color);
+        k++;
+    }
+}
+
+/* tapp installed or removed an app (WS_APPS): the Dock again, the apps still
+ * running keep their state. Under the lock. */
+static void reload_dock(void) {
+    static dock_app_t old[MAX_DOCK];
+    int n_old = n_apps;
+    memcpy(old, apps, sizeof(apps));
+    memset(apps, 0, sizeof(apps));
+    n_apps = 0;
+    load_dock();
+    for (int i = 0; i < n_apps; i++)
+        for (int j = 0; j < n_old; j++)
+            if (!strcmp(apps[i].program, old[j].program)) {
+                const char *name = apps[i].name, *program = apps[i].program, *glyph = apps[i].glyph, *icon = apps[i].icon;
+                unsigned color = apps[i].color;
+                apps[i] = old[j];
+                apps[i].name = name;
+                apps[i].program = program;
+                apps[i].glyph = glyph;
+                apps[i].icon = icon;
+                apps[i].color = color;
+                break;
+            }
+    damage_dock();
 }
 
 enum { M_ABOUT = 1, M_SETTINGS, M_ACTIVITY, M_APPEARANCE, M_MOTION, M_TRANSP, M_TERMINAL,
@@ -906,6 +993,9 @@ static void serve(void *arg) {
             if (e < 0) r.id = e;
             mutex_unlock(&lock);
             if (reply >= 0) port_send(reply, &r, sizeof(r), -1);
+        } else if (q.op == WS_APPS) {
+            reload_dock();
+            mutex_unlock(&lock);
         } else {
             for (int k = 0; k < MAX_WINDOWS; k++)
                 if (wins[k].used && wins[k].id == q.id && wins[k].pid == q.pid && q.op == WS_RESIZABLE) {

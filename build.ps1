@@ -32,6 +32,10 @@
 #   built in it (the full toolchain: the ports too), else in myos-buildenv.
 #   On the OS:  windowserver /ladybird/bin/Ladybird:https://example.com/
 #
+# Apps for other people (docs/PACKAGES.md):
+#   .\build.ps1 -Package examples\hello  build\packages\hello.tapp, to install
+#                                         with tapp (open it in Files on the OS)
+#
 # First run only: if PowerShell blocks the script, run:
 #   Unblock-File .\build.ps1
 
@@ -47,7 +51,8 @@ param(
     [int]$Disk = -1,
     [switch]$Yes,
     [switch]$Browser,
-    [switch]$NoBrowser
+    [switch]$NoBrowser,
+    [string]$Package = ""
 )
 
 # Every step checks its exit code ($LASTEXITCODE). "Continue", not "Stop": with
@@ -93,6 +98,18 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 }
 docker info *> $null
 if ($LASTEXITCODE -ne 0) { Fail "Docker isn't running. Start Docker Desktop and retry." }
+
+# ---- An app package (tapp), no OS build ---------------------------------------
+if ($Package) {
+    $src = $Package.Replace('\', '/').TrimEnd('/')
+    $image = "myos-buildenv"
+    docker image inspect myos-ladybird *> $null
+    if ($LASTEXITCODE -eq 0) { $image = "myos-ladybird" }
+    Step "Packaging $src (make tapp, in $image)..."
+    docker run --rm -v "${PWD}:/root/env" -w /root/env $image sh -c "make tapp SRC=$src"
+    if ($LASTEXITCODE -ne 0) { Fail "Packaging failed." }
+    exit 0
+}
 
 # ---- Build image -----------------------------------------------------------
 docker image inspect myos-buildenv *> $null

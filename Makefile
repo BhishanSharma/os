@@ -344,6 +344,13 @@ $(USER_BUILD)/$(1).elf: $(call app_objs,$(1)) $$(APP_LIBS_$(1)) $(USER_BUILD)/cr
 endef
 $(foreach a,$(app_names),$(eval $(call APP_RULE,$(a))))
 
+# An app for other people, as a package to install with `tapp` (docs/PACKAGES.md):
+#   make tapp SRC=examples/hello    ->  build/packages/hello.tapp
+.PHONY: tapp
+tapp: $(USER_BUILD)/crt0.o $(USER_BUILD)/libc.a user/user.ld ## Package an app folder for tapp: make tapp SRC=folder
+	@test -n "$(SRC)" || { echo "make tapp SRC=folder   (a folder with app.cfg and .c files)"; exit 1; }
+	sh scripts/mktapp.sh "$(SRC)" "$(USER_BUILD)" "$(CC) $(USER_CFLAGS)" "$(LD)" $(BUILD)/packages
+
 # Ports (ports/NAME/, the full toolchain): see PORT_RULE below.
 
 $(USER_BUILD)/ports/%.cpp.o: ports/%.cpp

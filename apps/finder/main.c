@@ -118,6 +118,7 @@ static int is_movie(const char *n) { return ends_in(n, movies); }
 static int is_song(const char *n) { return ends_in(n, songs); }
 static int is_text(const char *n) { return ends_in(n, texts); }
 static int is_program(const char *n) { return has_ending(n, ".ELF"); }
+static int is_package(const char *n) { return has_ending(n, ".TAPP"); }   /* an app to install (tapp) */
 
 /* No known ending: text if its first 4 KB look like text (no NUL, few control bytes). */
 static int looks_like_text(const char *path) {
@@ -147,6 +148,7 @@ static const char *icon_of(const struct os_dirent *e) {
 static const char *kind_of(const struct os_dirent *e) {
     if (e->is_dir) return "Folder";
     if (is_program(e->name)) return "Program";
+    if (is_package(e->name)) return "App Package";
     if (is_picture(e->name)) return "Image";
     if (is_movie(e->name)) return "Movie";
     if (is_song(e->name)) return "Audio";
@@ -253,7 +255,7 @@ static void open_row(int k) {
     }
     char path[PATH_LEN + 64];
     snprintf(path, sizeof(path), "%s%s%s", cwd, cwd[strlen(cwd) - 1] == '/' ? "" : "/", e->name);
-    char *app = is_picture(path) ? "view" : is_movie(path) ? "video" : is_song(path) ? "music"
+    char *app = is_package(path) ? "tapp" : is_picture(path) ? "view" : is_movie(path) ? "video" : is_song(path) ? "music"
               : is_program(path) ? "terminal" : is_text(path) || looks_like_text(path) ? "textedit" : 0;
     if (!app) {                                     /* not text, and no app knows it */
         char line[96];
