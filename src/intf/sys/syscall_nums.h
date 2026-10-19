@@ -114,6 +114,9 @@
 #define SYSTEM_CPUS        10  /* -> how many cores run programs */
 #define SYSTEM_POINTER     11  /* a = struct os_pointer *, b = 1 set, 0 read -> 0 */
 #define SYSTEM_PAGES       12  /* a = 0 all, 1 free: memory in 4 KiB pages */
+#define SYSTEM_PASSWD      13  /* a = old password, b = new one ("" turns the sign-in off): your own -> 0, SYSERR_AUTH;
+                                  a = 0: 1 if a sign-in is on (your password is not empty), else 0 */
+#define SYSTEM_USERS       14  /* a = struct os_account *, b = max: the accounts (root only: the login screen) -> count */
 
 /* The mouse and the touchpad (System Settings). Speeds 0..100, 50 = normal. */
 struct os_pointer {
@@ -241,6 +244,13 @@ struct os_time {
     char zone[8];          /* "IST" */
 };
 
+/* SYSTEM_USERS: one account of the login screen's profile list. */
+struct os_account {
+    char name[16];
+    unsigned int uid;
+    int has_password;      /* 0: a sign-in is not turned on (an empty password) */
+};
+
 struct os_user {
     unsigned int uid;      /* 0 = root */
     char name[16];
@@ -286,9 +296,11 @@ struct os_task {
 /* gfx() operations. Coordinates are screen pixels; the status bar stays the
  * console's (rows above `top`). Only the foreground program may draw. */
 #define GFX_INFO     0   /* arg = struct os_gfx_info *        -> 0, SYSERR_NOENT in VGA text mode */
-#define GFX_BEGIN    1   /* take the screen below the status bar (cleared to black); arg 1: the whole screen -> 0 */
+#define GFX_BEGIN    1   /* take the screen below the status bar (cleared to black); arg 1: the whole screen;
+                            arg 2: the whole screen, its picture kept (the desktop after the login's last frame) -> 0 */
 #define GFX_BLIT     2   /* arg = struct os_blit *: 0x00RRGGBB pixels -> 0 */
-#define GFX_END      3   /* give it back: the console redraws (also when the program ends) */
+#define GFX_END      3   /* give it back: the console redraws (also when the program ends);
+                            arg 1: only let go, nothing redrawn (the next program draws over it at once) */
 #define GFX_PRESENT  5   /* show what was blitted at the next refresh, after the frame before -> 1, 0: no page flipping */
 #define GFX_SURFACE  6   /* arg = struct os_blit * (the whole screen, x = y = 0): the frame the
                             blits come from; the GPU copies from it -> 0, SYSERR_NOENT: no blitter */

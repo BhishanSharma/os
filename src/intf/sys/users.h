@@ -46,6 +46,13 @@ int user_may_write(const char *path);
 #define USERS_NO_SUCH_USER  -1
 #define USERS_AUTH_FAILED   -2
 int users_authenticate(const char *name, user_t *out);
+/* The current user's password changed from `old` to `now` ("" = no sign-in; root's
+ * follows when it was the same) -> 0, USERS_AUTH_FAILED when `old` is wrong. */
+int users_has_password(void);          /* 1 if the current user's password is not empty (a sign-in is on) */
+int users_change_password(const char *old, const char *now);
+/* The accounts for the login screen: everyday ones (root only if it is the only one),
+ * has_pw[i] 0 when the password is empty. -> count */
+int users_list(char names[][USER_NAME_MAX], unsigned *uids, int *has_pw, int max);
 /* 0 and the account if `password` is name's (login, through SYS_AUTH). */
 int users_check_password(const char *name, const char *password, user_t *out);
 

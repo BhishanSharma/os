@@ -2117,10 +2117,10 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
                 return SYSERR_PERM;
             if (graphics_owner && !gfx_mine(me)) return SYSERR_AGAIN;
             graphics_owner = me;
-            graphics_full = arg == 1;                        /* the desktop: the whole screen */
+            graphics_full = arg >= 1;                        /* the desktop: the whole screen */
             print_set_graphics(graphics_full ? 2 : 1);
             if (graphics_full) top = 0;
-            fbcon_fill(0, top, width, height - top, 0);
+            if (arg != 2) fbcon_fill(0, top, width, height - top, 0);   /* (2: keep the login's last picture) */
             return 0;
         case GFX_BLIT: {
             if (!gfx_mine(me)) return SYSERR_PERM;
@@ -2254,7 +2254,7 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
             if (!gfx_mine(me)) return SYSERR_PERM;
             graphics_owner = 0;
             fbcon_cursor_set(0, 0, 0, 0, 0, 0, 0);
-            print_set_graphics(0);
+            if (arg != 1) print_set_graphics(0);             /* (1: no console redraw: the desktop draws over it) */
             return 0;
         default:
             return SYSERR_BADCALL;
@@ -2766,6 +2766,33 @@ static int64_t sys_system(uint64_t op, uint64_t a, uint64_t b) {
         }
         case SYSTEM_CPUS:
             return smp_cpu_count();
+        case SYSTEM_PASSWD: {
+            char old[64], now[64];
+            if (!a) return users_has_password();         /* (a = 0: is a sign-in on?) */
+            if (copy_user_string(old, a, sizeof(old)) != 0 || copy_user_string(now, b, sizeof(now)) != 0)
+                return SYSERR_FAULT;
+            int r = users_change_password(old, now);
+            memset(old, 0, sizeof(old));
+            memset(now, 0, sizeof(now));
+            return r == 0 ? 0 : SYSERR_AUTH;
+        }
+        case SYSTEM_USERS: {
+            int max = (int)b;
+            if (!user_is_root()) return SYSERR_PERM;
+            if (max < 1 || max > 16 || !user_range_ok(a, (uint64_t)max * sizeof(struct os_account), 1)) return SYSERR_FAULT;
+            static char names[16][USER_NAME_MAX];
+            unsigned uids[16];
+            int has_pw[16];
+            int n = users_list(names, uids, has_pw, max);
+            struct os_account *out = (struct os_account *)a;
+            for (int i = 0; i < n; i++) {
+                memset(&out[i], 0, sizeof(out[i]));
+                for (int k = 0; k < USER_NAME_MAX && names[i][k]; k++) out[i].name[k] = names[i][k];
+                out[i].uid = uids[i];
+                out[i].has_password = has_pw[i];
+            }
+            return n;
+        }
         case SYSTEM_PAGES:
             return (long)((a ? physmem_total() - physmem_used() : physmem_total()) / 4096);
         case SYSTEM_POINTER: {

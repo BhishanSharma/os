@@ -783,6 +783,7 @@ static int has_ci(const char *hay, const char *needle) {                  /* cas
 static const char *const create_progs[] = { "paint", "textedit", "music" };
 static const struct { const char *label, *pane; int glyph; } panes[] = {
     { "Wi-Fi", "wifi", GL_WIFI }, { "Sound", "sound", GL_SOUND }, { "Battery", "battery", GL_BATTERY },
+    { "Sign-in", "signin", GL_USER },
 };
 
 static void add_litem(int kind, int idx, const char *label) {
@@ -2615,6 +2616,13 @@ static void draw_menu_faded(painter_t *p) {
     draw_faded(p, menu_x() - SHADOW, menu_y() - SHADOW, menu_x() + menu_w() + SHADOW, menu_y() + menu_h() + SHADOW + 8 * S, a, draw_menu);
 }
 
+/* Starting after the login's door (loginwindow's "--veil"): the screen is still
+ * full of its light, and the Lobby appears in it, the light fading away. */
+#define VEIL_HOLD_MS 150
+#define VEIL_MS 750
+static int veil;                                       /* the light left, 0..255 (0: none) */
+static unsigned long veil_start;
+
 static void paint(painter_t *p, int by0, int by1) {
     window_t *f = front();
     for (int d = 0; d < ndmg; d++) {
@@ -2627,6 +2635,7 @@ static void paint(painter_t *p, int by0, int by1) {
         draw_pill(p);
         draw_launcher_faded(p);
         draw_menu_faded(p);
+        if (veil > 0) ui_round_ex(&p->c, x0, y0, x1 - x0, y1 - y0, 0, 0xFFE6BE, veil, UI_ALL);
         if (!kernel_cursor) draw_cursor(p);
     }
 }
@@ -2646,6 +2655,7 @@ static void painter(void *arg) {
 
 /* Window motion and the menu's fade share scratch buffers: one core then. */
 static int motion(void) {
+    if (veil > 0) return 1;
     if (menu_open && menu_fade_ms < FADE_MS) return 1;
     if (lt != (panel_open ? 1024 : 0)) return 1;
     for (int k = 0; k < MAX_WINDOWS; k++)
@@ -3407,7 +3417,9 @@ int main(int argc, char **argv) {
     glyphs_init();
     load_dock();
     ctrlc(CTRLC_KEY);
-    if (gfx_begin_full() < 0) {
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--veil")) veil = 255;
+    if ((veil ? gfx_begin_keep() : gfx_begin_full()) < 0) {
         printf("windowserver: cannot take the screen\n");
         return 1;
     }
@@ -3419,6 +3431,7 @@ int main(int argc, char **argv) {
     thread_create(serve, &port);
     for (int k = 1; k < n_painters; k++) thread_create(painter, (void *)(long)k);
     for (int i = 1; i < argc; i++) {                   /* apps to open: from the Dock, or any program */
+        if (!strcmp(argv[i], "--veil")) continue;
         int k = 0;
         while (k < DOCK_APPS && strcmp(argv[i], apps[k].program)) k++;
         char *arg = strchr(argv[i], ':');                  /* "program:argument" */
@@ -3484,6 +3497,15 @@ int main(int argc, char **argv) {
                         damage(w->x + x0, w->y + y0, x1 - x0, y1 - y0);
                 }
             }
+        }
+        if (veil > 0) {                                /* the light of the door fades from the Lobby */
+            if (!veil_start) veil_start = now;
+            long el = (long)(now - veil_start) - VEIL_HOLD_MS;
+            if (el < 0) el = 0;
+            long p = el * 256 / VEIL_MS;
+            if (p > 256) p = 256;
+            veil = p >= 256 ? 0 : (int)(255 * (256 - p) * (256 - p) / 65536);
+            damage(0, 0, W, H);                        /* (one more frame with none, when it ends) */
         }
         animate_ui(dt);
         if (items_dirty && panel_open) {

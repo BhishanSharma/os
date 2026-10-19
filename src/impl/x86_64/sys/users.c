@@ -490,7 +490,9 @@ void users_setup_text(void) {
 int users_setup(const char *name, const char *password) {
     if (find_account("root")) return USERS_SETUP_DONE;
     if (!valid_name(name) || !strcmp(name, "root")) return USERS_SETUP_BAD_NAME;
-    if (!password[0]) return USERS_SETUP_BAD_PASSWORD;
+    if (strlen(password) >= 64) return USERS_SETUP_BAD_PASSWORD;
+    /* An empty password is a sign-in that is not turned on yet: the desktop opens
+     * straight away (System Settings > Sign-in turns a PIN or password on). */
     add_account("root", 0, password);                 /* the first user is the administrator */
     add_account(name, FIRST_UID, password);
     make_dirs("TMP", 0);
@@ -672,6 +674,37 @@ static void cmd_su(const char *name) {
     }
     push_session(a);
     kprintf("Now %s. Type exit to go back.\n", name);
+}
+
+int users_has_password(void) {
+    account_t *a = find_account(user_current()->name);
+    return a && !check_password(a, "");
+}
+
+int users_change_password(const char *old, const char *now) {
+    const user_t *me = user_current();
+    account_t *a = find_account(me->name);
+    if (!a || strlen(now) >= 64) return USERS_AUTH_FAILED;
+    if (!check_password(a, old)) {
+        sleep(1000);
+        return USERS_AUTH_FAILED;
+    }
+    account_t *root = find_account("root");
+    if (root && root != a && check_password(root, old)) set_password(root, now);   /* the administrator follows */
+    set_password(a, now);
+    return save_accounts();
+}
+
+int users_list(char names[][USER_NAME_MAX], unsigned *uids, int *has_pw, int max) {
+    int n = 0;
+    for (int i = 0; i < account_count && n < max; i++) {
+        if (accounts[i].user.uid == 0 && account_count > 1) continue;
+        k_snprintf(names[n], USER_NAME_MAX, "%s", accounts[i].user.name);
+        uids[n] = accounts[i].user.uid;
+        has_pw[n] = !check_password(&accounts[i], "");
+        n++;
+    }
+    return n;
 }
 
 int users_authenticate(const char *name, user_t *out) {

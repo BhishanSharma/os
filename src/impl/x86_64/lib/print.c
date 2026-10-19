@@ -1110,19 +1110,64 @@ void print_set_graphics(int on) {
 }
 
 /* ---- The boot screen -------------------------------------------------------
- * Like a Mac starting up: black, the logo, a progress bar that moves with each
- * boot step. The text goes on underneath (graphics mode 2 leaves it alone) and
- * comes back when a program gives up the screen, a text login asks for
- * something, or the kernel panics. `verbose` on the boot line skips it. */
+ * DOOR OS starting: a dark room and a door standing slightly ajar, the light
+ * behind it growing with each boot step. loginwindow draws the very same door
+ * (user/programs/loginwindow.c, door_scene) and then opens it: the light fills
+ * the screen and the desktop (the Lobby) appears in it. The text goes on
+ * underneath (graphics mode 2 leaves it alone) and comes back when a program
+ * gives up the screen, a text login asks for something, or the kernel panics.
+ * `verbose` on the boot line skips it. */
 #define SPLASH_STEPS 22
 static int splash_step;
-static uint32_t splash_x, splash_y, splash_w, splash_h;
+static uint32_t splash_w, splash_h;
 
-static void splash_bar(void) {
-    uint32_t done = splash_w * (uint32_t)splash_step / SPLASH_STEPS;
-    if (done > splash_w) done = splash_w;
-    fbcon_fill(splash_x, splash_y, splash_w, splash_h, 0x3A3A3C);
-    fbcon_fill(splash_x, splash_y, done, splash_h, 0xFFFFFF);
+#define DOOR_BG     0x0B0E14
+#define DOOR_FRAME  0x232A36
+#define DOOR_EDGE   0x39424F
+#define DOOR_LEAF   0x2D3543
+#define DOOR_FLOOR  0x1A202A
+
+static uint32_t splash_mix(uint32_t a, uint32_t b, uint32_t t) {         /* t 0..255 */
+    uint32_t r = ((a >> 16 & 255) * (255 - t) + (b >> 16 & 255) * t) / 255;
+    uint32_t g = ((a >> 8 & 255) * (255 - t) + (b >> 8 & 255) * t) / 255;
+    uint32_t bl = ((a & 255) * (255 - t) + (b & 255) * t) / 255;
+    return r << 16 | g << 8 | bl;
+}
+
+/* The door: u = a twentieth of the screen's height; the frame 6u x 10u, its
+ * top 6u above the middle. The leaf is hinged on the left; what the light
+ * shows through is a slit at the right, `light` 0..255 of its full size. */
+static void splash_door(int full) {
+    uint32_t w = splash_w, h = splash_h, u = h / 20, cx = w / 2;
+    uint32_t t = u / 4 + 1, fx = cx - 3 * u, fy = h / 2 - 6 * u, fw = 6 * u, fh = 10 * u;
+    uint32_t ix = fx + t, iy = fy + t, iw = fw - 2 * t, ih = fh - t;      /* the doorway */
+    uint32_t light = 40 + 215 * (uint32_t)(splash_step > SPLASH_STEPS ? SPLASH_STEPS : splash_step) / SPLASH_STEPS;
+    uint32_t sw = iw * (8 + 18 * (uint32_t)(splash_step > SPLASH_STEPS ? SPLASH_STEPS : splash_step) / SPLASH_STEPS) / 256;
+    if (sw < 2) sw = 2;
+    uint32_t lw = iw - sw;                                                /* the leaf's width */
+    if (full) {
+        fbcon_fill(0, 0, w, h, DOOR_BG);
+        fbcon_fill(0, fy + fh, w, 1, DOOR_FLOOR);                         /* the floor line */
+        fbcon_fill(fx - t, fy - t, fw + 2 * t, fh + t, DOOR_EDGE);        /* the frame, an edge round it */
+        fbcon_fill(fx, fy, fw, fh, DOOR_FRAME);
+        fbcon_fill(ix, iy, lw, ih, DOOR_LEAF);                            /* the leaf */
+        fbcon_fill(ix + u / 3, iy + u / 2, lw - 2 * (u / 3), 3 * u, DOOR_FRAME);   /* its two panels */
+        fbcon_fill(ix + u / 3, iy + 4 * u, lw - 2 * (u / 3), 5 * u - u / 2, DOOR_FRAME);
+        fbcon_fill(ix + u / 3 + 1, iy + u / 2 + 1, lw - 2 * (u / 3) - 2, 3 * u - 2, DOOR_LEAF - 0x040404);
+        fbcon_fill(ix + u / 3 + 1, iy + 4 * u + 1, lw - 2 * (u / 3) - 2, 5 * u - u / 2 - 2, DOOR_LEAF - 0x040404);
+        fbcon_fill(ix + lw - u / 2 - t, iy + 5 * u, t + 1, t + 1, 0xA9B8D0);   /* the knob */
+    }
+    for (uint32_t y = 0; y < ih; y++) {                                   /* the light in the slit */
+        uint32_t top = splash_mix(0xFFF4DC, 0xFFD9A0, y * 255 / ih);
+        fbcon_fill(ix + lw, iy + y, sw, 1, splash_mix(DOOR_BG, top, light));
+    }
+    fbcon_fill(ix + lw - 1, iy, 1, ih, splash_mix(DOOR_LEAF, 0xFFE6BE, light / 2));   /* the leaf's lit edge */
+    uint32_t sh = 3 * u, sx = ix + lw + sw / 2, fy2 = fy + fh + 1;        /* the light on the floor */
+    for (uint32_t k = 0; k < sh; k++) {
+        uint32_t q = 255 - k * 255 / sh, a = q * q / 255 * light / 255 * 200 / 255;
+        uint32_t half = sw / 2 + k * 3 / 2;
+        fbcon_fill(sx - half, fy2 + k, 2 * half, 1, splash_mix(DOOR_BG, 0xFFE6BE, a));
+    }
 }
 
 void print_splash_begin(void) {
@@ -1132,29 +1177,15 @@ void print_splash_begin(void) {
     graphics_mode = 2;
     splash = 1;
     splash_step = 3;                             /* the boot loader drew the first part */
-    fbcon_fill(0, 0, w, h, 0);
-    /* The logo: a terminal window with ">_" in it. */
-    uint32_t L = h / 6, iw = L * 5 / 4, ih = L, x = (w - iw) / 2, y = h / 2 - ih, t = L / 18 + 1;
-    fbcon_fill(x + t, y, iw - 2 * t, ih, 0xFFFFFF);            /* rounded a little: the corners cut */
-    fbcon_fill(x, y + t, iw, ih - 2 * t, 0xFFFFFF);
-    fbcon_fill(x + t, y + L / 5, iw - 2 * t, ih - L / 5 - t, 0x111114);
-    uint32_t u = L / 48 + 1, px = x + L / 6, py = y + L / 5 + L / 7;
-    for (uint32_t i = 0; i < 8; i++) {                         /* ">" in small steps (as the loader) */
-        fbcon_fill(px + i * u, py + i * u, 3 * u, 3 * u, 0xFFFFFF);
-        fbcon_fill(px + i * u, py + (14 - i) * u, 3 * u, 3 * u, 0xFFFFFF);
-    }
-    fbcon_fill(px + 13 * u, py + 14 * u, 11 * u, 3 * u, 0xFFFFFF);   /* "_" */
-    splash_w = L * 3 / 2;
-    splash_h = h / 270 + 2;
-    splash_x = (w - splash_w) / 2;
-    splash_y = y + ih + L / 2;
-    splash_bar();
+    splash_w = w;
+    splash_h = h;
+    splash_door(1);
 }
 
 void print_splash_step(int last) {
     if (!splash) return;
     splash_step = last ? SPLASH_STEPS : splash_step + 1;
-    splash_bar();
+    splash_door(0);
 }
 
 void print_splash_end(void) {

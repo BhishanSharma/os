@@ -1,4 +1,4 @@
-// settings [wifi|sound|battery|appearance|wallpaper|dock|display|about] -
+// settings [wifi|sound|battery|appearance|wallpaper|dock|signin|display|about] -
 // System Settings: Wi-Fi networks, the volume, the battery, how the desktop
 // looks (light or dark, the accent colour, the wallpaper, the Dock, the menu
 // bar's clock), the screen and this computer.
@@ -15,13 +15,13 @@
 #include <os.h>
 #include <view.h>
 
-enum { P_WIFI, P_SOUND, P_BATTERY, P_APPEARANCE, P_WALLPAPER, P_DOCK, P_POINTER, P_DISPLAY, P_ABOUT, PANES };
+enum { P_WIFI, P_SOUND, P_BATTERY, P_APPEARANCE, P_WALLPAPER, P_DOCK, P_POINTER, P_SIGNIN, P_DISPLAY, P_ABOUT, PANES };
 static const char *pane_names[PANES] = { "Wi-Fi", "Sound", "Battery", "Appearance", "Wallpaper",
-                                          "Dock & Menu Bar", "Mouse & Trackpad", "Display", "About" };
+                                          "Dock & Menu Bar", "Mouse & Trackpad", "Sign-in", "Display", "About" };
 static const char *pane_keys[PANES] = { "wifi", "sound", "battery", "appearance", "wallpaper", "dock", "mouse",
-                                        "display", "about" };
+                                        "signin", "display", "about" };
 static const char *pane_icons[PANES] = { "wifi", "sound", "battery", "paint", "picture", "gear", "mouse",
-                                         "computer", "info" };
+                                         "user", "computer", "info" };
 
 static int S, pane;
 static view_t *sidebar, *title, *panes[PANES];
@@ -519,6 +519,124 @@ static void build_pointer(view_t *p) {
     v_label(p, t)->color = UI_C_SECONDARY;
 }
 
+/* ---- Sign-in ----------------------------------------------------------------
+ * Whether the desktop asks for a PIN or a password before it opens. With none
+ * (the account's password is empty) loginwindow opens the Lobby straight away.
+ * The secret is the account's password (hashed by the kernel); SIGNIN.CFG in
+ * the home folder says only whether the login screen shows a PIN or a password. */
+
+enum { SI_OFF, SI_PIN, SI_PASSWORD };
+static int si_on, si_mode;                             /* a sign-in is on now; the kind chosen below */
+static view_t *si_status, *si_off_btn, *si_pin_btn, *si_pw_btn, *si_cur, *si_new, *si_again, *si_apply, *si_msg;
+
+static void signin_refresh(void) {
+    si_on = signin_on() == 1;
+    char line[96];
+    snprintf(line, sizeof(line), si_on ? "Sign-in is on: the desktop asks for it." : "Sign-in is off: the desktop opens straight away.");
+    v_set_text(si_status, line);
+    v_show(si_cur, si_on);
+    v_show(si_new, si_mode != SI_OFF);
+    v_show(si_again, si_mode != SI_OFF);
+    snprintf(si_cur->hint, sizeof(si_cur->hint), "Current PIN or password");
+    snprintf(si_new->hint, sizeof(si_new->hint), si_mode == SI_PIN ? "New PIN (4-8 digits)" : "New password");
+    snprintf(si_again->hint, sizeof(si_again->hint), si_mode == SI_PIN ? "New PIN again" : "New password again");
+    v_set_text(si_apply, si_mode == SI_OFF ? "Turn sign-in off" : si_on ? "Change" : "Turn on");
+    v_set_flags(si_off_btn, si_mode == SI_OFF ? UI_BTN_DEFAULT : 0);
+    v_set_flags(si_pin_btn, si_mode == SI_PIN ? UI_BTN_DEFAULT : 0);
+    v_set_flags(si_pw_btn, si_mode == SI_PASSWORD ? UI_BTN_DEFAULT : 0);
+}
+
+static void si_pick(int mode) {
+    si_mode = mode;
+    v_set_text(si_msg, "");
+    signin_refresh();
+}
+static void si_pick_off(view_t *b) { (void)b; si_pick(SI_OFF); }
+static void si_pick_pin(view_t *b) { (void)b; si_pick(SI_PIN); }
+static void si_pick_pw(view_t *b) { (void)b; si_pick(SI_PASSWORD); }
+
+static void si_write_kind(const char *kind) {          /* SIGNIN.CFG: "pin" or "password" (nothing when off) */
+    struct os_user me;
+    char path[80];
+    getuser(&me);
+    snprintf(path, sizeof(path), "%s%sSIGNIN.CFG", me.home, strcmp(me.home, "/") ? "/" : "");
+    if (!kind) {
+        unlink(path);
+        return;
+    }
+    int fd = open(path, OPEN_WRITE);
+    if (fd < 0) return;
+    write(fd, kind, strlen(kind));
+    close(fd);
+}
+
+static void si_apply_now(view_t *b) {
+    (void)b;
+    const char *cur = si_on ? si_cur->text : "", *now = si_mode == SI_OFF ? "" : si_new->text;
+    if (si_mode != SI_OFF) {
+        int n = (int)strlen(now);
+        if (si_mode == SI_PIN) {
+            for (int i = 0; i < n; i++)
+                if (now[i] < '0' || now[i] > '9') {
+                    v_set_text(si_msg, "A PIN is digits only.");
+                    return;
+                }
+            if (n < 4 || n > 8) {
+                v_set_text(si_msg, "A PIN is 4 to 8 digits.");
+                return;
+            }
+        } else if (n < 4) {
+            v_set_text(si_msg, "Use at least 4 characters.");
+            return;
+        }
+        if (strcmp(now, si_again->text)) {
+            v_set_text(si_msg, "The two do not match.");
+            return;
+        }
+    }
+    if (password_change(cur, now) != 0) {
+        v_set_text(si_msg, si_on ? "The current PIN or password is wrong." : "Could not change the sign-in.");
+        return;
+    }
+    si_write_kind(si_mode == SI_PIN ? "pin" : si_mode == SI_PASSWORD ? "password" : 0);
+    memset(si_cur->text, 0, sizeof(si_cur->text));
+    memset(si_new->text, 0, sizeof(si_new->text));
+    memset(si_again->text, 0, sizeof(si_again->text));
+    v_set_text(si_cur, "");
+    v_set_text(si_new, "");
+    v_set_text(si_again, "");
+    v_set_text(si_msg, si_mode == SI_OFF ? "Sign-in is off." : si_mode == SI_PIN ? "The PIN is set." : "The password is set.");
+    signin_refresh();
+}
+
+static void build_signin(view_t *p) {
+    si_status = v_label(p, "");
+    si_status->style = UI_BOLD;
+    v_text(p, "With a PIN or a password the login screen asks for it before the Lobby opens. "
+              "With none, DOOR OS goes straight from the door into the Lobby. "
+              "With several accounts the login screen shows their profiles to choose from.")->color = UI_C_SECONDARY;
+    view_t *kinds = v_box(p, V_ROW);
+    kinds->gap = 8;
+    si_off_btn = v_button(kinds, "No sign-in", si_pick_off);
+    si_pin_btn = v_button(kinds, "PIN", si_pick_pin);
+    si_pw_btn = v_button(kinds, "Password", si_pick_pw);
+    v_spacer(kinds);
+    si_cur = v_field(p, "", si_apply_now);
+    si_cur->flags = V_SECRET;
+    si_new = v_field(p, "", si_apply_now);
+    si_new->flags = V_SECRET;
+    si_again = v_field(p, "", si_apply_now);
+    si_again->flags = V_SECRET;
+    view_t *row = v_box(p, V_ROW);
+    si_apply = v_button(row, "Turn on", si_apply_now);
+    si_apply->flags = UI_BTN_DEFAULT;
+    v_spacer(row);
+    si_msg = v_label(p, "");
+    si_msg->color = UI_C_SECONDARY;
+    si_mode = signin_on() == 1 ? SI_PASSWORD : SI_OFF;
+    signin_refresh();
+}
+
 /* ---- Display, About ------------------------------------------------------- */
 
 static void build_display(view_t *p) {
@@ -639,6 +757,7 @@ int main(int argc, char **argv) {
     build_wallpaper(panes[P_WALLPAPER]);
     build_dock(panes[P_DOCK]);
     build_pointer(panes[P_POINTER]);
+    build_signin(panes[P_SIGNIN]);
     build_display(panes[P_DISPLAY]);
     build_about(panes[P_ABOUT]);
 

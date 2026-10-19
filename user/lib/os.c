@@ -58,6 +58,8 @@ int gfx_cursor(int w, int h, int hot_x, int hot_y, const unsigned int *argb) {
     return (int)os_syscall(SYS_GFX, GFX_CURSOR, w ? (long)&c : 0, 0);
 }
 int gfx_present(void)                           { return (int)os_syscall(SYS_GFX, GFX_PRESENT, 0, 0); }
+int gfx_begin_keep(void)                        { return (int)os_syscall(SYS_GFX, GFX_BEGIN, 2, 0); }
+int gfx_release(void)                           { return (int)os_syscall(SYS_GFX, GFX_END, 1, 0); }
 int gfx_end(void)                               { return (int)os_syscall(SYS_GFX, GFX_END, 0, 0); }
 int gfx_sync(void)                              { return (int)os_syscall(SYS_GFX, GFX_SYNC, 0, 0); }
 int gfx_gpu(const struct os_gpu_op *op)          { return (int)os_syscall(SYS_GFX, GFX_GPU, (long)op, 0); }

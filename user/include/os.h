@@ -67,6 +67,8 @@ int getmouse(struct os_mouse *m);            /* 1 if there is a mouse; takes it 
 int gfx_info(struct os_gfx_info *info);      /* 0, or SYSERR_NOENT in VGA text mode */
 int gfx_begin(void);                         /* take the screen below the status bar */
 int gfx_begin_full(void);
+int gfx_begin_keep(void);                    /* the whole screen, what is on it kept (the desktop after the login) */
+int gfx_release(void);                       /* let go of the screen, the console not redrawn (the next program draws over it) */
 /* The screen-sized frame your blits come from: the GPU copies straight from it
  * (no copy by the CPU) -> 0; SYSERR_AGAIN: draw all of it once first. */
 int gfx_surface(const unsigned int *pixels, int w, int h, int stride);
@@ -153,6 +155,9 @@ int wifi_disconnect(void);
 int volume(int set);                          /* 0-100 sets, -1 reads -> the volume */
 int battery(void);                            /* percent | 0x100 charging, SYSERR_NOENT none */
 int power(int restart);                       /* 0 shut down, 1 restart: returns only on failure */
+int password_change(const char *old, const char *now);   /* your own sign-in: now "" turns it off -> 0, SYSERR_AUTH */
+int signin_on(void);                          /* 1: your account has a PIN or password */
+int accounts(struct os_account *list, int max);           /* root only: the login screen's profiles -> count */
 int setup_needed(void);                       /* 1: no accounts yet (first start) */
 int setup_accounts(const char *name, const char *password);   /* 0; -2 bad name, -3 bad password */
 void setup_text(void);                        /* the first-start questions on the console */
