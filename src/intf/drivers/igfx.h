@@ -17,6 +17,7 @@ const char *igfx_render_status(void);
  * checked against the CPU at boot (into the log). -> 0: the desktop may use them. */
 int igfx_gpu_init(void);
 int igfx_gpu_ready(void);
+int igfx_panel_bpc(void);                /* the pipe's bits a colour: 6, 8, 10, 12 (8 if unknown) */
 const char *igfx_gpu_status(void);
 /* For gfx GFX_GPU, in the calling program's address space (`root`). -> 0 done. */
 int igfx_gpu_material(uint64_t root, uint32_t *samp, uint32_t *scratch, int bw, int bh,

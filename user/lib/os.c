@@ -62,6 +62,8 @@ int gfx_end(void)                               { return (int)os_syscall(SYS_GFX
 int gfx_sync(void)                              { return (int)os_syscall(SYS_GFX, GFX_SYNC, 0, 0); }
 int gfx_gpu(const struct os_gpu_op *op)          { return (int)os_syscall(SYS_GFX, GFX_GPU, (long)op, 0); }
 int gfx_gpu_draw(const struct os_gpu_draws *d)   { return (int)os_syscall(SYS_GFX, GFX_GPU_DRAW, (long)d, 0); }
+int gfx_wait(void)                               { return (int)os_syscall(SYS_GFX, GFX_WAIT, 0, 0); }
+int gfx_depth(void)                              { return (int)os_syscall(SYS_GFX, GFX_DEPTH, 0, 0); }
 int gfx_copy(const struct os_copy *items, int n) {
     struct os_copy_list l = { n, items };
     return (int)os_syscall(SYS_GFX, GFX_COPY, (long)&l, 0);

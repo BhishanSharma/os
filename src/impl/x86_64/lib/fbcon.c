@@ -524,6 +524,24 @@ void fbcon_flip_poll(void) {
 /* -> 1: queued for the next refresh, after waiting for the frame before to
  * be shown (this paces the desktop at the screen's rate); 0: nothing to do
  * (no page flipping). */
+/* Until the frame before is on the screen (at most 100 ms). 1 ms at a time:
+ * the timer's wake-up can come between setting flip_waiting and blocking,
+ * and a 20 ms block then lost a whole 20 ms (hitches of 20-80 ms). */
+static void wait_shown(void) {
+    for (int tries = 0; !igfx_flip_done() && tries < 100; tries++) {
+        flip_waiting = 1;
+        task_block((const void *)&flip_waiting, 1);
+    }
+}
+
+/* GFX_WAIT: the frame before copied, flipped and shown, so the next one is
+ * drawn from the newest input and shown at the next refresh. */
+void fbcon_wait_shown(void) {
+    if (!flip_on) return;
+    pending_finish(1);
+    wait_shown();
+}
+
 int fbcon_present(void) {
     if (!flip_on) return 0;
     pending_finish(1);                              /* the frame before: copied and flipped */
@@ -531,10 +549,7 @@ int fbcon_present(void) {
         npre = 0;
         return 0;
     }
-    for (int tries = 0; !igfx_flip_done() && tries < 5; tries++) {
-        flip_waiting = 1;
-        task_block((const void *)&flip_waiting, 20);
-    }
+    wait_shown();
     int target = ram_pair ? (front == 1 ? 2 : 1) : !front;   /* with the blitter: our two RAM buffers */
     int gpu = ram_pair && (surface ? igfx_blitter_ready() : igfx_copy_prepare(shadow) == 0);
     uint8_t *dst = target ? (uint8_t *)igfx_buffer(target) : fb_base;

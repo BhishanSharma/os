@@ -60,6 +60,9 @@ static uint32_t width, height, pitch;
 static int ok, cursor_on, cursor_hx, cursor_hy;
 static uint32_t *cursor_va, *back_va, *back2_va;
 static uint32_t flipped_to;
+static int panel_bpc = 8;
+
+int igfx_panel_bpc(void) { return panel_bpc; }
 static char status[160] = "no Intel graphics";
 
 static uint32_t rd(uint32_t r) { return *(volatile uint32_t *)(regs + r + (uint32_t)pipe * PIPE_STRIDE); }
@@ -159,15 +162,15 @@ int igfx_init(const fb_info_t *fb) {
      * shows a gradient as bands four levels wide. i915 turns dithering on
      * for it; the firmware may not have. */
     uint32_t misc = rd(PIPE_MISC), bpc = (misc >> 5) & 7;
+    panel_bpc = bpc == 2 ? 6 : bpc == 1 ? 10 : bpc == 3 ? 12 : 8;
     char ml[160];
     k_snprintf(ml, sizeof(ml), "igfx: pipe %c: misc %x (%s bpc, dithering %s), plane ctl %x\n", 'A' + pipe, misc,
                bpc == 0 ? "8" : bpc == 1 ? "10" : bpc == 2 ? "6" : bpc == 3 ? "12" : "?",
                (misc & PIPE_MISC_DITHER) ? "on" : "off", rd(PLANE_CTL));
     print_log(ml);
-    if (bpc == 2 && (misc & (PIPE_MISC_DITHER | 3u << 2)) != (PIPE_MISC_DITHER | 1u << 2)) {
-        /* spatio-temporal (1): the pattern also changes from frame to frame,
-         * which a 6-bit panel needs for a dark gradient (spatial alone left bands) */
-        wr(PIPE_MISC, (misc & ~(3u << 2)) | PIPE_MISC_DITHER | 1u << 2);
+    if (bpc == 2 && !(misc & PIPE_MISC_DITHER)) {
+        /* spatial (the firmware's choice too; spatio-temporal flickered and kept the bands) */
+        wr(PIPE_MISC, (misc & ~(3u << 2)) | PIPE_MISC_DITHER);
         k_snprintf(ml, sizeof(ml), "igfx: pipe %c: dithering on (misc %x)\n", 'A' + pipe, rd(PIPE_MISC));
         print_log(ml);
     }

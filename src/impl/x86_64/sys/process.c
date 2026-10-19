@@ -2159,6 +2159,12 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
             if (!gfx_mine(me)) return SYSERR_PERM;
             fbcon_sync();
             return 0;
+        case GFX_DEPTH:
+            return igfx_panel_bpc();
+        case GFX_WAIT:
+            if (!gfx_mine(me)) return SYSERR_PERM;
+            fbcon_wait_shown();
+            return 0;
         case GFX_GPU: {
             if (!gfx_mine(me)) return SYSERR_PERM;
             if (!igfx_gpu_ready()) return SYSERR_NOENT;

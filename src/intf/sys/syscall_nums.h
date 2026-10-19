@@ -298,6 +298,8 @@ struct os_task {
 #define GFX_CURSOR   4   /* arg = struct os_cursor *: the kernel draws the pointer (0: stop) -> 0 */
 #define GFX_GPU      9   /* arg = struct os_gpu_op *: do it with the GPU's shaders (docs/GPU.md)
                             -> 0 done, else do it on the CPU (no GPU, or not now) */
+#define GFX_WAIT     11  /* wait until the frame presented last is on the screen (then read input, draw) -> 0 */
+#define GFX_DEPTH    12  /* -> the bits a colour the screen shows (6 on many laptop panels: dither for it; 8 if unknown) */
 #define GFX_GPU_DRAW 10  /* arg = struct os_gpu_draws *: drawings onto a canvas by the GPU, in order,
                             one batch -> 0 done, else draw them all on the CPU */
 

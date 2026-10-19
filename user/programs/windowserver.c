@@ -1550,10 +1550,19 @@ static const unsigned char bayer8[64] = {
     60, 28, 52, 20, 62, 30, 54, 22, 3, 35, 11, 43, 1, 33, 9, 41, 51, 19, 59, 27, 49, 17, 57, 25,
     15, 47, 7, 39, 13, 45, 5, 37, 63, 31, 55, 23, 61, 29, 53, 21 };
 
+/* The screen's step in 8-bit levels: 4 on a 6-bit panel, which drops the two
+ * low bits (its own dithering did not hide the steps: bands four levels
+ * apart), so the dither works in its steps; 1 otherwise. */
+static int wall_step = 1;
+
+static int dith(int v, int t) {
+    int q = (v + t * wall_step) / (256 * wall_step) * wall_step;
+    return q > 255 ? 255 : q < 0 ? 0 : q;
+}
+
 static unsigned dither16(c16 c, int x, int y) {
     int t = bayer8[(y & 7) * 8 + (x & 7)] * 4 + 2;
-    int r = clampi((c.r + t) >> 8, 0, 255), g = clampi((c.g + t) >> 8, 0, 255), b = clampi((c.b + t) >> 8, 0, 255);
-    return (unsigned)(r << 16 | g << 8 | b);
+    return (unsigned)(dith(c.r, t) << 16 | dith(c.g, t) << 8 | dith(c.b, t));
 }
 
 /* A picture file, scaled to cover the screen (the middle of it, cropped):
@@ -1669,6 +1678,8 @@ static void door_wallpaper(void) {
 }
 
 static void make_wallpaper(void) {
+    int depth = gfx_depth();
+    wall_step = depth > 0 && depth < 8 ? 1 << (8 - depth) : 1;
     if (cfg->wall_kind == WS_WALL_PICTURE && cfg->wall_path[0] && wall_picture(cfg->wall_path)) return;
     if (cfg->wall_kind == WS_WALL_COLOR) {
         for (long i = 0; i < (long)W * H; i++) wallpaper[i] = cfg->wall_color & 0xFFFFFF;
@@ -3418,7 +3429,14 @@ int main(int argc, char **argv) {
 
     unsigned long last_tidy = 0, last_frame = uptime_ms();
     damage(0, 0, W, H);
+    int shown = 0;                                     /* a frame was presented: wait until it is on the screen */
     for (;;) {
+        if (shown) {                                   /* then the input is read, so the next frame has the newest */
+            unsigned long tw = tsc();
+            gfx_wait();
+            st_sync += tsc() - tw;
+            shown = 0;
+        }
         unsigned long tl = tsc();
         mutex_lock(&lock);
         st_lock += tsc() - tl;
@@ -3497,6 +3515,7 @@ int main(int argc, char **argv) {
          * windows (apps launched from the Dock never appeared). */
         if (fresh) {
             paced = gfx_present() > 0;                /* tear-free on Intel graphics */
+            shown = paced;
             unpresented = 0;
             if (read && gpu_frames) gfx_sync();       /* (the GPU's copies of them are done) */
             static int surface_tries;                 /* the GPU takes frames from scr itself */

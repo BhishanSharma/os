@@ -75,6 +75,8 @@ int gfx_sync(void);                          /* the GPU is done reading that fra
  * otherwise draw them yourself. */
 int gfx_gpu(const struct os_gpu_op *op);       /* frosted glass, fades on the GPU's shaders -> 0, else draw on the CPU */
 int gfx_gpu_draw(const struct os_gpu_draws *d); /* shadows, corners, pictures on the GPU (all of them) -> 0, else draw on the CPU */
+int gfx_wait(void);                           /* the frame presented last is on the screen (then read input and draw) */
+int gfx_depth(void);                          /* bits a colour the screen shows (6, 8, ...) */
 int gfx_copy(const struct os_copy *items, int n);                    /* the whole screen, status bar too (the desktop) */
 int gfx_blit(int x, int y, int w, int h, const unsigned int *pixels, int stride);   /* 0x00RRGGBB */
 int gfx_end(void);
