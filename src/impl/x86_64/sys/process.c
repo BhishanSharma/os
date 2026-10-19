@@ -2084,6 +2084,13 @@ static int64_t sys_mouse(uint64_t ptr) {
 /* gfx(op, arg): pixels for programs such as the image viewer. */
 static int graphics_full;                      /* GFX_BEGIN with 1: no status bar */
 
+/* The program drawing the screen: its own threads (the window server's painters) too. */
+static int gfx_mine(int me) {
+    if (graphics_owner == me) return 1;
+    task_t *o = graphics_owner ? task_by_pid(graphics_owner) : 0;
+    return o && o->process && o->process == task_current()->process;
+}
+
 static int64_t sys_gfx(uint64_t op, uint64_t arg) {
     uint32_t width, height, cell_w, cell_h, grid_x, grid_y;
     fbcon_geometry(&width, &height, &cell_w, &cell_h, &grid_x, &grid_y);
@@ -2108,7 +2115,7 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
              * (wait()) has happened on another core. */
             if (foreground_pid != me && (!foreground_pid || task_current()->parent != foreground_pid))
                 return SYSERR_PERM;
-            if (graphics_owner && graphics_owner != me) return SYSERR_AGAIN;
+            if (graphics_owner && !gfx_mine(me)) return SYSERR_AGAIN;
             graphics_owner = me;
             graphics_full = arg == 1;                        /* the desktop: the whole screen */
             print_set_graphics(graphics_full ? 2 : 1);
@@ -2116,7 +2123,7 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
             fbcon_fill(0, top, width, height - top, 0);
             return 0;
         case GFX_BLIT: {
-            if (graphics_owner != me) return SYSERR_PERM;
+            if (!gfx_mine(me)) return SYSERR_PERM;
             if (!user_range_ok(arg, sizeof(struct os_blit), 0)) return SYSERR_FAULT;
             struct os_blit b = *(const struct os_blit *)arg;
             if (b.w <= 0 || b.h <= 0 || b.stride < b.w || b.w > 16384 || b.h > 16384) return SYSERR_BADCALL;
@@ -2135,7 +2142,7 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
             return 0;
         }
         case GFX_CURSOR: {                               /* the pointer, drawn by the kernel */
-            if (graphics_owner != me) return SYSERR_PERM;
+            if (!gfx_mine(me)) return SYSERR_PERM;
             if (!arg) return fbcon_cursor_set(0, 0, 0, 0, 0, 0, 0);
             if (!user_range_ok(arg, sizeof(struct os_cursor), 0)) return SYSERR_FAULT;
             struct os_cursor c = *(const struct os_cursor *)arg;
@@ -2146,14 +2153,14 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
             return fbcon_cursor_set(c.pixels, c.w, c.h, c.hot_x, c.hot_y, x, y) == 0 ? 0 : SYSERR_NOMEM;
         }
         case GFX_PRESENT:
-            if (graphics_owner != me) return SYSERR_PERM;
+            if (!gfx_mine(me)) return SYSERR_PERM;
             return fbcon_present();
         case GFX_SYNC:
-            if (graphics_owner != me) return SYSERR_PERM;
+            if (!gfx_mine(me)) return SYSERR_PERM;
             fbcon_sync();
             return 0;
         case GFX_GPU: {
-            if (graphics_owner != me) return SYSERR_PERM;
+            if (!gfx_mine(me)) return SYSERR_PERM;
             if (!igfx_gpu_ready()) return SYSERR_NOENT;
             if (!user_range_ok(arg, sizeof(struct os_gpu_op), 0)) return SYSERR_FAULT;
             struct os_gpu_op g = *(const struct os_gpu_op *)arg;
@@ -2179,14 +2186,14 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
             return SYSERR_BADCALL;
         }
         case GFX_GPU_DRAW: {
-            if (graphics_owner != me) return SYSERR_PERM;
+            if (!gfx_mine(me)) return SYSERR_PERM;
             if (!igfx_gpu_ready()) return SYSERR_NOENT;
             if (!user_range_ok(arg, sizeof(struct os_gpu_draws), 0)) return SYSERR_FAULT;
             struct os_gpu_draws d = *(const struct os_gpu_draws *)arg;
             return igfx_gpu_draw(task_current()->root, &d, user_range_ok) ? SYSERR_NOENT : 0;
         }
         case GFX_COPY: {
-            if (graphics_owner != me) return SYSERR_PERM;
+            if (!gfx_mine(me)) return SYSERR_PERM;
             if (!user_range_ok(arg, sizeof(struct os_copy_list), 0)) return SYSERR_FAULT;
             struct os_copy_list l = *(const struct os_copy_list *)arg;
             if (l.n < 0 || l.n > 64 || !user_range_ok((uint64_t)(uintptr_t)l.items, (uint64_t)l.n * sizeof(struct os_copy), 0))
@@ -2214,7 +2221,7 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
             return 0;
         }
         case GFX_SURFACE: {
-            if (graphics_owner != me) return SYSERR_PERM;
+            if (!gfx_mine(me)) return SYSERR_PERM;
             if (!user_range_ok(arg, sizeof(struct os_blit), 0)) return SYSERR_FAULT;
             struct os_blit b = *(const struct os_blit *)arg;
             if (b.w != (int)width || b.h != (int)height || b.stride < b.w) return SYSERR_BADCALL;
@@ -2238,7 +2245,7 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
             return r == 0 ? 0 : SYSERR_NOENT;
         }
         case GFX_END:
-            if (graphics_owner != me) return SYSERR_PERM;
+            if (!gfx_mine(me)) return SYSERR_PERM;
             graphics_owner = 0;
             fbcon_cursor_set(0, 0, 0, 0, 0, 0, 0);
             print_set_graphics(0);

@@ -1529,15 +1529,36 @@ static void damage_cursor(void) {
 
 /* ---- Wallpaper ------------------------------------------------------------ */
 
-static unsigned mix(unsigned a, unsigned b, int t) {          /* t 0..256 */
-    int r = (int)(a >> 16 & 255) + ((int)(b >> 16 & 255) - (int)(a >> 16 & 255)) * t / 256;
-    int g = (int)(a >> 8 & 255) + ((int)(b >> 8 & 255) - (int)(a >> 8 & 255)) * t / 256;
-    int bl = (int)(a & 255) + ((int)(b & 255) - (int)(a & 255)) * t / 256;
-    return (unsigned)(r << 16 | g << 8 | bl);
+/* Wallpaper colours are worked out in 1/256ths of a level (c16) and only
+ * rounded to 8 bits at the end, with an 8x8 ordered dither: a gradient's
+ * steps (a dark one has a few levels over the whole screen) become an even
+ * grain too fine to see, not bands. */
+typedef struct { int r, g, b; } c16;                  /* 0..65280 */
+
+static c16 C16(unsigned c) { return (c16){ (int)(c >> 16 & 255) << 8, (int)(c >> 8 & 255) << 8, (int)(c & 255) << 8 }; }
+
+static c16 lerp16(c16 a, c16 b, long num, long den) {   /* a towards b by num/den */
+    if (den <= 0) return a;
+    if (num < 0) num = 0;
+    if (num > den) num = den;
+    return (c16){ a.r + (int)((b.r - a.r) * num / den), a.g + (int)((b.g - a.g) * num / den),
+                  a.b + (int)((b.b - a.b) * num / den) };
 }
 
-/* A picture file, scaled to cover the screen (the middle of it, cropped),
- * each screen pixel the average of the picture's pixels under it. -> 0 failed. */
+static const unsigned char bayer8[64] = {
+    0, 32, 8, 40, 2, 34, 10, 42, 48, 16, 56, 24, 50, 18, 58, 26, 12, 44, 4, 36, 14, 46, 6, 38,
+    60, 28, 52, 20, 62, 30, 54, 22, 3, 35, 11, 43, 1, 33, 9, 41, 51, 19, 59, 27, 49, 17, 57, 25,
+    15, 47, 7, 39, 13, 45, 5, 37, 63, 31, 55, 23, 61, 29, 53, 21 };
+
+static unsigned dither16(c16 c, int x, int y) {
+    int t = bayer8[(y & 7) * 8 + (x & 7)] * 4 + 2;
+    int r = clampi((c.r + t) >> 8, 0, 255), g = clampi((c.g + t) >> 8, 0, 255), b = clampi((c.b + t) >> 8, 0, 255);
+    return (unsigned)(r << 16 | g << 8 | b);
+}
+
+/* A picture file, scaled to cover the screen (the middle of it, cropped):
+ * smaller than the screen, bilinear; larger, each screen pixel the average of
+ * the picture's pixels under it. Dithered either way. -> 0 failed. */
 static int wall_picture(const char *path) {
     image_t img;
     const char *why;
@@ -1552,6 +1573,24 @@ static int wall_picture(const char *path) {
     } else {
         ch = cw * H / W;
         y0 = (img.height - ch) / 2;
+    }
+    if (cw < W) {                                      /* enlarged: bilinear, sampled at pixel centres */
+        for (int y = 0; y < H; y++) {
+            long v = ((2L * y + 1) * ch * 128) / H - 128, ty = v >> 8, fy = v & 255;
+            if (ty < 0) { ty = 0; fy = 0; }
+            if (ty >= ch - 1) { ty = ch - 1; fy = 0; }
+            const unsigned *r0 = img.pixels + (y0 + ty) * img.width, *r1 = fy ? r0 + img.width : r0;
+            for (int x = 0; x < W; x++) {
+                long u = ((2L * x + 1) * cw * 128) / W - 128, tx = u >> 8, fx = u & 255;
+                if (tx < 0) { tx = 0; fx = 0; }
+                if (tx >= cw - 1) { tx = cw - 1; fx = 0; }
+                long i = x0 + tx, j = fx ? i + 1 : i;
+                c16 top = lerp16(C16(r0[i]), C16(r0[j]), fx, 256), bot = lerp16(C16(r1[i]), C16(r1[j]), fx, 256);
+                wallpaper[(long)y * W + x] = dither16(lerp16(top, bot, fy, 256), x, y);
+            }
+        }
+        image_free(&img);
+        return 1;
     }
     for (int y = 0; y < H; y++) {
         long sy0 = y0 + y * ch / H, sy1 = y0 + (y + 1) * ch / H;
@@ -1568,7 +1607,8 @@ static int wall_picture(const char *path) {
                     b += c & 255;
                     n++;
                 }
-            wallpaper[(long)y * W + x] = (unsigned)(r / n << 16 | g / n << 8 | b / n);
+            c16 avg = { (int)((r << 8) / n), (int)((g << 8) / n), (int)((b << 8) / n) };
+            wallpaper[(long)y * W + x] = dither16(avg, x, y);
         }
     }
     image_free(&img);
@@ -1578,14 +1618,14 @@ static int wall_picture(const char *path) {
 /* The Lobby's own picture (the default): a ring of light on a quiet navy-grey
  * wall, a floor that reflects it. Integer maths only. The other gradients and
  * pictures of System Settings stay as they were. */
-static int glow(int e, int w, int amp) {                 /* a soft peak of height amp, width w, at e = 0 */
+static long glow(int e, int w, int amp) {                /* a soft peak of height amp (of 256), width w, at e = 0: in 1/65536 */
     long ww = (long)w * w;
-    return (int)(amp * ww / (ww + (long)e * e));
+    return (long)amp * 256 * ww / (ww + (long)e * e);
 }
 
-static int glow2(int e, int w, int amp) {                /* the same, falling off faster (a halo with no visible end) */
+static long glow2(int e, int w, int amp) {               /* the same, falling off faster (a halo with no visible end) */
     long ww = (long)w * w, den = ww + (long)e * e;
-    return (int)((long)amp * ww / den * ww / den);
+    return (long)amp * 256 * ww / den * ww / den;
 }
 
 static void door_wallpaper(void) {
@@ -1603,29 +1643,28 @@ static void door_wallpaper(void) {
         core = TH.accent; halo = 0xFFFFFF; fl0 = 0xDCE1E9; fl1 = 0xC6CDD9;
         core_a = 130; halo_a = 150; refl_a = 90;
     }
+    c16 B0 = C16(bg0), B1 = C16(bg1), NEAR = C16(in_near), FAR = C16(in_far), CORE = C16(core), HALO = C16(halo),
+        F0 = C16(fl0), F1 = C16(fl1);
+    long dn = (long)H * 3 + (long)W * 2;
     for (int y = 0; y < H; y++)
         for (int x = 0; x < W; x++) {
             long dx = x - cx, dy = y - cy, d2 = dx * dx + dy * dy;
-            int diag = (int)(((long)y * 3 + (long)(W - x) * 2) * 256 / ((long)H * 3 + (long)W * 2));
-            unsigned c = lerp_rgb(bg0, bg1, (unsigned)diag);
+            c16 c = lerp16(B0, B1, (long)y * 3 + (long)(W - x) * 2, dn);
             if (y > yh) {                                                 /* the floor and the ring's reflection */
+                c = lerp16(F0, F1, y - yh, H - yh);
                 int tf = (int)((long)(y - yh) * 256 / (H - yh));
-                c = lerp_rgb(fl0, fl1, (unsigned)tf);
                 long ym = (long)2 * yh - y - cy, m2 = dx * dx + ym * ym;
                 int fade = 256 - tf;
-                if (m2 < (long)R * R) c = lerp_rgb(c, in_near, (unsigned)(34 * fade / 256));
-                if (m2 < ro * ro) c = lerp_rgb(c, halo, (unsigned)glow2(isq(m2) - R, w3, refl_a * fade / 256));
-                c = lerp_rgb(c, core, (unsigned)glow(y - yh, 3 * S, 26));    /* the horizon, a hair of light */
+                if (m2 < (long)R * R) c = lerp16(c, NEAR, 34 * fade, 65536);
+                if (m2 < ro * ro) c = lerp16(c, HALO, glow2(isq(m2) - R, w3, refl_a * fade / 256), 65536);
+                c = lerp16(c, CORE, glow(y - yh, 3 * S, 26), 65536);      /* the horizon, a hair of light */
             } else if (d2 < ro * ro) {
                 int d = isq(d2), e = d - R;
-                if (e < 0) {                                              /* inside: lighter towards the ring */
-                    int near = 256 - clampi((-e) * 256 / (R * 70 / 100), 0, 256);
-                    c = lerp_rgb(in_far, in_near, (unsigned)near);
-                }
-                c = lerp_rgb(c, halo, (unsigned)glow2(e, w2, halo_a));
-                c = lerp_rgb(c, core, (unsigned)glow(e, w1, core_a));
+                if (e < 0) c = lerp16(FAR, NEAR, 65536 - clampi((-e) * 65536 / (R * 70 / 100), 0, 65536), 65536);   /* inside: lighter towards the ring */
+                c = lerp16(c, HALO, glow2(e, w2, halo_a), 65536);
+                c = lerp16(c, CORE, glow(e, w1, core_a), 65536);
             }
-            wallpaper[(long)y * W + x] = c;
+            wallpaper[(long)y * W + x] = dither16(c, x, y);
         }
 }
 
@@ -1643,7 +1682,7 @@ static void make_wallpaper(void) {
     ui_wall_gradient(cfg->wall_gradient, dark, &a, &b);
     for (int y = 0; y < H; y++)
         for (int x = 0; x < W; x++)
-            wallpaper[(long)y * W + x] = mix(a, b, (int)(((long)y * 4 + x) * 256 / ((long)H * 4 + W)));
+            wallpaper[(long)y * W + x] = dither16(lerp16(C16(a), C16(b), (long)y * 4 + x, (long)H * 4 + W), x, y);
 }
 
 /* ---- The blur material -------------------------------------------------------
@@ -1665,8 +1704,58 @@ static int gpu_done(int result) {                     /* 8 failures in a row: th
         gpu_fails = 0;
         return 1;
     }
-    if (++gpu_fails >= 8) gpu_shaders = 0;
+    if (++gpu_fails >= 8 && gpu_shaders) {
+        gpu_shaders = 0;
+        printf("windowserver: the GPU said no 8 times in a row (%d): drawing on the CPU from now on\n", result);
+    }
     return 0;
+}
+
+/* ---- Frame times (into the log, every 2 s of drawing) ------------------------ */
+static unsigned long tsc(void) {
+    unsigned lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return (unsigned long)hi << 32 | lo;
+}
+
+static int motion(void);
+static int st_batches, st_cpu_lists, st_loops;         /* GPU batches, lists the CPU drew, turns of the loop */
+static unsigned long st_lock, st_sync, st_sleep;       /* TSC ticks waiting for the lock, the GPU, sleeping */
+
+static void frame_stats(long area, unsigned long draw, unsigned long show) {
+    static unsigned long t_ms, t_tsc, per_ms, sum_d, max_d, sum_s, max_s, sum_a, start;
+    static int frames;
+    unsigned long now = uptime_ms();
+    if (!t_ms) {
+        t_ms = now;
+        t_tsc = tsc();
+    } else if (!per_ms && now - t_ms >= 1000) {
+        per_ms = (tsc() - t_tsc) / (now - t_ms);       /* the TSC's rate */
+    }
+    if (!per_ms) return;
+    if (!frames) {                                     /* (an idle spell before it does not count) */
+        start = now;
+        st_batches = st_cpu_lists = st_loops = 0;
+        st_lock = st_sync = st_sleep = 0;
+    }
+    frames++;
+    sum_d += draw;
+    sum_s += show;
+    sum_a += (unsigned long)area;
+    if (draw > max_d) max_d = draw;
+    if (show > max_s) max_s = show;
+    if (now - start < 2000) return;
+    printf("windowserver: %d frames in %lu ms: drawing avg %lu.%lu max %lu ms, showing avg %lu.%lu max %lu ms, "
+           "%lu kpx a frame, %d GPU batches, %d CPU lists, %s\n",
+           frames, now - start, sum_d / frames / per_ms, sum_d / frames * 10 / per_ms % 10, max_d / per_ms,
+           sum_s / frames / per_ms, sum_s / frames * 10 / per_ms % 10, max_s / per_ms, sum_a / frames / 1000,
+           st_batches, st_cpu_lists, motion() ? "in motion" : n_painters > 1 ? "painters" : "one core");
+    printf("windowserver:   %d loops, waited %lu ms for the lock, %lu for the GPU, slept %lu\n", st_loops,
+           st_lock / per_ms, st_sync / per_ms, st_sleep / per_ms);
+    frames = 0;
+    sum_d = max_d = sum_s = max_s = sum_a = 0;
+    st_batches = st_cpu_lists = st_loops = 0;
+    st_lock = st_sync = st_sleep = 0;
 }
 
 /* ---- Drawing lists -------------------------------------------------------
@@ -1735,9 +1824,11 @@ static int gd_run(painter_t *p, struct os_gpu_draws *d) {
         d->cy1 = p->c.cy1;
         if (gpu_done(gfx_gpu_draw(d))) {
             d->n = 0;
+            st_batches++;
             return 1;
         }
     }
+    if (d->n) st_cpu_lists++;
     for (int i = 0; i < d->n; i++) {
         const struct os_gpu_draw *o = &d->op[i];
         if (o->op == GD_SHADOW) ui_shadow_ex(&p->c, o->x, o->y, o->w, o->h, o->r, o->size, o->alpha, o->flags & 1);
@@ -3328,7 +3419,10 @@ int main(int argc, char **argv) {
     unsigned long last_tidy = 0, last_frame = uptime_ms();
     damage(0, 0, W, H);
     for (;;) {
+        unsigned long tl = tsc();
         mutex_lock(&lock);
+        st_lock += tsc() - tl;
+        st_loops++;
         check_settings();
         unsigned long now = uptime_ms();
         int dt = (int)(now - last_frame);
@@ -3384,8 +3478,14 @@ int main(int argc, char **argv) {
             last_tidy = uptime_ms();
             tidy();
         }
+        unsigned long ts = tsc();
         if (gpu_frames) gfx_sync();                  /* the GPU has read the frame before */
+        st_sync += tsc() - ts;
+        long area = 0;
+        for (int d = 0; d < ndmg; d++) area += (long)(dmg[d].x1 - dmg[d].x0) * (dmg[d].y1 - dmg[d].y0);
+        unsigned long t0 = tsc();
         int fresh = compose(), paced = 0, read = 0;
+        unsigned long t1 = tsc();
         for (int k = 0; k < MAX_WINDOWS; k++)          /* the windows this frame was made from */
             if (wins[k].used && wins[k].drawn != wins[k].seen) {
                 wins[k].drawn = wins[k].seen;
@@ -3412,6 +3512,9 @@ int main(int argc, char **argv) {
                 if (wins[k].used) wins[k].s->released = wins[k].drawn;
             mutex_unlock(&lock);
         }
+        if (fresh) frame_stats(area, t1 - t0, tsc() - t1);
+        unsigned long tz = tsc();
         if (!paced) sleep_ms(5);                      /* else the screen's refresh set the pace */
+        st_sleep += tsc() - tz;
     }
 }

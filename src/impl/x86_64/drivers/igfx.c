@@ -31,6 +31,8 @@
 #define CUR_WM_SAGV_TRANS 0x7015C
 #define CUR_WM_TRANS     0x70168
 #define CUR_BUF_CFG      0x7017C
+#define PIPE_MISC        0x70030            /* (Gen12: the pipe's; bits 7:5 bpc, 4 dithering) */
+#define PIPE_MISC_DITHER (1u << 4)
 #define PLANE_CTL        0x70180
 #define PLANE_STRIDE     0x70188
 #define PLANE_SIZE       0x70190
@@ -152,6 +154,22 @@ int igfx_init(const fb_info_t *fb) {
         k_snprintf(status, sizeof(status), "Intel %04x: no plane shows the %ux%u framebuffer (software pointer)",
                    dev, fb->width, fb->height);
         return -1;
+    }
+    /* The pipe's colour depth: a 6-bit panel's pipe (6 bpc) without dithering
+     * shows a gradient as bands four levels wide. i915 turns dithering on
+     * for it; the firmware may not have. */
+    uint32_t misc = rd(PIPE_MISC), bpc = (misc >> 5) & 7;
+    char ml[160];
+    k_snprintf(ml, sizeof(ml), "igfx: pipe %c: misc %x (%s bpc, dithering %s), plane ctl %x\n", 'A' + pipe, misc,
+               bpc == 0 ? "8" : bpc == 1 ? "10" : bpc == 2 ? "6" : bpc == 3 ? "12" : "?",
+               (misc & PIPE_MISC_DITHER) ? "on" : "off", rd(PLANE_CTL));
+    print_log(ml);
+    if (bpc == 2 && (misc & (PIPE_MISC_DITHER | 3u << 2)) != (PIPE_MISC_DITHER | 1u << 2)) {
+        /* spatio-temporal (1): the pattern also changes from frame to frame,
+         * which a 6-bit panel needs for a dark gradient (spatial alone left bands) */
+        wr(PIPE_MISC, (misc & ~(3u << 2)) | PIPE_MISC_DITHER | 1u << 2);
+        k_snprintf(ml, sizeof(ml), "igfx: pipe %c: dithering on (misc %x)\n", 'A' + pipe, rd(PIPE_MISC));
+        print_log(ml);
     }
     uint32_t s = rd(PLANE_SURF);
     surf0 = s & ~0xFFFu;
@@ -972,6 +990,37 @@ static void gpu_pass(int k, const gpu_params_t *p, uint32_t gx, uint32_t gy) {
     pc(PC0_HDC_FLUSH, PC_CS_STALL | PC_DC_FLUSH, 0, 0);   /* the next pass reads what this one wrote */
 }
 
+/* Where a batch's time goes (into the log every 400 batches): 0 preparing
+ * (mapping, flushing the CPU's caches), 1 waking the GPU, 2 running, 3
+ * flushing after. In TSC ticks; gtsc_per_ms from igfx_gpu_init. */
+static uint64_t gtsc_per_ms, gst_sum[4], gst_max[4];
+static uint32_t gst_n;
+
+static uint64_t gtsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return (uint64_t)hi << 32 | lo;
+}
+
+static void gst_add(int phase, uint64_t t) {
+    gst_sum[phase] += t;
+    if (t > gst_max[phase]) gst_max[phase] = t;
+}
+
+static void gst_batch(void) {
+    if (++gst_n < 400 || !gtsc_per_ms) return;
+    uint64_t us = gtsc_per_ms / 1000 ? gtsc_per_ms / 1000 : 1;
+    char line[200];
+    k_snprintf(line, sizeof(line), "igfx: gpu: %u batches, us avg/max: prepare %u/%u, wake %u/%u, run %u/%u, after %u/%u\n",
+               gst_n, (uint32_t)(gst_sum[0] / gst_n / us), (uint32_t)(gst_max[0] / us),
+               (uint32_t)(gst_sum[1] / gst_n / us), (uint32_t)(gst_max[1] / us),
+               (uint32_t)(gst_sum[2] / gst_n / us), (uint32_t)(gst_max[2] / us),
+               (uint32_t)(gst_sum[3] / gst_n / us), (uint32_t)(gst_max[3] / us));
+    print_log(line);
+    gst_n = 0;
+    for (int i = 0; i < 4; i++) gst_sum[i] = gst_max[i] = 0;
+}
+
 /* Submit, wait (at most 50 ms). -> 0 done; on a timeout the GPU is off. */
 static int gpu_run(const char *what) {
     pc(PC0_HDC_FLUSH, PC_CS_STALL | PC_DC_FLUSH | PC_WRITE_IMM | PC_GGTT, rcs_data_g, ++gseq);
@@ -982,14 +1031,18 @@ static int gpu_run(const char *what) {
     clflush_range(params_cpu, MAX_JOBS * 64);
     clflush_range(gstart, (uint64_t)(gc - gstart) * 4);
     clflush_range(&rcs_regs[7], 4);
+    uint64_t tw = gtsc();
     mm_wr(FORCEWAKE_RENDER, 0x00010001);
     uint64_t end = timer_ms() + 2;
     while (!(mm(FORCEWAKE_RENDER_ACK) & 1) && timer_ms() <= end) __asm__ volatile("pause");
+    gst_add(1, gtsc() - tw);
     mm_wr(RCS + EXECLIST_SQ_LO, rcs_desc_lo);
     mm_wr(RCS + EXECLIST_SQ_HI, rcs_desc_hi);
     mm_wr(RCS + EXECLIST_CONTROL, 1);
+    uint64_t tr = gtsc();
     end = timer_ms() + 50;
     while ((int32_t)(*(volatile uint32_t *)rcs_data - gseq) < 0 && timer_ms() < end) __asm__ volatile("pause");
+    gst_add(2, gtsc() - tr);
     int done = (int32_t)(*(volatile uint32_t *)rcs_data - gseq) >= 0;
     if (!done) {
         char line[220];
@@ -1290,6 +1343,11 @@ int igfx_gpu_init(void) {
         ppgtt_pd = phys_to_virt(pd);
         memset(ppgtt_pd, 0, 4096);
     }
+    uint64_t m0 = timer_ms(), spins = 0;             /* the TSC's rate, for the batch times (20 ms) */
+    while (timer_ms() == m0 && ++spins < 400000000ULL) __asm__ volatile("pause");
+    uint64_t ts = gtsc(), m1 = timer_ms();
+    while (timer_ms() < m1 + 20 && ++spins < 800000000ULL) __asm__ volatile("pause");
+    if (timer_ms() >= m1 + 20) gtsc_per_ms = (gtsc() - ts) / (timer_ms() - m1);
     uint64_t pd = phys_of((uint64_t)ppgtt_pd);
     rcs_regs[49] = (uint32_t)(pd >> 32);             /* the render context's PDP0 */
     rcs_regs[51] = (uint32_t)pd;
@@ -1377,6 +1435,18 @@ int igfx_gpu_init(void) {
 
 /* ---- Programs' work (gfx GFX_GPU) --------------------------------------------- */
 
+/* A program's request the GPU will not do (the program draws it): the first
+ * few into the log, with the line of the check that said no. */
+static int refused(int line) {
+    static int n;
+    if (n++ < 24) {
+        char l[80];
+        k_snprintf(l, sizeof(l), "igfx: gpu: refused (igfx.c line %d)\n", line);
+        print_log(l);
+    }
+    return -1;
+}
+
 /* A program's buffer [va, va + bytes) at GPU address `at` (`max` bytes of room) -> its GPU address, 0. */
 static uint32_t map_at(uint32_t at, uint64_t max, uint64_t root, uint64_t va, uint64_t bytes) {
     uint64_t first = va & ~0xFFFULL, span = (va & 0xFFF) + bytes;
@@ -1401,15 +1471,17 @@ static uint32_t map_user(int i, uint64_t root, uint64_t va, uint64_t bytes) {
  * address space (`root`, current). -> 0 */
 int igfx_gpu_material(uint64_t root, uint32_t *samp, uint32_t *scratch, int bw, int bh,
                       uint32_t sat, uint32_t tint, uint32_t alpha, uint32_t *out, int w, int j0, int j1, int bleed) {
-    if (!GOOD(GPU_BOX3) || !GOOD(GPU_SATINT) || !GOOD(GPU_UPSCALE) || bw < 2 || bh < 2 || w < 1 || j0 < 0 || j1 <= j0) return -1;
+    uint64_t t0 = gtsc();
+    if (!GOOD(GPU_BOX3) || !GOOD(GPU_SATINT) || !GOOD(GPU_UPSCALE) || bw < 2 || bh < 2 || w < 1 || j0 < 0 || j1 <= j0) return refused(__LINE__);
     uint64_t small = (uint64_t)bw * bh * 4, rows = (uint64_t)(j1 - j0) * w * 4;
     uint32_t *out0 = out + (uint64_t)j0 * w;
     uint32_t s = map_user(0, root, (uint64_t)samp, small), t = map_user(1, root, (uint64_t)scratch, small),
              o = map_user(2, root, (uint64_t)out0, rows);
-    if (!s || !t || !o) return -1;
+    if (!s || !t || !o) return refused(__LINE__);
     clflush_range(samp, small);                      /* the CPU's samples to memory; */
     clflush_range(scratch, small);                   /* nothing old over what the GPU writes */
     clflush_range(out0, rows);
+    gst_add(0, gtsc() - t0);
     gpu_begin();
     gpu_params_t p;
     memset(&p, 0, sizeof(p));
@@ -1435,19 +1507,24 @@ int igfx_gpu_material(uint64_t root, uint32_t *samp, uint32_t *scratch, int bw, 
     p.h = (uint32_t)(j1 - j0);
     p.a = (uint32_t)bw; p.b = (uint32_t)bh; p.c = (uint32_t)bleed; p.d = (uint32_t)j0;
     gpu_pass(GPU_UPSCALE, &p, ((uint32_t)w + 15) / 16, (uint32_t)(j1 - j0));
-    if (gpu_run("material")) return -1;
+    if (gpu_run("material")) return refused(__LINE__);
+    uint64_t t1 = gtsc();
     clflush_range(out0, rows);                       /* the CPU reads the GPU's picture, not old lines */
+    gst_add(3, gtsc() - t1);
+    gst_batch();
     return 0;
 }
 
 /* A fade: out (w x h, `pitch` pixels a row) = lerp(old (w x h, packed), out, f). */
 int igfx_gpu_fade(uint64_t root, const uint32_t *old, uint32_t *out, int w, int h, int pitch, uint32_t f) {
-    if (!GOOD(GPU_FADE) || w < 1 || h < 1 || pitch < w) return -1;
+    uint64_t t0 = gtsc();
+    if (!GOOD(GPU_FADE) || w < 1 || h < 1 || pitch < w) return refused(__LINE__);
     uint64_t ob = (uint64_t)w * h * 4, db = ((uint64_t)(h - 1) * pitch + w) * 4;
     uint32_t s = map_user(0, root, (uint64_t)old, ob), d = map_user(1, root, (uint64_t)out, db);
-    if (!s || !d) return -1;
+    if (!s || !d) return refused(__LINE__);
     clflush_range(old, ob);
     clflush_range(out, db);
+    gst_add(0, gtsc() - t0);
     gpu_begin();
     gpu_params_t p;
     memset(&p, 0, sizeof(p));
@@ -1459,8 +1536,11 @@ int igfx_gpu_fade(uint64_t root, const uint32_t *old, uint32_t *out, int w, int 
     p.h = (uint32_t)h;
     p.a = f;
     gpu_pass(GPU_FADE, &p, ((uint32_t)w + 15) / 16, (uint32_t)h);
-    if (gpu_run("fade")) return -1;
+    if (gpu_run("fade")) return refused(__LINE__);
+    uint64_t t1 = gtsc();
     clflush_range(out, db);
+    gst_add(3, gtsc() - t1);
+    gst_batch();
     return 0;
 }
 
@@ -1474,19 +1554,20 @@ int igfx_gpu_fade(uint64_t root, const uint32_t *old, uint32_t *out, int w, int 
 static int in16(int v) { return v > -32768 && v < 32768; }
 
 int igfx_gpu_draw(uint64_t root, const struct os_gpu_draws *d, int (*ok)(uint64_t, uint64_t, int)) {
+    uint64_t t0 = gtsc();
     static const int kernel_of[] = { 0, GPU_SHADOW, GPU_OVER, GPU_RCOPY, GPU_SCALED, GPU_RFILL };
     int n = d->n, st = d->stride;
     if (!gpu_ok || n < 1 || n > GD_MAX || st < 1 || st > 8192 || d->cx0 < 0 || d->cy0 < 0 || d->cx1 > st ||
         d->cy1 > 8192 || d->cx1 <= d->cx0 || d->cy1 <= d->cy0)
-        return -1;
+        return refused(__LINE__);
     int rx0[GD_MAX], ry0[GD_MAX], rx1[GD_MAX], ry1[GD_MAX];
     int ux0 = d->cx1, uy0 = d->cy1, ux1 = d->cx0, uy1 = d->cy0;   /* all the regions */
     for (int i = 0; i < n; i++) {
         const struct os_gpu_draw *o = &d->op[i];
-        if (o->op < GD_SHADOW || o->op > GD_FILL || !GOOD(kernel_of[o->op])) return -1;
+        if (o->op < GD_SHADOW || o->op > GD_FILL || !GOOD(kernel_of[o->op])) return refused(__LINE__);
         if (!in16(o->x) || !in16(o->y) || o->w < 1 || o->h < 1 || o->w > 8192 || o->h > 8192 ||
             o->size < 0 || o->size > 1024 || o->r < 0 || o->r > 4096 || o->alpha < 0 || o->alpha > 255)
-            return -1;
+            return refused(__LINE__);
         int g = o->op == GD_SHADOW ? o->size : 0;
         rx0[i] = o->x - g > d->cx0 ? o->x - g : d->cx0;
         ry0[i] = o->y - g > d->cy0 ? o->y - g : d->cy0;
@@ -1501,9 +1582,9 @@ int igfx_gpu_draw(uint64_t root, const struct os_gpu_draws *d, int (*ok)(uint64_
     if (ux1 <= ux0) return 0;                        /* nothing of them is in the clip */
     uint32_t *cbase = d->px + (uint64_t)uy0 * st + ux0;
     uint64_t cbytes = ((uint64_t)(uy1 - uy0 - 1) * st + (ux1 - ux0)) * 4;
-    if (!ok((uint64_t)cbase, cbytes, 1)) return -1;
+    if (!ok((uint64_t)cbase, cbytes, 1)) return refused(__LINE__);
     uint32_t cva = map_at(VA_CANVAS, CANVAS_MAX, root, (uint64_t)cbase, cbytes);
-    if (!cva) return -1;
+    if (!cva) return refused(__LINE__);
     gpu_params_t ps[GD_MAX];
     int slot = 0;
     for (int i = 0; i < n; i++) {                    /* the pictures: checked, mapped, to memory */
@@ -1535,12 +1616,12 @@ int igfx_gpu_draw(uint64_t root, const struct os_gpu_draws *d, int (*ok)(uint64_
             p->src = o->color & 0xFFFFFF;
         } else if (o->op == GD_OVER || o->op == GD_ROUND) {
             int ss = o->src_stride;
-            if (ss < o->w || ss > 8192 || slot >= 8) return -1;
+            if (ss < o->w || ss > 8192 || slot >= 8) return refused(__LINE__);
             const uint32_t *s = o->src + (uint64_t)(ry0[i] - o->y) * ss + (rx0[i] - o->x);
             uint64_t sb = ((uint64_t)(h - 1) * ss + w) * 4;
-            if (!ok((uint64_t)s, sb, 0)) return -1;
+            if (!ok((uint64_t)s, sb, 0)) return refused(__LINE__);
             uint32_t sva = map_user(slot++, root, (uint64_t)s, sb);
-            if (!sva) return -1;
+            if (!sva) return refused(__LINE__);
             if (!keep) clflush_rect(s, ss, w, h);
             p->src = sva;
             p->src_pitch = (uint32_t)ss;
@@ -1549,7 +1630,7 @@ int igfx_gpu_draw(uint64_t root, const struct os_gpu_draws *d, int (*ok)(uint64_
                 p->b = (uint32_t)(o->hy0 - ry0[i]);
                 p->c = (uint32_t)(o->hx1 - rx0[i]);
                 p->d = (uint32_t)(o->hy1 - ry0[i]);
-                if (!in16(o->hx0) || !in16(o->hy0) || !in16(o->hx1) || !in16(o->hy1)) return -1;
+                if (!in16(o->hx0) || !in16(o->hy0) || !in16(o->hx1) || !in16(o->hy1)) return refused(__LINE__);
             } else {
                 int r = o->r;
                 if (r * 2 > o->h) r = o->h / 2;
@@ -1561,14 +1642,14 @@ int igfx_gpu_draw(uint64_t root, const struct os_gpu_draws *d, int (*ok)(uint64_
             }
         } else {                                     /* GD_SCALED */
             int ow = o->src_w, oh = o->src_h;
-            if (ow < 1 || oh < 1 || ow > 8192 || oh > 8192 || o->w > 65535 || o->h > 65535 || slot + 3 > 8) return -1;
+            if (ow < 1 || oh < 1 || ow > 8192 || oh > 8192 || o->w > 65535 || o->h > 65535 || slot + 3 > 8) return refused(__LINE__);
             uint64_t pb = (uint64_t)ow * oh * 4, ub = (uint64_t)w * h * 4;
-            if (!ok((uint64_t)o->src, pb, 0) || !ok((uint64_t)o->mask, pb, 0)) return -1;
+            if (!ok((uint64_t)o->src, pb, 0) || !ok((uint64_t)o->mask, pb, 0)) return refused(__LINE__);
             uint32_t sva = map_user(slot++, root, (uint64_t)o->src, pb);
             uint32_t mva = map_user(slot++, root, (uint64_t)o->mask, pb), uva = 0;
-            if (!sva || !mva) return -1;
+            if (!sva || !mva) return refused(__LINE__);
             if (o->under) {
-                if (!ok((uint64_t)o->under, ub, 0) || !(uva = map_user(slot++, root, (uint64_t)o->under, ub))) return -1;
+                if (!ok((uint64_t)o->under, ub, 0) || !(uva = map_user(slot++, root, (uint64_t)o->under, ub))) return refused(__LINE__);
                 clflush_range(o->under, ub);
             }
             if (!keep) {
@@ -1584,11 +1665,15 @@ int igfx_gpu_draw(uint64_t root, const struct os_gpu_draws *d, int (*ok)(uint64_
         }
     }
     clflush_rect(cbase, st, ux1 - ux0, uy1 - uy0);   /* what the CPU drew there, to memory */
+    gst_add(0, gtsc() - t0);
     gpu_begin();
     for (int i = 0; i < n; i++)
         if (rx1[i] > rx0[i] && ry1[i] > ry0[i])
             gpu_pass(kernel_of[d->op[i].op], &ps[i], ps[i].w / 16 + (ps[i].w % 16 != 0), ps[i].h);
-    if (gpu_run("draw")) return -1;
+    if (gpu_run("draw")) return refused(__LINE__);
+    uint64_t t1 = gtsc();
     clflush_rect(cbase, st, ux1 - ux0, uy1 - uy0);   /* and nothing old over what the GPU wrote */
+    gst_add(3, gtsc() - t1);
+    gst_batch();
     return 0;
 }
