@@ -389,8 +389,8 @@ static unsigned frame_no;                        /* compose calls so far */
  * shape, and what was behind a fading panel. Missing: no motion. */
 static unsigned *anim_col, *anim_mask, *snap;
 static long anim_cap;
-static int cache_win = -1, cache_focus;
-static unsigned cache_frame;
+static int cache_win = -1, cache_focus, cache_hover, cache_w, cache_h, cache_gpu;   /* what anim_col holds */
+static unsigned cache_damage, cache_theme;
 
 static mitem_t mitems[MI_MAX];
 static int n_mitems, menu_open, menu_hot = -1, menu_wpx;   /* menu_open: 0 none, 1 account, 2 power, 3 notifications */
@@ -1656,6 +1656,100 @@ static void make_wallpaper(void) {
 #define MAT_MAX (1 << 20)
 
 
+/* The GPU's shaders do the blur and the fades (gfx_gpu) while the kernel
+ * says yes; the CPU's code below is the fallback. */
+static int gpu_shaders = 1, gpu_fails;
+
+static int gpu_done(int result) {                     /* 8 failures in a row: the CPU from then on */
+    if (result == 0) {
+        gpu_fails = 0;
+        return 1;
+    }
+    if (++gpu_fails >= 8) gpu_shaders = 0;
+    return 0;
+}
+
+/* ---- Drawing lists -------------------------------------------------------
+ * Shadows, round fills and copies, window pictures go into a list; then the
+ * GPU draws the list as one batch (gfx_gpu_draw), or the CPU does, in the same
+ * order: when it is small (a batch costs more), or the GPU says no. */
+#define GPU_MIN 8192                                   /* pixels */
+#define GPU_SLOT (16L << 20)                           /* the most of a picture the kernel maps */
+
+static long clip_area(const ui_canvas *c, int x0, int y0, int x1, int y1) {
+    if (x0 < c->cx0) x0 = c->cx0;
+    if (y0 < c->cy0) y0 = c->cy0;
+    if (x1 > c->cx1) x1 = c->cx1;
+    if (y1 > c->cy1) y1 = c->cy1;
+    return x1 > x0 && y1 > y0 ? (long)(x1 - x0) * (y1 - y0) : 0;
+}
+
+static struct os_gpu_draw *gd_add(struct os_gpu_draws *d, int op, int x, int y, int w, int h) {
+    struct os_gpu_draw *o = &d->op[d->n++];            /* (callers stay within GD_MAX) */
+    memset(o, 0, sizeof(*o));
+    o->op = op;
+    o->x = x;
+    o->y = y;
+    o->w = w;
+    o->h = h;
+    return o;
+}
+
+static void gd_shadow(struct os_gpu_draws *d, int x, int y, int w, int h, int r, int size, int alpha, int outside) {
+    struct os_gpu_draw *o = gd_add(d, GD_SHADOW, x, y, w, h);
+    o->r = r;
+    o->size = size;
+    o->alpha = clampi(alpha, 0, 255);
+    o->flags = outside;
+}
+
+static void gd_fill(struct os_gpu_draws *d, int x, int y, int w, int h, int r, unsigned color, int alpha, int corners) {
+    struct os_gpu_draw *o = gd_add(d, GD_FILL, x, y, w, h);
+    o->r = r;
+    o->color = color;
+    o->alpha = clampi(alpha, 0, 255);
+    o->flags = corners;
+}
+
+static void over_cpu(ui_canvas *c, const struct os_gpu_draw *o);
+static void blit_scaled(painter_t *p, const struct os_gpu_draw *o);
+
+/* -> 1: the GPU drew them. */
+static int gd_run(painter_t *p, struct os_gpu_draws *d) {
+    long area = 0;
+    int fits = d->n > 0;
+    for (int i = 0; i < d->n; i++) {
+        const struct os_gpu_draw *o = &d->op[i];
+        int g = o->op == GD_SHADOW ? o->size : 0;
+        area += clip_area(&p->c, o->x - g, o->y - g, o->x + o->w + g, o->y + o->h + g);
+        if (o->w < 1 || o->h < 1) fits = 0;
+        if (o->op == GD_SCALED && (long)o->src_w * o->src_h * 4 > GPU_SLOT) fits = 0;
+        if ((o->op == GD_OVER || o->op == GD_ROUND) && (long)o->h * o->src_stride * 4 > GPU_SLOT) fits = 0;
+    }
+    if (fits && gpu_shaders && area >= GPU_MIN) {
+        d->px = p->c.px;
+        d->stride = p->c.stride;
+        d->cx0 = p->c.cx0;
+        d->cy0 = p->c.cy0;
+        d->cx1 = p->c.cx1;
+        d->cy1 = p->c.cy1;
+        if (gpu_done(gfx_gpu_draw(d))) {
+            d->n = 0;
+            return 1;
+        }
+    }
+    for (int i = 0; i < d->n; i++) {
+        const struct os_gpu_draw *o = &d->op[i];
+        if (o->op == GD_SHADOW) ui_shadow_ex(&p->c, o->x, o->y, o->w, o->h, o->r, o->size, o->alpha, o->flags & 1);
+        else if (o->op == GD_FILL) ui_round_ex(&p->c, o->x, o->y, o->w, o->h, o->r, o->color, o->alpha, o->flags & 15);
+        else if (o->op == GD_ROUND) ui_copy_round(&p->c, o->x, o->y, o->src, o->w, o->h, o->src_stride, o->r, o->flags & 15);
+        else if (o->op == GD_OVER) over_cpu(&p->c, o);
+        else if (o->op == GD_SCALED) blit_scaled(p, o);
+    }
+    d->n = 0;
+    return 0;
+}
+
 static unsigned backdrop_at(int x, int y) {
     for (int i = norder - 1; i >= 0; i--) {
         window_t *w = &wins[order[i]];
@@ -1695,18 +1789,92 @@ static unsigned saturate_tint(unsigned c, int sat, unsigned tint, int alpha) {
     return (unsigned)(r << 16 | gr << 8 | b);
 }
 
-/* A frosted rounded rectangle. Reduce Transparency (or a size too big to
- * sample): the solid colour instead. */
-static void material(painter_t *p, int x, int y, int w, int h, int r, int corners, unsigned tint, int tint_a, unsigned solid) {
+/* The frosted pictures, each kept until what is behind it changes: the
+ * backdrop's samples are taken every time (cheap) and compared with the ones
+ * it was made from. Eight, for at most four panels a frame: one in use is
+ * never the one taken for another. */
+#define MAT_SLOTS 8
+typedef struct {
+    int x, y, w, h, tint_a, ns, gpu;                   /* gpu: made by the GPU (in memory, not in caches) */
+    unsigned tint, used, *pic, *samp;
+    long cap;
+} mat_t;
+static mat_t mats[MAT_SLOTS];
+static unsigned mat_clock;
+static mutex_t mat_lock;
+
+static int material_make(painter_t *p, unsigned *out, int w, int h, int bw, int bh, int bleed, unsigned tint, int tint_a);
+
+/* A frosted rounded rectangle, into the list. Reduce Transparency (or a size
+ * too big to sample): the solid colour instead. */
+static void material(painter_t *p, struct os_gpu_draws *d, int x, int y, int w, int h, int r, int corners,
+                     unsigned tint, int tint_a, unsigned solid) {
     if (x + w <= p->c.cx0 || x >= p->c.cx1 || y + h <= p->c.cy0 || y >= p->c.cy1) return;
     int bleed = 10 * S, bw = (w + 2 * bleed + 3) / 4, bh = (h + 2 * bleed + 3) / 4;
     if (reduce_transp || w > 2048 || bw > SAMP_W || bh > SAMP_H || (long)w * h > MAT_MAX) {
-        ui_round_ex(&p->c, x, y, w, h, r, solid, 255, corners);
+        gd_fill(d, x, y, w, h, r, solid, 255, corners);
         return;
     }
+    int ns = bw * bh;
     for (int cy = 0; cy < bh; cy++)
         for (int cx = 0; cx < bw; cx++)
             p->samp[cy * bw + cx] = backdrop_at(x - bleed + cx * 4 + 2, y - bleed + cy * 4 + 2);
+    mutex_lock(&mat_lock);
+    mat_t *m = 0;
+    for (int i = 0; i < MAT_SLOTS && !m; i++)
+        if (mats[i].pic && mats[i].x == x && mats[i].y == y && mats[i].w == w && mats[i].h == h &&
+            mats[i].tint == tint && mats[i].tint_a == tint_a)
+            m = &mats[i];
+    if (m && (m->ns != ns || memcmp(m->samp, p->samp, (size_t)ns * 4))) m->ns = 0;   /* what is behind it changed */
+    if (!m) {                                          /* the one used longest ago */
+        m = &mats[0];
+        for (int i = 1; i < MAT_SLOTS; i++)
+            if (mats[i].used < m->used) m = &mats[i];
+        m->ns = 0;
+    }
+    if (!m->ns) {
+        if ((long)w * h > m->cap || !m->samp) {
+            if (m->pic) munmap(m->pic);
+            m->pic = mmap((size_t)w * h * 4, PROT_READ | PROT_WRITE, -1);
+            m->cap = m->pic ? (long)w * h : 0;
+            if (!m->samp) m->samp = mmap(SAMP_W * SAMP_H * 4, PROT_READ | PROT_WRITE, -1);
+        }
+        if (!m->pic || !m->samp) {
+            if (m->pic) munmap(m->pic);
+            m->pic = 0;
+            m->cap = 0;
+            mutex_unlock(&mat_lock);
+            gd_fill(d, x, y, w, h, r, solid, 255, corners);
+            return;
+        }
+        memcpy(m->samp, p->samp, (size_t)ns * 4);      /* (material_make blurs p->samp in place) */
+        m->x = x;
+        m->y = y;
+        m->w = w;
+        m->h = h;
+        m->tint = tint;
+        m->tint_a = tint_a;
+        m->gpu = material_make(p, m->pic, w, h, bw, bh, bleed, tint, tint_a);
+        m->ns = ns;
+    }
+    m->used = ++mat_clock;
+    struct os_gpu_draw *o = gd_add(d, GD_ROUND, x, y, w, h);
+    o->src = m->pic;
+    o->src_stride = w;
+    o->r = r;
+    o->flags = corners | (m->gpu ? GD_KEEP : 0);
+    mutex_unlock(&mat_lock);
+}
+
+/* The whole w x h picture into out -> 1: the GPU made it. */
+static int material_make(painter_t *p, unsigned *out, int w, int h, int bw, int bh, int bleed, unsigned tint, int tint_a) {
+    int j0 = 0, j1 = h;
+    if (gpu_shaders) {                                 /* the GPU: blur, saturate, tint, upscale (gfx_gpu) */
+        struct os_gpu_op op = { .op = GPU_MATERIAL, .samp = p->samp, .scratch = p->samp2, .out = out,
+                                .bw = bw, .bh = bh, .w = w, .j0 = j0, .j1 = j1, .bleed = bleed,
+                                .sat = 180, .tint = tint, .alpha = (unsigned)tint_a };
+        if (gpu_done(gfx_gpu(&op))) return 1;
+    }
     box3(p->samp, p->samp2, bw, bh, 1);
     box3(p->samp2, p->samp, bw, bh, 0);
     box3(p->samp, p->samp2, bw, bh, 1);
@@ -1720,7 +1888,6 @@ static void material(painter_t *p, int x, int y, int w, int h, int r, int corner
         p->xi[i] = c0;
         p->xf[i] = f;
     }
-    int j0 = p->c.cy0 > y ? p->c.cy0 - y : 0, j1 = p->c.cy1 < y + h ? p->c.cy1 - y : h;   /* (the rest is not drawn) */
     for (int j = j0; j < j1; j++) {
         int v = (j + bleed) * 64 - 96, r0 = v >> 8;
         unsigned rf = (unsigned)(v & 255);
@@ -1732,10 +1899,10 @@ static void material(painter_t *p, int x, int y, int w, int h, int r, int corner
             unsigned f = p->xf[i];
             unsigned top = f ? lerp_rgb(a[c], a[c + 1], f) : a[c];
             unsigned bot = f ? lerp_rgb(b[c], b[c + 1], f) : b[c];
-            p->mat[j * w + i] = rf ? lerp_rgb(top, bot, rf) : top;
+            out[(long)j * w + i] = rf ? lerp_rgb(top, bot, rf) : top;
         }
     }
-    ui_copy_round(&p->c, x, y, p->mat, w, h, w, r, corners);
+    return 0;
 }
 
 /* ---- Drawing: windows ----------------------------------------------------------- */
@@ -1775,10 +1942,16 @@ static int ctl_at(const window_t *w, int x, int y) {
 
 /* The shadow round an outer rectangle; a255 fades it with the window: a wide
  * soft one for height (E2) and a tight dark one where the window meets the wall. */
+static void window_shadows(struct os_gpu_draws *d, int x, int y, int ww, int hh, int focused, int a255) {
+    gd_shadow(d, x + 2 * S, y + SHADOW / 3, ww - 4 * S, hh - 2 * S, RADIUS, SHADOW,
+              (focused ? TH.shadow_on : TH.shadow_off) * a255 / 255, 0);
+    gd_shadow(d, x, y, ww, hh, RADIUS, 2 * S, 50 * a255 / 255, 0);         /* a tight edge */
+}
+
 static void window_shadow(painter_t *p, int x, int y, int ww, int hh, int focused, int a255) {
-    ui_shadow(&p->c, x + 2 * S, y + SHADOW / 3, ww - 4 * S, hh - 2 * S, RADIUS, SHADOW,
-              (focused ? TH.shadow_on : TH.shadow_off) * a255 / 255);
-    ui_shadow(&p->c, x, y, ww, hh, RADIUS, 2 * S, 50 * a255 / 255);        /* a tight edge */
+    struct os_gpu_draws d = { .n = 0 };
+    window_shadows(&d, x, y, ww, hh, focused, a255);
+    gd_run(p, &d);
 }
 
 /* The window itself (outline, title bar, content), no shadow, onto `cv` with
@@ -1891,18 +2064,31 @@ static void layer_update(painter_t *p, window_t *w, int focused, int hover) {
 
 /* The picture onto the frame; the content's rows are left out (the content
  * covers them) except its rounded bottom, whose corners need the rim behind. */
-static void layer_blit(ui_canvas *c, const window_t *w) {
-    int m = lay_margin(), lx = w->x - 1 - m, ly = w->y - TITLE_H - 1 - m;
-    int x0 = lx < c->cx0 ? c->cx0 : lx, x1 = lx + w->lay_w > c->cx1 ? c->cx1 : lx + w->lay_w;
-    int y0 = ly < c->cy0 ? c->cy0 : ly, y1 = ly + w->lay_h > c->cy1 ? c->cy1 : ly + w->lay_h;
-    int hole_y1 = w->y + w->h - RADIUS;
+static void layer_blit(painter_t *p, const window_t *w) {
+    int m = lay_margin();
+    struct os_gpu_draws d = { .n = 0 };
+    struct os_gpu_draw *o = gd_add(&d, GD_OVER, w->x - 1 - m, w->y - TITLE_H - 1 - m, w->lay_w, w->lay_h);
+    o->src = w->lay;
+    o->src_stride = w->lay_w;
+    o->hx0 = w->x;
+    o->hy0 = w->y;
+    o->hx1 = w->x + w->w;
+    o->hy1 = w->y + w->h - RADIUS;
+    gd_run(p, &d);
+}
+
+/* GD_OVER on the CPU. */
+static void over_cpu(ui_canvas *c, const struct os_gpu_draw *o) {
+    int lx = o->x, ly = o->y;
+    int x0 = lx < c->cx0 ? c->cx0 : lx, x1 = lx + o->w > c->cx1 ? c->cx1 : lx + o->w;
+    int y0 = ly < c->cy0 ? c->cy0 : ly, y1 = ly + o->h > c->cy1 ? c->cy1 : ly + o->h;
     for (int py = y0; py < y1; py++) {
         unsigned *row = c->px + (long)py * c->stride;
-        const unsigned *src = w->lay + (long)(py - ly) * w->lay_w - lx;
-        int hole = py >= w->y && py < hole_y1;
+        const unsigned *src = o->src + (long)(py - ly) * o->src_stride - lx;
+        int hole = py >= o->hy0 && py < o->hy1;
         for (int px = x0; px < x1; px++) {
-            if (hole && px == w->x) {                  /* skip the content */
-                px = w->x + w->w - 1;
+            if (hole && px == o->hx0) {                /* skip the content */
+                px = o->hx1 - 1;
                 continue;
             }
             unsigned v = src[px], a = v >> 24;
@@ -1963,10 +2149,12 @@ static void anim_params(const window_t *w, int *scale, int *alpha, int *cx, int 
  * opacity alpha: bilinear, clipped to the damage rectangle in force. `under`
  * (or 0) is what was on the screen before the shadow was drawn, from (ux, uy),
  * uw wide: a see-through window shows that, not its own shadow, through its body. */
-static void blit_scaled(painter_t *p, int dx, int dy, int dw, int dh, int ow, int oh, int alpha,
-                        const unsigned *under, int ux, int uy, int uw) {
+static void blit_scaled(painter_t *p, const struct os_gpu_draw *o) {
+    int dx = o->x, dy = o->y, dw = o->w, dh = o->h, ow = o->src_w, oh = o->src_h, alpha = o->alpha;
+    const unsigned *under = o->under, *anim_col = o->src, *anim_mask = o->mask;
     int x0 = dx < p->c.cx0 ? p->c.cx0 : dx, y0 = dy < p->c.cy0 ? p->c.cy0 : dy;
     int x1 = dx + dw > p->c.cx1 ? p->c.cx1 : dx + dw, y1 = dy + dh > p->c.cy1 ? p->c.cy1 : dy + dh;
+    int ux = x0, uy = y0, uw = x1 - x0;
     if (dw <= 0 || dh <= 0) return;
     for (int py = y0; py < y1; py++) {
         int v = ((2 * (py - dy) + 1) * oh * 128) / dh - 128;                         /* 1/256 texels */
@@ -2009,7 +2197,8 @@ static void draw_window_anim(painter_t *p, int k, int focused, int hover) {
     window_t *w = &wins[k];
     int ox, oy, ow, oh;
     outer(w, &ox, &oy, &ow, &oh);
-    if (cache_win != k || cache_frame != frame_no || cache_focus != focused) {   /* once per frame */
+    if (cache_win != k || cache_focus != focused || cache_hover != hover || cache_damage != w->s->damage ||
+        cache_w != ow || cache_h != oh || cache_theme != theme_gen) {   /* drawn once; then only scaled */
         ui_canvas ac, mc;
         ui_canvas_init(&ac, anim_col, ow, oh, ow);
         ui_canvas_init(&mc, anim_mask, ow, oh, ow);
@@ -2018,8 +2207,13 @@ static void draw_window_anim(painter_t *p, int k, int focused, int hover) {
         ui_fill(&mc, 0, 0, ow, oh, 0x000000);
         ui_round(&mc, 0, 0, ow, oh, RADIUS, 0xFFFFFF);
         cache_win = k;
-        cache_frame = frame_no;
         cache_focus = focused;
+        cache_hover = hover;
+        cache_damage = w->s->damage;
+        cache_w = ow;
+        cache_h = oh;
+        cache_theme = theme_gen;
+        cache_gpu = 0;                                 /* (the CPU wrote it: to memory once) */
     }
     int scale, alpha, cx, cy;
     anim_params(w, &scale, &alpha, &cx, &cy);
@@ -2029,14 +2223,24 @@ static void draw_window_anim(painter_t *p, int k, int focused, int hover) {
     int ux = dx < p->c.cx0 ? p->c.cx0 : dx, uy = dy < p->c.cy0 ? p->c.cy0 : dy;
     int ux1 = dx + dw > p->c.cx1 ? p->c.cx1 : dx + dw, uy1 = dy + dh > p->c.cy1 ? p->c.cy1 : dy + dh;
     int uw = ux1 - ux;
+    if (uw <= 0 || uy1 <= uy) return;
     const unsigned *under = 0;
-    if (alpha < 255 && snap && uw > 0 && uy1 > uy && (long)uw * (uy1 - uy) <= anim_cap) {
+    if (alpha < 255 && snap && (long)uw * (uy1 - uy) <= anim_cap) {
         for (int y = uy; y < uy1; y++)
             memcpy(snap + (long)(y - uy) * uw, p->c.px + (long)y * p->c.stride + ux, (size_t)uw * 4);
         under = snap;
     }
-    window_shadow(p, dx, dy, dw, dh, focused, alpha);
-    blit_scaled(p, dx, dy, dw, dh, ow, oh, alpha, under, ux, uy, uw);
+    struct os_gpu_draws d = { .n = 0 };                /* shadow and picture: one batch */
+    window_shadows(&d, dx, dy, dw, dh, focused, alpha);
+    struct os_gpu_draw *o = gd_add(&d, GD_SCALED, dx, dy, dw, dh);
+    o->src = anim_col;
+    o->mask = anim_mask;
+    o->under = under;
+    o->src_w = ow;
+    o->src_h = oh;
+    o->alpha = alpha;
+    o->flags = cache_gpu ? GD_KEEP : 0;
+    if (gd_run(p, &d)) cache_gpu = 1;          /* (the whole picture went to memory) */
 }
 
 static void draw_window(painter_t *p, int k, int front_win) {
@@ -2050,7 +2254,7 @@ static void draw_window(painter_t *p, int k, int front_win) {
         return;
     }
     if (layer_current(w, focused, hover)) {
-        layer_blit(&p->c, w);
+        layer_blit(p, w);
         window_content(&p->c, w, w->x, w->y);
         return;
     }
@@ -2068,13 +2272,15 @@ static void draw_window(painter_t *p, int k, int front_win) {
 static void glass(painter_t *p, int x, int y, int w, int h, int r, int corners, int level, int sheen) {
     int sz = level == 2 ? 24 * S : 10 * S, dy = level == 2 ? 8 * S : 3 * S;
     int al = level == 2 ? TH.shadow_glass : TH.shadow_glass * 2 / 3;
-    ui_shadow_ex(&p->c, x, y + dy, w, h, r, sz, al, 1);                           /* height: far and soft */
-    ui_shadow_ex(&p->c, x, y + S, w, h, r, 3 * S, al * 2 / 3, 1);                 /* contact: tight and dark */
-    ui_round_ex(&p->c, x - 1, y - 1, w + 2, h + 2, r + 1, TH.hair, TH.hair_strong, corners);   /* rim */
-    material(p, x, y, w, h, r, corners, TH.glass, TH.glass_alpha, TH.s1);
+    struct os_gpu_draws d = { .n = 0 };                                           /* (one GPU batch) */
+    gd_shadow(&d, x, y + dy, w, h, r, sz, al, 1);                                 /* height: far and soft */
+    gd_shadow(&d, x, y + S, w, h, r, 3 * S, al * 2 / 3, 1);                       /* contact: tight and dark */
+    gd_fill(&d, x - 1, y - 1, w + 2, h + 2, r + 1, TH.hair, TH.hair_strong, corners);   /* rim */
+    material(p, &d, x, y, w, h, r, corners, TH.glass, TH.glass_alpha, TH.s1);
     if (sheen && h >= 4 * r)                                                       /* light falling from above */
         for (int k = 0; k < 5; k++)
-            ui_round_ex(&p->c, x, y, w, h * (5 - k) / 11, r, TH.sheen, TH.sheen_alpha / 14 + 1, corners & (UI_TL | UI_TR));
+            gd_fill(&d, x, y, w, h * (5 - k) / 11, r, TH.sheen, TH.sheen_alpha / 14 + 1, corners & (UI_TL | UI_TR));
+    gd_run(p, &d);
     ui_fill_a(&p->c, x + r, y, w - 2 * r, S, TH.sheen, TH.sheen_alpha / 2);        /* the lit top edge */
     ui_fill_a(&p->c, x + r, y + h - S, w - 2 * r, S, 0x000000, 36);                /* and the shade below */
 }
@@ -2281,6 +2487,11 @@ static void draw_faded(painter_t *p, int x0, int y0, int x1, int y1, int a, void
     for (int y = y0; y < y1; y++)
         memcpy(snap + (long)(y - y0) * (x1 - x0), p->c.px + (long)y * p->c.stride + x0, (size_t)(x1 - x0) * 4);
     fn(p);
+    if (gpu_shaders) {                                 /* the GPU blends (gfx_gpu) */
+        struct os_gpu_op op = { .op = GPU_OP_FADE, .old = snap, .out = p->c.px + (long)y0 * p->c.stride + x0,
+                                .w = x1 - x0, .h = y1 - y0, .pitch = p->c.stride, .f = (unsigned)(a + (a >> 7)) };
+        if (gpu_done(gfx_gpu(&op))) return;
+    }
     for (int y = y0; y < y1; y++) {
         unsigned *row = p->c.px + (long)y * p->c.stride + x0;
         const unsigned *old = snap + (long)(y - y0) * (x1 - x0);

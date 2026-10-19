@@ -11,6 +11,20 @@
 int igfx_init(const fb_info_t *fb);
 void igfx_engines_probe(void);   /* the render and blitter engines' state, into the system log */
 int igfx_blitter_test(void);      /* step 2: one command on the blitter (into the log) -> 0 if it ran */
+int igfx_render_test(void);       /* GPU driver stage 1: one command on the render engine (into the log) */
+const char *igfx_render_status(void);
+/* GPU driver stages 2-3: shaders on the render engine (gpu/shaders.cl), each
+ * checked against the CPU at boot (into the log). -> 0: the desktop may use them. */
+int igfx_gpu_init(void);
+int igfx_gpu_ready(void);
+const char *igfx_gpu_status(void);
+/* For gfx GFX_GPU, in the calling program's address space (`root`). -> 0 done. */
+int igfx_gpu_material(uint64_t root, uint32_t *samp, uint32_t *scratch, int bw, int bh,
+                      uint32_t sat, uint32_t tint, uint32_t alpha, uint32_t *out, int w, int j0, int j1, int bleed);
+int igfx_gpu_fade(uint64_t root, const uint32_t *old, uint32_t *out, int w, int h, int pitch, uint32_t f);
+/* gfx GFX_GPU_DRAW (sys/syscall_nums.h); ok(ptr, bytes, write): the program may use that range. */
+struct os_gpu_draws;
+int igfx_gpu_draw(uint64_t root, const struct os_gpu_draws *d, int (*ok)(uint64_t, uint64_t, int));
 const char *igfx_blitter_status(void);
 int igfx_blitter_ready(void);
 /* Screen buffers in RAM: 1 and 2 (0 is the firmware's). */

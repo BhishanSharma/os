@@ -60,6 +60,8 @@ int gfx_cursor(int w, int h, int hot_x, int hot_y, const unsigned int *argb) {
 int gfx_present(void)                           { return (int)os_syscall(SYS_GFX, GFX_PRESENT, 0, 0); }
 int gfx_end(void)                               { return (int)os_syscall(SYS_GFX, GFX_END, 0, 0); }
 int gfx_sync(void)                              { return (int)os_syscall(SYS_GFX, GFX_SYNC, 0, 0); }
+int gfx_gpu(const struct os_gpu_op *op)          { return (int)os_syscall(SYS_GFX, GFX_GPU, (long)op, 0); }
+int gfx_gpu_draw(const struct os_gpu_draws *d)   { return (int)os_syscall(SYS_GFX, GFX_GPU_DRAW, (long)d, 0); }
 int gfx_copy(const struct os_copy *items, int n) {
     struct os_copy_list l = { n, items };
     return (int)os_syscall(SYS_GFX, GFX_COPY, (long)&l, 0);

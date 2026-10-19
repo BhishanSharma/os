@@ -296,6 +296,10 @@ struct os_task {
 #define GFX_COPY     8   /* arg = struct os_copy_list *: window contents into that frame by the GPU,
                             done at the next GFX_PRESENT (after your drawing) -> 0, else draw them */
 #define GFX_CURSOR   4   /* arg = struct os_cursor *: the kernel draws the pointer (0: stop) -> 0 */
+#define GFX_GPU      9   /* arg = struct os_gpu_op *: do it with the GPU's shaders (docs/GPU.md)
+                            -> 0 done, else do it on the CPU (no GPU, or not now) */
+#define GFX_GPU_DRAW 10  /* arg = struct os_gpu_draws *: drawings onto a canvas by the GPU, in order,
+                            one batch -> 0 done, else draw them all on the CPU */
 
 struct os_gfx_info {
     int width, height;     /* the whole screen, in pixels */
@@ -324,6 +328,50 @@ struct os_copy {           /* GFX_COPY: from (sx, sy) in `pixels` to (x, y) in t
 struct os_copy_list {
     int n;                 /* at most 64 */
     const struct os_copy *items;
+};
+
+/* GFX_GPU. GPU_MATERIAL (frosted glass, the window server's material()):
+ * samp (bw x bh pixels, 0x00RRGGBB) is blurred (four 3-tap box passes;
+ * scratch is the same size), saturated (sat %), tinted (tint over it, alpha
+ * 0-255), then rows j0..j1 of a w-wide picture bilinearly upscaled from it
+ * (with `bleed`) go to out, row j at out + j * w. GPU_FADE: w x h pixels of
+ * out (`pitch` a row) become old (w x h, packed) blended towards them by f/256. */
+enum { GPU_MATERIAL = 1, GPU_OP_FADE = 2 };
+struct os_gpu_op {
+    int op;
+    unsigned int *samp, *scratch, *out;
+    const unsigned int *old;
+    int bw, bh, w, h, j0, j1, bleed, pitch;
+    unsigned int sat, tint, alpha, f;
+};
+
+/* GFX_GPU_DRAW: each as ui.c / the window server draws it, clipped.
+ * GD_SHADOW: ui_shadow_ex of x, y, w, h (r, size, alpha; flags 1: outside only).
+ * GD_OVER: a picture with premultiplied alpha (0xAARRGGBB) at x, y (w x h,
+ *   src_stride a row) over the canvas, except the hole [hx0, hx1) x [hy0, hy1).
+ * GD_ROUND: ui_copy_round of src (src_stride) to x, y, w x h (r; flags: corners).
+ * GD_SCALED: the src_w x src_h picture and its shape (mask: 255 inside, the
+ *   same layout) bilinear into x, y, w x h with opacity alpha; under (or 0): what
+ *   was there before, the clipped rectangle's size, packed.
+ * GD_FILL: ui_round_ex of x, y, w, h (r, color, alpha; flags: corners).
+ * GD_KEEP in flags: src and mask unchanged since the GPU last read them. */
+enum { GD_SHADOW = 1, GD_OVER, GD_ROUND, GD_SCALED, GD_FILL };
+#define GD_KEEP 0x100
+struct os_gpu_draw {
+    int op, flags;
+    int x, y, w, h;
+    int r, size, alpha;
+    unsigned int color;
+    const unsigned int *src, *mask, *under;
+    int src_w, src_h, src_stride;
+    int hx0, hy0, hx1, hy1;
+};
+#define GD_MAX 12
+struct os_gpu_draws {
+    unsigned int *px;                  /* the canvas: pixel (0, 0) */
+    int stride, cx0, cy0, cx1, cy1;    /* pixels a row; the clip */
+    int n;
+    struct os_gpu_draw op[GD_MAX];
 };
 
 /* getmouse() */

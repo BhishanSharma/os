@@ -2152,6 +2152,39 @@ static int64_t sys_gfx(uint64_t op, uint64_t arg) {
             if (graphics_owner != me) return SYSERR_PERM;
             fbcon_sync();
             return 0;
+        case GFX_GPU: {
+            if (graphics_owner != me) return SYSERR_PERM;
+            if (!igfx_gpu_ready()) return SYSERR_NOENT;
+            if (!user_range_ok(arg, sizeof(struct os_gpu_op), 0)) return SYSERR_FAULT;
+            struct os_gpu_op g = *(const struct os_gpu_op *)arg;
+            uint64_t root = task_current()->root;
+            if (g.op == GPU_MATERIAL) {
+                if (g.bw < 2 || g.bh < 2 || g.bw > 1024 || g.bh > 1024 || g.w < 1 || g.w > 4096 || g.j0 < 0 ||
+                    g.j1 <= g.j0 || g.j1 > 4096)
+                    return SYSERR_BADCALL;
+                uint64_t small = (uint64_t)g.bw * g.bh * 4;
+                if (!user_range_ok((uint64_t)(uintptr_t)g.samp, small, 1) || !user_range_ok((uint64_t)(uintptr_t)g.scratch, small, 1) ||
+                    !user_range_ok((uint64_t)(uintptr_t)(g.out + (uint64_t)g.j0 * g.w), (uint64_t)(g.j1 - g.j0) * g.w * 4, 1))
+                    return SYSERR_FAULT;
+                return igfx_gpu_material(root, g.samp, g.scratch, g.bw, g.bh, g.sat, g.tint, g.alpha, g.out, g.w,
+                                         g.j0, g.j1, g.bleed) ? SYSERR_NOENT : 0;
+            }
+            if (g.op == GPU_OP_FADE) {
+                if (g.w < 1 || g.h < 1 || g.w > 4096 || g.h > 4096 || g.pitch < g.w || g.pitch > 8192) return SYSERR_BADCALL;
+                if (!user_range_ok((uint64_t)(uintptr_t)g.old, (uint64_t)g.w * g.h * 4, 0) ||
+                    !user_range_ok((uint64_t)(uintptr_t)g.out, ((uint64_t)(g.h - 1) * g.pitch + g.w) * 4, 1))
+                    return SYSERR_FAULT;
+                return igfx_gpu_fade(root, g.old, g.out, g.w, g.h, g.pitch, g.f) ? SYSERR_NOENT : 0;
+            }
+            return SYSERR_BADCALL;
+        }
+        case GFX_GPU_DRAW: {
+            if (graphics_owner != me) return SYSERR_PERM;
+            if (!igfx_gpu_ready()) return SYSERR_NOENT;
+            if (!user_range_ok(arg, sizeof(struct os_gpu_draws), 0)) return SYSERR_FAULT;
+            struct os_gpu_draws d = *(const struct os_gpu_draws *)arg;
+            return igfx_gpu_draw(task_current()->root, &d, user_range_ok) ? SYSERR_NOENT : 0;
+        }
         case GFX_COPY: {
             if (graphics_owner != me) return SYSERR_PERM;
             if (!user_range_ok(arg, sizeof(struct os_copy_list), 0)) return SYSERR_FAULT;
