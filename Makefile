@@ -73,6 +73,11 @@ USER_CFLAGS := -c -I user/include -I src/intf \
 user_lib_obj := $(patsubst user/lib/%.c,$(USER_BUILD)/lib/%.o,$(wildcard user/lib/*.c))
 user_progs   := $(patsubst user/programs/%.c,%,$(wildcard user/programs/*.c))
 USER_ELFS    := $(addprefix $(USER_BUILD)/,$(addsuffix .elf,$(user_progs)))
+# A program in several files: a folder user/programs/NAME/, all its .c files
+# linked into NAME.elf (like an app, without the Dock).
+prog_dirs    := $(notdir $(patsubst %/,%,$(wildcard user/programs/*/)))
+USER_ELFS    += $(addprefix $(USER_BUILD)/,$(addsuffix .elf,$(prog_dirs)))
+prog_objs     = $(patsubst user/programs/$(1)/%.c,$(USER_BUILD)/programs/$(1)/%.o,$(wildcard user/programs/$(1)/*.c))
 
 # Apps: every folder apps/NAME/ with an app.cfg. All its .c files link into
 # NAME.elf, and app.cfg puts it in the Dock (DOCK.CFG). See docs/APPS.md.
@@ -297,7 +302,7 @@ $(USER_BUILD)/lib/%.o: user/lib/%.c
 
 $(USER_BUILD)/programs/%.o: user/programs/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(USER_CFLAGS) -MMD -MP $< -o $@
+	$(CC) $(USER_CFLAGS) -I $(dir $<) -MMD -MP $< -o $@
 
 # The video player decodes with pl_mpeg (third_party/pl_mpeg, MIT), whose
 # sound decoder uses floating point: SSE is allowed here (the kernel saves
@@ -332,6 +337,12 @@ $(USER_BUILD)/libc.a: $(user_lib_obj)
 
 $(USER_BUILD)/%.elf: $(USER_BUILD)/programs/%.o $(USER_BUILD)/crt0.o $(USER_BUILD)/libc.a user/user.ld
 	$(LD) -T user/user.ld -z max-page-size=4096 -z noexecstack -o $@ $(USER_BUILD)/crt0.o $< $(USER_BUILD)/libc.a
+
+define PROG_RULE
+$(USER_BUILD)/$(1).elf: $(call prog_objs,$(1)) $(USER_BUILD)/crt0.o $(USER_BUILD)/libc.a user/user.ld
+	$$(LD) -T user/user.ld -z max-page-size=4096 -z noexecstack -o $$@ $(USER_BUILD)/crt0.o $(call prog_objs,$(1)) $(USER_BUILD)/libc.a
+endef
+$(foreach p,$(prog_dirs),$(eval $(call PROG_RULE,$(p))))
 
 # An app's files: its own folder is on the include path (its headers).
 $(USER_BUILD)/apps/%.o: apps/%.c
@@ -517,4 +528,5 @@ clean: ## Remove build/ and dist/
 
 -include $(foreach p,$(port_names),$(patsubst %.o,%.d,$(call port_objs,$(p))))
 -include $(foreach a,$(app_names),$(patsubst %.o,%.d,$(call app_objs,$(a))))
+-include $(foreach p,$(prog_dirs),$(patsubst %.o,%.d,$(call prog_objs,$(p))))
 -include $(objects:.o=.d) $(user_lib_obj:.o=.d) $(patsubst %.elf,%.d,$(subst $(USER_BUILD)/,$(USER_BUILD)/programs/,$(USER_ELFS)))

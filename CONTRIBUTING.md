@@ -26,7 +26,7 @@ scale, wait instead of spinning).
 | ------------------ | ------- | ----- |
 | an app | `apps/NAME/` | [docs/APPS.md](docs/APPS.md) |
 | a command-line program | `user/programs/` | [docs/USERSPACE.md](docs/USERSPACE.md) |
-| the desktop (Dock, menus, windows) | `user/programs/windowserver.c`, `user/lib/ui.c` | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| the desktop (Dock, menus, windows) | `user/programs/windowserver/`, `user/lib/ui.c` | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | the kernel or a driver | `src/` | [docs/DEVELOPING.md](docs/DEVELOPING.md) |
 
 ## Before you send it

@@ -83,7 +83,7 @@ that is an ELF file, nothing outside the app's folder) and installs at most
 
 - `user/programs/tapp.c`: the installer (window and commands).
 - `apps/finder`: Files opens `.tapp` files with `tapp`.
-- `user/programs/windowserver.c`: the Dock lists the built-in apps
+- `user/programs/windowserver/`: the Dock lists the built-in apps
   (`DOCK.CFG`) and then `~/Apps/*/app.cfg`; `tapp` sends it `WS_APPS` after
   installing or removing, and it reads them again.
 - `user/lib/ui.c`: `ui_icon` draws a picture file when the icon name is a

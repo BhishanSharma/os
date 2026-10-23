@@ -4,7 +4,7 @@
 #
 #     N|name|program|icon|color
 #
-# The window server reads it at start (user/programs/windowserver.c).
+# The window server reads it at start (user/programs/windowserver/).
 set -e
 dir=${1:-apps}
 for cfg in "$dir"/*/app.cfg; do
