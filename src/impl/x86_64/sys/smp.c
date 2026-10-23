@@ -175,7 +175,7 @@ void tlb_shootdown(uint64_t root) {
     uint64_t g = __atomic_add_fetch(&tlb_gen, 1, __ATOMIC_ACQ_REL);
     tlb_seen[me] = g;                               /* the caller flushed its own (invlpg) */
     for (int i = 0; i < ncpus; i++) {
-        if (i == me || !cpu_up[i] || task_root_on(i) != root) continue;
+        if (i == me || !cpu_up[i] || (root && task_root_on(i) != root)) continue;
         apic_send_ipi(cpu_apic[i], TLB_VECTOR);
         wait[n++] = i;
     }

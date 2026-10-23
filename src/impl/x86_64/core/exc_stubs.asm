@@ -26,6 +26,18 @@ isr_stub_%1:                    ; the CPU already pushed the error code
 
 section .text
 
+; Interrupt and exception entry: turn EFLAGS.AC off where the CPU has SMAP, so
+; a program (which can set AC) or an interrupted system call does not leave
+; program memory open to the handler. iretq brings the old AC back.
+extern smap_enabled
+global smap_entry
+smap_entry:
+    cmp byte [rel smap_enabled], 0
+    je .done
+    clac
+.done:
+    ret
+
 ISR_NOERR 0
 ISR_NOERR 1
 ISR_NOERR 2
@@ -60,6 +72,7 @@ ISR_ERR   30
 ISR_NOERR 31
 
 isr_common:
+    call smap_entry         ; (AC off: no access to program memory, sys/smp.h)
     push rax
     push rbx
     push rcx

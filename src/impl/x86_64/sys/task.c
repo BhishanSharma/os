@@ -282,6 +282,9 @@ static void schedule(void) {
         __asm__ volatile("wrmsr" : : "c"(0xC0000100u), "a"((uint32_t)next->fs_base),
                          "d"((uint32_t)(next->fs_base >> 32)));
         task_switch(&prev->rsp, next->rsp);
+        /* Back in prev: EFLAGS.AC (SMAP) does not travel with the task. */
+        if (flags & (1u << 18)) user_access_begin();
+        else user_access_end();
     }
     irq_restore(flags);
 }

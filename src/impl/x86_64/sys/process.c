@@ -50,8 +50,6 @@
 #define USER_MMAP_LOW    0x100000000ULL     /* mmapat: never below 4 GiB (the program is there) */
 #define USER_HEAP_MAX    (64ULL << 30)     /* in practice: as much as RAM gives */
 #define MAX_ARGS         64   /* argv and environment strings together */
-#define MAX_FDS          1024
-#define MAX_PATH         256              /* FAT32_MAX_PATH: long names */
 #define PAGE_UP(x)       (((x) + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1))
 #define PAGE_DOWN(x)     ((x) & ~(uint64_t)(PAGE_SIZE - 1))
 
@@ -59,70 +57,11 @@ _Static_assert(KEYCODE_UP == KEY_UP_ARROW && KEYCODE_DOWN == KEY_DOWN_ARROW &&
                KEYCODE_LEFT == KEY_LEFT_ARROW && KEYCODE_RIGHT == KEY_RIGHT_ARROW,
                "user key codes must match the keyboard driver");
 
-/* An open file: a file on disk, the console, or one end of a pipe. Shared
- * (counted) by every descriptor that refers to it: dup, fork, and the
- * standard 0-2 a program inherits from the one that started it. */
-enum { F_FILE, F_CONSOLE, F_PIPE_R, F_PIPE_W, F_USOCK, F_ULISTEN, F_SHM };
-
-/* A connected local socket: a pipe each way and the files passed each way.
- * End `side` reads pipe[side] and writes pipe[!side]. */
-typedef struct usock {
-    pipe_t *pipe[2];
-    struct kfile *fdq[2][USOCK_MAX_FDS];  // fdq[i]: files passed toward side i
-    int fdq_n[2];
-    int ends;                         // its file_t's: the last one frees it
-} usock_t;
-
-/* A listening local socket: connections waiting for accept(). */
-#define MAX_LISTENERS 32
-#define BACKLOG       16
-typedef struct {
-    struct kfile *q[BACKLOG];
-    int n;
-} ulisten_t;
-
-typedef struct kfile {
-    int used, mode;                   // OPEN_READ / OPEN_WRITE / OPEN_APPEND
-    int refs, kind;
-    int nonblock;                     // pipes and local sockets: SYSERR_WOULDBLOCK instead of waiting
-    pipe_t *pipe;
-    usock_t *us;                      // F_USOCK (0: not connected yet), and which end
-    int side;
-    ulisten_t *ul;                    // F_ULISTEN
-    vm_object_t *shm;                 // F_SHM: the shared memory (counted)
-    char path[MAX_PATH];              // (local sockets: the name)
-    uint8_t *data;
-    uint32_t size, capacity, pos;
-    vfs_file_t *stream;               // a big file opened for reading: read from disk as it goes
-} file_t;
-
 static file_t console_file = { .used = 1, .refs = 1 << 30, .kind = F_CONSOLE };
 
 /* Files bigger than this are not read into memory at open() (a video). */
 #define STREAM_MIN       (1024 * 1024)
 
-typedef struct {
-    uint64_t brk_start, brk;
-    uint64_t stack_lo;                // the stack region's start
-    uint64_t root;                    // the address space (shared by its threads)
-    vm_space_t vm;
-    int threads;                      // tasks running it
-    port_space_t ports;
-    uint64_t sig_handler[32], sig_tramp;
-    uint32_t sig_pending;
-    int no_echo;                      // CON_ECHO off: read(0) hides what is typed
-    file_t *fds[MAX_FDS];
-    uint8_t cloexec[MAX_FDS];         // FD_CLOEXEC: closed by exec
-    char exe[MAX_PATH];               // the program's file
-    char line_buf[256];               // keyboard input for read(0), one line at a time
-    uint32_t line_len, line_pos;
-    char cwd[256];                    // its own current directory
-    int ctrlc_mode;                   // CTRLC_END / CTRLC_KEY
-    pipe_t *tap_out, *tap_in;         // a kernel command run from a Terminal window: its pipes
-    char tap_buf[128];
-    int tap_len;
-    const char *tap_echo;             // the echo of the key just read: the window showed it
-} process_t;
 
 static int graphics_owner;            // pid drawing pixels (gfx), 0: the console
 static int sound_owner;               // pid streaming sound (sys_sound), 0: none
@@ -150,10 +89,6 @@ typedef struct {
 #define PT_LOAD         1
 
 /* ---- The current program -------------------------------------------- */
-
-static process_t *P(void) {
-    return (process_t *)task_current()->process;
-}
 
 /* 1 if Ctrl+C is a key for this task rather than the end of it. */
 static int takes_ctrl_c(task_t *t) {
@@ -225,10 +160,17 @@ int process_kernel_page_fault(uint64_t addr, uint64_t err) {
     task_t *t = task_current();
     process_t *p = t && t->is_user ? t->process : 0;
     if (!p || addr < USER_BASE || addr >= USER_TOP) return -1;
+    uint64_t e = paging_get_user_entry(t->root, addr);
+    if ((err & 1) && (e & PAGE_PRESENT) && (e & PAGE_USER) && (!(err & 2) || (e & PAGE_RW))) {
+        kprintf("SMAP: the kernel touched program memory at 0x%lx outside a system call\n", addr);
+        return -1;                                    /* a kernel bug: the panic screen */
+    }
     if (vm_fault(t->root, &p->vm, addr, (err & 2) != 0) == 0) return 0;
     /* Not the program's memory any more: let the call finish on a scratch
      * page, then end the program as if it had touched the address itself. */
     if (vm_scratch_page(t->root, addr) != 0) return -1;
+    kprintf("%s (pid %d): the kernel found program memory at 0x%lx gone - program ended\n",
+            t->name, t->pid, addr);
     if (!t->kill_code) t->kill_code = EXIT_SEGFAULT;
     return 0;
 }
@@ -260,7 +202,7 @@ static const char *user_cwd(void) {
 }
 
 /* Copy the program's path string at `ptr` and make it absolute. 0 on success. */
-static int user_path(uint64_t ptr, char *out, int size) {
+int user_path(uint64_t ptr, char *out, int size) {
     char raw[MAX_PATH];
     if (copy_user_string(raw, ptr, sizeof(raw)) != 0) return -1;
     return vfs_absolute(user_cwd(), raw, out, size) == 0 ? 0 : -1;
@@ -292,7 +234,7 @@ static int file_grow(file_t *f, uint32_t need) {
     return 0;
 }
 
-static file_t *file_new(int kind) {
+file_t *file_new(int kind) {
     file_t *f = kmalloc(sizeof(file_t));
     if (!f) return 0;
     memset(f, 0, sizeof(*f));
@@ -302,13 +244,13 @@ static file_t *file_new(int kind) {
     return f;
 }
 
-static int fd_free_slot(process_t *p, int from) {
+int fd_free_slot(process_t *p, int from) {
     for (int i = from; i < MAX_FDS; i++)
         if (!p->fds[i]) return i;
     return -1;
 }
 
-static file_t *fd_get(uint64_t fd) {
+file_t *fd_get(uint64_t fd) {
     process_t *p = P();
     return p && fd < MAX_FDS ? p->fds[fd] : 0;
 }
@@ -316,7 +258,7 @@ static file_t *fd_get(uint64_t fd) {
 static int64_t close_file(file_t *f);
 
 /* Every reference to a pipe or a local socket counts as one of its ends. */
-static void ends_added(file_t *f) {
+void ends_added(file_t *f) {
     if (f->kind == F_PIPE_R || f->kind == F_PIPE_W) {
         pipe_end_added(f->pipe, f->kind == F_PIPE_W);
     } else if (f->kind == F_USOCK && f->us) {
@@ -325,7 +267,7 @@ static void ends_added(file_t *f) {
     }
 }
 
-static void ends_closed(file_t *f) {
+void ends_closed(file_t *f) {
     if (f->kind == F_PIPE_R || f->kind == F_PIPE_W) {
         pipe_end_closed(f->pipe, f->kind == F_PIPE_W);
     } else if (f->kind == F_USOCK && f->us) {
@@ -335,7 +277,7 @@ static void ends_closed(file_t *f) {
 }
 
 /* One reference less; the last one closes it. */
-static int64_t file_put(file_t *f) {
+int64_t file_put(file_t *f) {
     if (!f || f == &console_file) return 0;
     if (--f->refs > 0) {
         ends_closed(f);
@@ -344,7 +286,7 @@ static int64_t file_put(file_t *f) {
     return close_file(f);
 }
 
-static file_t *file_get(file_t *f) {
+file_t *file_get(file_t *f) {
     if (f && f != &console_file) f->refs++;
     return f;
 }
@@ -395,9 +337,6 @@ static int64_t sys_open(uint64_t path_ptr, uint64_t mode) {
     return result;
 }
 
-static void usock_closed(file_t *f);
-static void listener_closed(file_t *f);
-
 static int64_t close_file(file_t *f) {
     int64_t result = 0;
     if (f->kind == F_PIPE_R || f->kind == F_PIPE_W) {
@@ -419,7 +358,7 @@ static int64_t close_file(file_t *f) {
     return result;
 }
 
-static int64_t sys_close(uint64_t fd) {
+int64_t sys_close(uint64_t fd) {
     file_t *f = fd_get(fd);
     if (!f) return SYSERR_BADFD;
     P()->fds[fd] = 0;
@@ -472,59 +411,10 @@ static int64_t sys_dup(uint64_t fd) {
     return to < 0 ? SYSERR_MFILE : sys_dup2(fd, (uint64_t)to);
 }
 
-/* ---- Local sockets ------------------------------------------------------ */
-
-static file_t *listeners[MAX_LISTENERS];       /* F_ULISTEN files; their names are f->path */
-
-static usock_t *usock_new(void) {
-    usock_t *us = kmalloc(sizeof(*us));
-    if (!us) return 0;
-    memset(us, 0, sizeof(*us));
-    us->pipe[0] = pipe_new();                    /* (one reader, one writer: the two ends) */
-    us->pipe[1] = pipe_new();
-    if (!us->pipe[0] || !us->pipe[1]) {
-        kfree(us->pipe[0]);
-        kfree(us->pipe[1]);
-        kfree(us);
-        return 0;
-    }
-    us->ends = 2;
-    return us;
-}
-
-static void usock_free(usock_t *us) {
-    if (!us) return;
-    kfree(us->pipe[0]);
-    kfree(us->pipe[1]);
-    kfree(us);
-}
-
-static void usock_closed(file_t *f) {
-    usock_t *us = f->us;
-    if (!us) return;
-    ends_closed(f);
-    if (--us->ends > 0) return;
-    for (int s = 0; s < 2; s++)
-        for (int i = 0; i < us->fdq_n[s]; i++) file_put(us->fdq[s][i]);
-    kfree(us);
-}
-
-static void listener_closed(file_t *f) {
-    for (int i = 0; i < MAX_LISTENERS; i++)
-        if (listeners[i] == f) listeners[i] = 0;
-    ulisten_t *l = f->ul;
-    for (int i = 0; l && i < l->n; i++) file_put(l->q[i]);
-    kfree(l);
-}
-
-static file_t *listener_named(const char *name) {
-    for (int i = 0; i < MAX_LISTENERS; i++)
-        if (listeners[i] && strcmp(listeners[i]->path, name) == 0) return listeners[i];
-    return 0;
-}
+/* ---- Pipes and descriptors (local sockets: syscall_usock.c) -------------- */
 
 /* Give this program a descriptor for f (or drop it). */
-static int64_t install(file_t *f) {
+int64_t install(file_t *f) {
     int fd = fd_free_slot(P(), 0);
     if (fd < 0) {
         file_put(f);
@@ -532,144 +422,6 @@ static int64_t install(file_t *f) {
     }
     P()->fds[fd] = f;
     return fd;
-}
-
-static int64_t sys_usock(uint64_t op, uint64_t a, uint64_t b, uint64_t c) {
-    process_t *p = P();
-    if (op == USOCK_NEW) {
-        file_t *f = file_new(F_USOCK);
-        return f ? install(f) : SYSERR_NOMEM;
-    }
-    if (op == USOCK_PAIR) {
-        if (!user_range_ok(a, 2 * sizeof(int), 1)) return SYSERR_FAULT;
-        usock_t *us = usock_new();
-        file_t *x = file_new(F_USOCK), *y = file_new(F_USOCK);
-        if (!us || !x || !y) {
-            usock_free(us);
-            kfree(x);
-            kfree(y);
-            return SYSERR_NOMEM;
-        }
-        x->us = y->us = us;
-        y->side = 1;
-        int64_t fx = install(x);
-        if (fx < 0) {
-            file_put(y);
-            return fx;
-        }
-        int64_t fy = install(y);
-        if (fy < 0) {
-            sys_close((uint64_t)fx);
-            return fy;
-        }
-        ((int *)a)[0] = (int)fx;
-        ((int *)a)[1] = (int)fy;
-        return 0;
-    }
-    file_t *f = fd_get(a);
-    if (!f) return SYSERR_BADFD;
-    switch (op) {
-    case USOCK_NONBLOCK:
-        if (f->kind == F_FILE || f->kind == F_CONSOLE) return SYSERR_BADFD;
-        f->nonblock = b != 0;
-        return 0;
-    case USOCK_NAME:
-        if (f->kind != F_USOCK && f->kind != F_ULISTEN) return SYSERR_BADFD;
-        if (!user_range_ok(b, 108, 1)) return SYSERR_FAULT;
-        kstrncpy((char *)b, f->path, 108);
-        return 0;
-    case USOCK_BIND:
-    case USOCK_CONNECT: {
-        if (f->kind != F_USOCK || f->us || f->path[0]) return SYSERR_BADFD;
-        char name[MAX_PATH];
-        if (user_path(b, name, sizeof(name)) != 0) return SYSERR_FAULT;
-        if (op == USOCK_BIND) {
-            if (listener_named(name)) return SYSERR_INUSE;
-            memcpy(f->path, name, sizeof(name));
-            return 0;
-        }
-        file_t *lf = listener_named(name);
-        if (!lf || lf->ul->n >= BACKLOG) return SYSERR_REFUSED;
-        usock_t *us = usock_new();
-        file_t *server = file_new(F_USOCK);
-        if (!us || !server) {
-            usock_free(us);
-            kfree(server);
-            return SYSERR_NOMEM;
-        }
-        f->us = server->us = us;
-        server->side = 1;
-        memcpy(f->path, name, sizeof(name));
-        memcpy(server->path, name, sizeof(name));
-        lf->ul->q[lf->ul->n++] = server;
-        task_wakeup(lf);
-        io_event();
-        return 0;
-    }
-    case USOCK_LISTEN: {
-        if (f->kind == F_ULISTEN) return 0;
-        if (f->kind != F_USOCK || f->us || !f->path[0]) return SYSERR_BADFD;
-        if (listener_named(f->path)) return SYSERR_INUSE;
-        int slot = -1;
-        for (int i = 0; i < MAX_LISTENERS && slot < 0; i++)
-            if (!listeners[i]) slot = i;
-        if (slot < 0) return SYSERR_MFILE;
-        f->ul = kmalloc(sizeof(ulisten_t));
-        if (!f->ul) return SYSERR_NOMEM;
-        memset(f->ul, 0, sizeof(ulisten_t));
-        f->kind = F_ULISTEN;
-        listeners[slot] = f;
-        return 0;
-    }
-    case USOCK_ACCEPT: {
-        if (f->kind != F_ULISTEN) return SYSERR_BADFD;
-        ulisten_t *l = f->ul;
-        while (l->n == 0) {
-            if (f->nonblock) return SYSERR_WOULDBLOCK;
-            if (process_interrupted() || process_signal_pending()) return SYSERR_TIMEOUT;
-            task_block(f, 100);
-        }
-        if (fd_free_slot(p, 0) < 0) return SYSERR_MFILE;
-        file_t *conn = l->q[0];
-        for (int i = 1; i < l->n; i++) l->q[i - 1] = l->q[i];
-        l->n--;
-        return install(conn);
-    }
-    case USOCK_SENDFDS: {
-        if (f->kind != F_USOCK || !f->us) return SYSERR_BADFD;
-        if (c > USOCK_MAX_FDS || !user_range_ok(b, c * sizeof(int), 0)) return SYSERR_FAULT;
-        usock_t *us = f->us;
-        int to = !f->side;
-        if (us->fdq_n[to] + (int)c > USOCK_MAX_FDS) return SYSERR_MFILE;
-        const int *fds = (const int *)b;
-        for (uint64_t i = 0; i < c; i++)
-            if (fds[i] < 0 || !fd_get((uint64_t)fds[i])) return SYSERR_BADFD;
-        for (uint64_t i = 0; i < c; i++) {
-            file_t *x = file_get(fd_get((uint64_t)fds[i]));
-            ends_added(x);
-            us->fdq[to][us->fdq_n[to]++] = x;
-        }
-        io_event();
-        return 0;
-    }
-    case USOCK_RECVFDS: {
-        if (f->kind != F_USOCK || !f->us) return SYSERR_BADFD;
-        if (!user_range_ok(b, c * sizeof(int), 1)) return SYSERR_FAULT;
-        usock_t *us = f->us;
-        int me = f->side, n = 0;
-        int *out = (int *)b;
-        while ((uint64_t)n < c && us->fdq_n[me] > 0) {
-            int fd = fd_free_slot(p, 0);
-            if (fd < 0) break;
-            p->fds[fd] = us->fdq[me][0];
-            for (int i = 1; i < us->fdq_n[me]; i++) us->fdq[me][i - 1] = us->fdq[me][i];
-            us->fdq_n[me]--;
-            out[n++] = fd;
-        }
-        return n;
-    }
-    }
-    return SYSERR_BADCALL;
 }
 
 /* A pipe read or write; non-blocking files get SYSERR_WOULDBLOCK instead of
@@ -1272,7 +1024,9 @@ static void syscall_dispatch_locked(struct exc_frame *f);
 /* Every system call runs under the big kernel lock (sys/smp.h). */
 void syscall_dispatch(struct exc_frame *f) {
     bkl_enter();
+    user_access_begin();                              /* SMAP: the call may use the program's memory */
     syscall_dispatch_locked(f);
+    user_access_end();
     bkl_leave();
 }
 

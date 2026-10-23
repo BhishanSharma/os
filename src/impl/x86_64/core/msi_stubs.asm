@@ -4,10 +4,12 @@
 ; device's handler and acknowledges the local APIC), and returns.
 
 extern msi_dispatch
+extern smap_entry
 
 %macro MSI_STUB 1
 global msi_stub_%1
 msi_stub_%1:
+    call smap_entry         ; (AC off: no access to program memory, sys/smp.h)
     push rax
     push rcx
     push rdx

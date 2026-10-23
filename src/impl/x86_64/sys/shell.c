@@ -423,7 +423,8 @@ static void cmd_crash(const char *what)
     }
     else if (strcmp(what, "pf") == 0)
     {
-        *(volatile uint32_t *)0x5000000 = 1; // unmapped page
+        // an unmapped kernel page (a program's address would only end the program)
+        *(volatile uint32_t *)0xFFFFE00000000000ULL = 1;
     }
     else if (strcmp(what, "null") == 0)
     {

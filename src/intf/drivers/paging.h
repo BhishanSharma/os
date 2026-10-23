@@ -55,6 +55,13 @@ void paging_walk_user(uint64_t root, void (*fn)(uint64_t virt, uint64_t *pte, vo
  * pages of programs instead of writing through them) and, where the CPU has
  * it, SMEP (the kernel never runs code from a program's pages). */
 void paging_cpu_protect(void);
+
+/* SMAP (where the CPU has it): the kernel may touch a program's pages only
+ * between user_access_begin and user_access_end (EFLAGS.AC). System calls
+ * run in such a window; interrupts close it (core/exc_stubs.asm). */
+extern uint8_t smap_enabled;
+static inline void user_access_begin(void) { if (smap_enabled) __asm__ volatile("stac" ::: "memory", "cc"); }
+static inline void user_access_end(void) { if (smap_enabled) __asm__ volatile("clac" ::: "memory", "cc"); }
 void paging_flush(void);                             /* reload CR3: forget cached entries */
 #define PAGE_COW 0x200                               /* software bit: copy on write */
 void paging_free_address_space(uint64_t root);       /* also frees every mapped page */

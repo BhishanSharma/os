@@ -1,4 +1,5 @@
 #include "drivers/paging.h"
+#include "sys/smp.h"
 #include "drivers/physmem.h"
 #include "drivers/memory.h"
 #include "core/exceptions.h"
@@ -102,8 +103,10 @@ static page_entry_t *get_pd(uint64_t virt) {
 
 void map_large_page(uint64_t virt, uint64_t phys) {
     page_entry_t *pd = get_pd(virt);
+    page_entry_t old = pd[(virt >> 21) & 0x1FF];
     pd[(virt >> 21) & 0x1FF] = (phys & ~(LARGE_PAGE - 1)) | PAGE_PRESENT | PAGE_RW | PAGE_SIZE_2MB;
     asm volatile("invlpg (%0)" :: "r"(virt) : "memory");
+    if ((old & PAGE_PRESENT) && old != pd[(virt >> 21) & 0x1FF]) tlb_shootdown(0);
 }
 
 void map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
@@ -115,8 +118,12 @@ void map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
     page_entry_t *pde = &pd[(virt >> 21) & 0x1FF];
     if ((*pde & PAGE_PRESENT) && (*pde & PAGE_SIZE_2MB)) kpanic("map_page: address is inside a 2 MiB page");
     page_entry_t *pt = kernel_next(pde, upper);
+    page_entry_t old = pt[(virt >> 12) & 0x1FF];
     pt[(virt >> 12) & 0x1FF] = (phys & ~0xFFFULL) | (flags & 0xFFF) | PAGE_PRESENT;
     asm volatile("invlpg (%0)" :: "r"(virt) : "memory");
+    /* Changed under other cores' feet: they forget it too (a new entry needs
+     * nothing, the TLB keeps no "not present"). */
+    if ((old & PAGE_PRESENT) && old != pt[(virt >> 12) & 0x1FF]) tlb_shootdown(0);
 }
 
 /* Put physical [start, end) into the direct map (write-back): 2 MiB pages
@@ -201,6 +208,7 @@ uint64_t unmap_page(uint64_t virt) {
     if (!(pte & PAGE_PRESENT)) return 0;
     pt[(virt >> 12) & 0x1FF] = 0;
     asm volatile("invlpg (%0)" :: "r"(virt) : "memory");
+    tlb_shootdown(0);
     return pte & ADDR_MASK;
 }
 
@@ -284,6 +292,8 @@ void paging_walk_user(uint64_t root, void (*fn)(uint64_t virt, uint64_t *pte, vo
     if (root) walk_level(TABLE(root), 4, 0, fn, ctx);
 }
 
+uint8_t smap_enabled;
+
 void paging_cpu_protect(void) {
     uint64_t cr0, cr4;
     asm volatile("mov %%cr0, %0" : "=r"(cr0));
@@ -292,9 +302,14 @@ void paging_cpu_protect(void) {
     asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0), "c"(0));
     if (a < 7) return;
     asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(7), "c"(0));
-    if (!(b & (1u << 7))) return;
     asm volatile("mov %%cr4, %0" : "=r"(cr4));
-    asm volatile("mov %0, %%cr4" :: "r"(cr4 | (1ULL << 20)) : "memory");     /* SMEP */
+    if (b & (1u << 7)) cr4 |= 1ULL << 20;                                    /* SMEP */
+    if (b & (1u << 20)) {                                                     /* SMAP */
+        asm volatile("clac" ::: "memory", "cc");
+        cr4 |= 1ULL << 21;
+        smap_enabled = 1;
+    }
+    asm volatile("mov %0, %%cr4" :: "r"(cr4) : "memory");
 }
 
 void paging_flush(void) {

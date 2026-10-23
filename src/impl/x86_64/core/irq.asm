@@ -1,7 +1,9 @@
 extern isr_keyboard
+extern smap_entry
 
 global irq1_stub
 irq1_stub:
+    call smap_entry         ; (AC off: no access to program memory, sys/smp.h)
     push rax
     push rcx
     push rdx
@@ -51,6 +53,7 @@ extern user_check_interrupt
 
 global irq0_stub
 irq0_stub:
+    call smap_entry         ; (AC off: no access to program memory, sys/smp.h)
     ; Save all general-purpose registers
     push rax
     push rcx
@@ -112,6 +115,7 @@ extern nic_handle_irq
 
 global irq_nic_stub
 irq_nic_stub:
+    call smap_entry         ; (AC off: no access to program memory, sys/smp.h)
     push rax
     push rcx
     push rdx
@@ -163,6 +167,7 @@ extern mouse_irq
 ; IRQ 12: the PS/2 mouse (slave PIC).
 global irq_mouse_stub
 irq_mouse_stub:
+    call smap_entry         ; (AC off: no access to program memory, sys/smp.h)
     push rax
     push rcx
     push rdx

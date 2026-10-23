@@ -43,7 +43,8 @@ void cpu_wait(void);
 
 /* After the lock's owner removed or write-protected pages of address space
  * `root` (and invlpg'd them here): every other core running it flushes its
- * TLB before this returns. Call before the pages can be handed out again. */
+ * TLB before this returns. Call before the pages can be handed out again.
+ * `root` 0: every core (a change to the kernel's half, which all share). */
 void tlb_shootdown(uint64_t root);
 
 /* `cpus`: every core, what it runs. */

@@ -87,9 +87,11 @@ trampoline_end:
 section .text
 bits 64
 extern ap_timer_interrupt
+extern smap_entry
 
 global ap_timer_stub
 ap_timer_stub:
+    call smap_entry         ; (AC off: no access to program memory, sys/smp.h)
     push rax
     push rcx
     push rdx
@@ -133,6 +135,7 @@ extern tlb_ipi_interrupt
 
 global tlb_ipi_stub
 tlb_ipi_stub:
+    call smap_entry         ; (AC off: no access to program memory, sys/smp.h)
     push rax
     push rcx
     push rdx

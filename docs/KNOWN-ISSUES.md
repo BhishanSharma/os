@@ -10,15 +10,20 @@ move to the "Fixed" section below so you can see what changed and where.
 2. **FAT32:** long names are ASCII only (other characters show as `?`); `ls` shows at
    most 128 entries, `tree` 32; `cat` refuses files over 1 MB.
 3. **System calls read program memory directly.** After `user_range_ok` the kernel
-   dereferences the pointer itself. That is safe only under the big kernel lock; a
-   finer-grained kernel needs `copy_from_user`/`copy_to_user` with fault fixups. Until
-   those exist SMAP stays off (SMEP and CR0.WP are on).
-4. **Kernel mappings are not shot down.** `map_page`/`unmap_page` on the kernel's half
-   (the ACPI window, the SMP trampoline) only `invlpg` the calling core. Today only the
-   lock's owner touches those addresses; `tlb_shootdown` (sys/smp.c) covers programs'
-   pages only.
+   dereferences the pointer itself, so SMAP guards everything except the system call
+   window (`user_access_begin`/`user_access_end` around `syscall_dispatch`). Narrower
+   `copy_from_user`/`copy_to_user` helpers would close that window too.
 
 ## Fixed
+
+### SMAP, and kernel mappings on other cores (fixed)
+
+SMAP is on where the CPU has it: the kernel can touch program memory only during a
+system call; every interrupt and exception stub turns EFLAGS.AC off (a program can set
+it), and `schedule` gives each task its own AC back. A stray access panics with
+"SMAP: the kernel touched program memory ... outside a system call". `map_page`,
+`unmap_page` and `map_large_page` now call `tlb_shootdown(0)` (every core) when they
+change or remove an entry that was there.
 
 ### TLB entries left on other cores (fixed)
 

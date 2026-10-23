@@ -31,6 +31,7 @@ task_switch:
     ret
 
 extern bkl_user_entry
+extern smap_entry
 global task_start_user
 task_start_user:
     sub rsp, 8              ; (16-byte alignment for the call)
@@ -88,6 +89,7 @@ task_start_frame:
 extern task_exit_kernel
 global task_start_kernel
 task_start_kernel:
+    call smap_entry         ; (the core may have come from a system call)
     sti
     call r12
     call task_exit_kernel   ; does not return
