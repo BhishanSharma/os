@@ -7,13 +7,37 @@ move to the "Fixed" section below so you can see what changed and where.
 
 1. **The "C compiler" is a stub.** It only understands `main` with `printf("...")` and
    `return N`. Tokenizing handles more than the code generator does.
-2. **Networking stops at ICMP.** ARP, IPv4 and ICMP echo work (`ping`), but there is no
-   UDP/TCP, DNS, DHCP or HTTP yet, so `ping` takes only IP addresses. See
-   [NETWORKING.md](NETWORKING.md) for the plan.
-3. **FAT32:** long names are ASCII only (other characters show as `?`); `ls` shows at
+2. **FAT32:** long names are ASCII only (other characters show as `?`); `ls` shows at
    most 128 entries, `tree` 32; `cat` refuses files over 1 MB.
+3. **System calls read program memory directly.** After `user_range_ok` the kernel
+   dereferences the pointer itself. That is safe only under the big kernel lock; a
+   finer-grained kernel needs `copy_from_user`/`copy_to_user` with fault fixups. Until
+   those exist SMAP stays off (SMEP and CR0.WP are on).
+4. **Kernel mappings are not shot down.** `map_page`/`unmap_page` on the kernel's half
+   (the ACPI window, the SMP trampoline) only `invlpg` the calling core. Today only the
+   lock's owner touches those addresses; `tlb_shootdown` (sys/smp.c) covers programs'
+   pages only.
 
 ## Fixed
+
+### TLB entries left on other cores (fixed)
+
+`munmap`, copy-on-write faults and `fork` ran `invlpg` only on the calling core, so a
+sibling thread on another core could keep using a page after it was freed and handed
+to another program. `tlb_shootdown(root)` now interrupts every core running that
+address space (vector 0x42) and waits until each has reloaded CR3; cores spinning for
+the kernel lock with interrupts off answer by polling.
+
+### A system call's buffer unmapped while it waited (fixed)
+
+Blocking calls let go of the kernel lock, so another thread could `munmap` a buffer the
+call had already checked; the kernel then faulted in ring 0 and panicked. Kernel faults
+on program addresses now page the memory in, or put a scratch page there, let the call
+finish and end the program with exit code 139.
+
+### Networking stopped at ICMP (fixed)
+
+DHCP, DNS, TCP, HTTP and HTTPS (BearSSL) now work; see [NETWORKING.md](NETWORKING.md).
 
 ### NIC receive ring and missing transmit path (fixed)
 

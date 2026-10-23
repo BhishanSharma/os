@@ -1,11 +1,12 @@
 # Terminal OS
 
-A tiny hobby operating system for x86_64, written from scratch in C and NASM.
-It boots with its own UEFI loader, runs in 64-bit long mode and gives you a text-mode shell
-with a FAT32 filesystem, a line editor, a simple script runner and an
-RTL8139 network-card driver.
-
-> Version 0.1. Terminal only, everything runs in ring 0, no userspace yet.
+A hobby operating system for x86_64, written from scratch in C and NASM.
+It boots with its own UEFI loader on real laptops and in VMs, runs on every
+CPU core, and starts programs in ring 3, each in its own address space with
+threads, `fork`/`exec` and shared memory. On top sit a graphical desktop (a
+window server with GPU-drawn glass on Intel graphics, a login window and apps
+such as Finder, Terminal, Paint, Music and Video), a shell, FAT32 on NVMe,
+and a network stack with Wi-Fi, TCP and HTTPS.
 
 ## Quick start
 
@@ -43,6 +44,7 @@ The USB stick image ends up at `dist/x86_64/terminalos.img` (`make iso` still bu
 | CPU cores      | SMP: the other cores are started from the ACPI MADT (INIT-SIPI-SIPI, a real-mode trampoline at 0x8000) and run user programs in parallel; the kernel runs under one big lock, released while it waits. `cpus` shows them; safe mode (S at boot, `nosmp`) keeps one |
 | Power          | ACPI through [uACPI](https://github.com/uACPI/uACPI) (MIT, vendored in `third_party/uacpi`), which runs the firmware's AML: `shutdown` and the power button switch off (S5); the battery (charge, health, time left) and charger are read through the embedded controller, shown in the status bar and by `battery`. ACPI events are polled from the idle loop |
 | Interrupts     | 8259 PIC for legacy devices, plus PCI MSI / MSI-X through the local APIC for USB (xHCI), NVMe and Intel Wi-Fi (`interrupts` counts them); the timer polls stay as a backstop |
+| Desktop        | `windowserver` composites the programs' shared-memory windows, with the Rail, Launcher and Dock; `loginwindow` signs you in; apps live in `apps/` (see [docs/APPS.md](docs/APPS.md)); on Intel Gen12 graphics the blur and fades run on the GPU ([docs/GPU.md](docs/GPU.md)) |
 | User space     | Programs run in ring 3, each with its own address space; preemptive multitasking with background jobs (`&`, `jobs`, `ps`, `fg`, `kill`); system calls (`int 0x80`) including `spawn`/`wait`, a small C library; the shell itself is a user program started at login; faults, Ctrl+C and `kill` end only the program. See [docs/USERSPACE.md](docs/USERSPACE.md) |
 | Storage        | NVMe SSDs (polled or MSI-X, GPT/MBR partitions), ATA PIO, and the RAM disk loaded at boot. A VFS with mounts and real paths (`/A/B/C.TXT`, `..`, across mounts); FAT32 read/write with long file names (VFAT, up to 255 characters, case kept, Windows-compatible `~1` aliases). On a laptop, a FAT32 partition labelled TERMINALOS (made in Windows) becomes `/` and keeps files, accounts and Wi-Fi settings across reboots; every other partition is read-only |
 | Users          | Login prompt, root and normal accounts (`useradd`, `passwd`, `su`), salted password hashes, users may only change files in their home folder |
