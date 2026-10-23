@@ -261,6 +261,10 @@ static void send_ipi(uint32_t dest, uint32_t low) {
     for (int i = 0; i < 100000 && (lapic_read(LAPIC_ICR_LOW) & (1u << 12)); i++) __asm__ volatile("pause");
 }
 
+void apic_send_ipi(uint32_t apic_id, uint8_t vector) {
+    send_ipi(apic_id, 0x4000 | vector);                 /* fixed delivery, level assert */
+}
+
 static void wait_us(uint32_t us) {
     /* The TSC rate from the kernel ticks (once). */
     static uint64_t per_us;

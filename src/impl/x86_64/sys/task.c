@@ -44,6 +44,7 @@ static void irq_restore(uint64_t flags) {
 
 int task_running(void) { return cur[0] != 0; }
 task_t *task_current(void) { return cur[cpu_index()]; }
+uint64_t task_root_on(int cpu) { return cur[cpu] ? cur[cpu]->root : 0; }
 task_t *task_at(int index) { return index >= 0 && index < MAX_TASKS ? &tasks[index] : 0; }
 
 task_t *task_by_pid(int pid) {

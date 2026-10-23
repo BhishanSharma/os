@@ -41,6 +41,11 @@ void bkl_take(int depth);
  * Use instead of `hlt` in kernel code. Turns interrupts on. */
 void cpu_wait(void);
 
+/* After the lock's owner removed or write-protected pages of address space
+ * `root` (and invlpg'd them here): every other core running it flushes its
+ * TLB before this returns. Call before the pages can be handed out again. */
+void tlb_shootdown(uint64_t root);
+
 /* `cpus`: every core, what it runs. */
 void smp_print(void);
 

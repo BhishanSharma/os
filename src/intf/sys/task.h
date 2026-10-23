@@ -51,6 +51,7 @@ void task_init_ap(int cpu);
 int task_running(void);       /* 1 once task_init has run */
 
 task_t *task_current(void);
+uint64_t task_root_on(int cpu);       /* the address space core `cpu` runs (lock held) */
 task_t *task_by_pid(int pid);
 task_t *task_at(int index);   /* 0..MAX_TASKS-1, for ps; FREE slots included */
 

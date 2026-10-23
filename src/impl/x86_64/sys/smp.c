@@ -13,11 +13,13 @@
 
 #define TRAMPOLINE       0x8000
 #define AP_TIMER_VECTOR  0x41
+#define TLB_VECTOR       0x42
 #define AP_STACK_SIZE    (64 * 1024)
 #define MSR_TSC_AUX      0xC0000103
 
 extern uint8_t trampoline_start[], trampoline_end[], trampoline_params[];
 extern void ap_timer_stub(void);
+extern void tlb_ipi_stub(void);
 void user_check_interrupt(void);          // sys/process.c
 
 static int ncpus = 1, smp_on, have_rdtscp;
@@ -51,8 +53,15 @@ int cpu_index(void) {
 static volatile int bkl_owner = -1;
 static volatile int bkl_depth;
 
+static void tlb_catch_up(int me);
+
+/* Spins with interrupts off, so it also answers TLB shootdowns (below):
+ * the lock's owner may be waiting for this core to flush. */
 static void bkl_acquire(int me) {
-    while (__sync_val_compare_and_swap(&bkl_owner, -1, me) != -1) __asm__ volatile("pause");
+    while (__sync_val_compare_and_swap(&bkl_owner, -1, me) != -1) {
+        tlb_catch_up(me);
+        __asm__ volatile("pause");
+    }
 }
 
 static void bkl_release(void) {
@@ -137,6 +146,47 @@ void cpu_wait(void) {
     }
 }
 
+/* ---- TLB shootdown ------------------------------------------------------------------
+ * A core keeps translations of its address space cached (no PCID: a CR3 switch
+ * drops them). When the lock's owner unmaps or write-protects a program's page,
+ * the other cores running that program must forget it before the page is
+ * reused. Each shootdown is a new generation; a core that has flushed records
+ * it. Cores take it from the interrupt, or while spinning for the lock with
+ * interrupts off (the owner is the one waiting). */
+
+static volatile uint64_t tlb_gen;
+static volatile uint64_t tlb_seen[MAX_CPUS];
+
+static void tlb_catch_up(int me) {
+    uint64_t g = __atomic_load_n(&tlb_gen, __ATOMIC_ACQUIRE);
+    if (tlb_seen[me] == g) return;
+    paging_flush();
+    __atomic_store_n(&tlb_seen[me], g, __ATOMIC_RELEASE);
+}
+
+void tlb_ipi_interrupt(void) {
+    tlb_catch_up(cpu_index());
+    apic_eoi();
+}
+
+void tlb_shootdown(uint64_t root) {
+    if (!smp_on || ncpus < 2) return;
+    int me = cpu_index(), wait[MAX_CPUS], n = 0;
+    uint64_t g = __atomic_add_fetch(&tlb_gen, 1, __ATOMIC_ACQ_REL);
+    tlb_seen[me] = g;                               /* the caller flushed its own (invlpg) */
+    for (int i = 0; i < ncpus; i++) {
+        if (i == me || !cpu_up[i] || task_root_on(i) != root) continue;
+        apic_send_ipi(cpu_apic[i], TLB_VECTOR);
+        wait[n++] = i;
+    }
+    /* A core that stopped (a panic) never answers: give up after a while
+     * (counted, not timed: the ticks stop while this core has interrupts off). */
+    uint64_t spins = 0;
+    for (int k = 0; k < n; k++)
+        while (__atomic_load_n(&tlb_seen[wait[k]], __ATOMIC_ACQUIRE) < g && spins++ < 100000000ull)
+            __asm__ volatile("pause");
+}
+
 /* ---- The other cores ---------------------------------------------------------------- */
 
 /* Their timer: preemption of user programs, like the boot core's. */
@@ -194,6 +244,7 @@ int smp_init(int enabled) {
         return 1;
     }
     idt_set_entry(AP_TIMER_VECTOR, ap_timer_stub, 0x8E);
+    idt_set_entry(TLB_VECTOR, tlb_ipi_stub, 0x8E);
 
     /* The trampoline below 1 MiB, identity mapped while the cores start (it
      * turns paging on mid-way); written through the direct map. Only the

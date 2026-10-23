@@ -2,6 +2,7 @@
 #include "sys/vm.h"
 #include "sys/vfs.h"
 #include "sys/task.h"
+#include "sys/smp.h"
 #include "drivers/paging.h"
 #include "drivers/physmem.h"
 #include "drivers/memory.h"
@@ -90,7 +91,10 @@ int vm_fault(uint64_t root, vm_space_t *s, uint64_t addr, int write) {
             if (!copy) return -1;
             memcpy(phys_to_virt(copy), phys_to_virt(phys), PAGE_SIZE);
             *pte = copy | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+            __asm__ volatile("invlpg (%0)" :: "r"(page) : "memory");
+            tlb_shootdown(root);                              /* sibling threads must see the copy */
             page_free(phys);                                  /* one mapping less */
+            return 0;
         }
         __asm__ volatile("invlpg (%0)" :: "r"(page) : "memory");
         return 0;
@@ -138,6 +142,7 @@ uint64_t vm_map(vm_space_t *s, uint64_t len, int prot, int kind, vm_object_t *ob
 }
 
 static void drop_range(uint64_t root, uint64_t lo, uint64_t hi) {
+    int dropped = 0;
     for (uint64_t v = lo; v < hi; v += PAGE_SIZE) {
         uint64_t *pte = paging_user_pte(root, v, 0);
         if (!pte) {                                   /* no page table: 2 MiB with nothing mapped */
@@ -148,8 +153,11 @@ static void drop_range(uint64_t root, uint64_t lo, uint64_t hi) {
             drop_page(*pte & 0x000FFFFFFFFFF000ULL);
             *pte = 0;
             __asm__ volatile("invlpg (%0)" :: "r"(v) : "memory");
+            dropped = 1;
         }
     }
+    /* Before anything is allocated again (the freed pages are only marked free). */
+    if (dropped) tlb_shootdown(root);
 }
 
 int vm_unmap_range(uint64_t root, vm_space_t *s, uint64_t addr, uint64_t len) {
@@ -200,6 +208,7 @@ int vm_unmap(uint64_t root, vm_space_t *s, uint64_t addr) {
                 __asm__ volatile("invlpg (%0)" :: "r"(v) : "memory");
             }
         }
+        tlb_shootdown(root);
         *p = r->next;
         obj_put(r->obj);
         kfree(r);
@@ -366,6 +375,7 @@ int vm_fork(uint64_t src_root, vm_space_t *src, uint64_t dst_root, vm_space_t *d
     struct fork_ctx c = { dst_root, src, 0 };
     paging_walk_user(src_root, fork_page, &c);
     paging_flush();                                           /* the parent's pages are read-only now */
+    tlb_shootdown(src_root);                                  /* also for its threads on other cores */
     return c.failed ? -1 : 0;
 }
 

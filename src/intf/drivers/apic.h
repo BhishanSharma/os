@@ -30,5 +30,6 @@ uint32_t apic_timer_per_second(void);
 void apic_start_core(uint32_t apic_id, uint8_t page);
 void apic_setup_core(uint32_t per_second, uint8_t timer_vector);
 int apic_is_x2(void);
+void apic_send_ipi(uint32_t apic_id, uint8_t vector);   /* a fixed interrupt to one core */
 
 #endif
