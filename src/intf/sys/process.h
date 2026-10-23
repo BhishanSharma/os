@@ -61,6 +61,9 @@ int process_interrupted(void);
 /* A page fault in user mode (exceptions.c): 0 if it was handled (a page of a
  * region brought in, copy-on-write). */
 int process_page_fault(uint64_t addr, uint64_t err);
+/* The kernel faulted on a program's address (a system call's buffer that
+ * another thread unmapped while the call waited): 0 if the kernel can go on. */
+int process_kernel_page_fault(uint64_t addr, uint64_t err);
 int process_signal_pending(void);    /* a handled signal waits: blocking calls return early */
 
 #endif

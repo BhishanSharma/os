@@ -42,6 +42,10 @@ vm_region_t *vm_find(vm_space_t *s, uint64_t addr);
  * (a real segmentation fault). */
 int vm_fault(uint64_t root, vm_space_t *s, uint64_t addr, int write);
 
+/* A fresh writable page at `addr`, whatever was there: lets kernel code that
+ * faulted on a program's memory finish (the program is then ended). */
+int vm_scratch_page(uint64_t root, uint64_t addr);
+
 /* Map `len` bytes somewhere free: anonymous (obj 0), a file or shared memory.
  * Returns the address, 0 if there is no room. Takes over the reference. */
 uint64_t vm_map(vm_space_t *s, uint64_t len, int prot, int kind, vm_object_t *obj);

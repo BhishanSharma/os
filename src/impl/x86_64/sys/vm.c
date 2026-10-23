@@ -132,6 +132,25 @@ int vm_fault(uint64_t root, vm_space_t *s, uint64_t addr, int write) {
     return 0;
 }
 
+int vm_scratch_page(uint64_t root, uint64_t addr) {
+    uint64_t page = addr & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t phys = new_page(0);
+    if (!phys) return -1;
+    uint64_t *pte = paging_user_pte(root, page, 1);
+    if (!pte) {
+        drop_page(phys);
+        return -1;
+    }
+    uint64_t old = *pte;
+    *pte = phys | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+    __asm__ volatile("invlpg (%0)" :: "r"(page) : "memory");
+    if (old & PAGE_PRESENT) {
+        tlb_shootdown(root);
+        drop_page(old & 0x000FFFFFFFFFF000ULL);
+    }
+    return 0;
+}
+
 uint64_t vm_map(vm_space_t *s, uint64_t len, int prot, int kind, vm_object_t *obj) {
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     if (!len || len > (1ULL << 46)) return 0;           /* 64 TiB: reservations (JavaScript cages) */

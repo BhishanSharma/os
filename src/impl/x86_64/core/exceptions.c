@@ -174,6 +174,11 @@ void exception_handler(struct exc_frame* f) {
         bkl_leave();
         return;
     }
+    // The kernel faulted on a program's memory during a system call.
+    if ((f->cs & 3) == 0 && f->vector == 14 && process_kernel_page_fault(read_cr(2), f->error) == 0) {
+        bkl_leave();
+        return;
+    }
     if ((f->cs & 3) == 3) {
         uint32_t uv = f->vector < 32 ? (uint32_t)f->vector : 31;
         process_fault(f->vector, exc_name[uv], f->rip, f->vector == 14 ? read_cr(2) : 0);

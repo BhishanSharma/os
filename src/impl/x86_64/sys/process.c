@@ -220,6 +220,18 @@ int process_page_fault(uint64_t addr, uint64_t err) {
     return vm_fault(t->root, &p->vm, addr, (err & 2) != 0);
 }
 
+int process_kernel_page_fault(uint64_t addr, uint64_t err) {
+    task_t *t = task_current();
+    process_t *p = t && t->is_user ? t->process : 0;
+    if (!p || addr < USER_BASE || addr >= USER_TOP) return -1;
+    if (vm_fault(t->root, &p->vm, addr, (err & 2) != 0) == 0) return 0;
+    /* Not the program's memory any more: let the call finish on a scratch
+     * page, then end the program as if it had touched the address itself. */
+    if (vm_scratch_page(t->root, addr) != 0) return -1;
+    if (!t->kill_code) t->kill_code = EXIT_SEGFAULT;
+    return 0;
+}
+
 int process_signal_pending(void) {
     task_t *t = task_current();
     return t && t->is_user && t->process && ((process_t *)t->process)->sig_pending != 0;
@@ -1483,6 +1495,7 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
         default:          r = SYSERR_BADCALL; break;
     }
     f->rax = (uint64_t)r;
+    check_killed();                                   /* (e.g. its buffer vanished meanwhile) */
     deliver_signals(f);
 }
 
