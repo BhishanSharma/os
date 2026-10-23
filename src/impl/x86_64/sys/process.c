@@ -7,6 +7,7 @@
 // programs can run at once; the timer switches between them. One of them may
 // be in the foreground: it gets the keyboard and Ctrl+C.
 #include "sys/process.h"
+#include "process_internal.h"
 #include "sys/smp.h"
 #include "drivers/igfx.h"
 #include "sys/syscall_nums.h"
@@ -199,7 +200,7 @@ static void copy_to_space(uint64_t root, uint64_t vaddr, const void *src, uint64
 /* 1 if the running program may read (or, with `write`, write) [ptr, ptr + len).
  * Pages of its regions that are not there yet are brought in (sys/vm.h), so
  * the kernel can then use the memory directly. */
-static int user_range_ok(uint64_t ptr, uint64_t len, int write) {
+int user_range_ok(uint64_t ptr, uint64_t len, int write) {
     if (len == 0) return 1;
     if (ptr < USER_BASE || ptr + len > USER_TOP || ptr + len < ptr) return 0;
     process_t *p = P();
@@ -238,7 +239,7 @@ int process_signal_pending(void) {
 }
 
 /* Copy a NUL-terminated string from the program; 0 on success. */
-static int copy_user_string(char *out, uint64_t ptr, size_t max) {
+int copy_user_string(char *out, uint64_t ptr, size_t max) {
     for (size_t i = 0; i < max; i++) {
         if (!user_range_ok(ptr + i, 1, 0)) return -1;
         out[i] = *(const char *)(ptr + i);
@@ -275,70 +276,6 @@ static void leave_cwd(const char *saved) {
     if (saved[0]) fat32_change_directory(saved);
 }
 
-static void check_killed(void);
-
-/* ---- Sockets ------------------------------------------------------------ */
-
-static int own_socket(int s) { return tcp_owner(s) == task_current()->pid; }
-
-/* A TCP result for the program: new sockets become its own; Ctrl+C ends it. */
-static int64_t sock_result(int r, int is_new_socket) {
-    if (r >= 0) {
-        if (is_new_socket) tcp_set_owner(r, task_current()->pid);
-        return r;
-    }
-    switch (r) {
-        case TCP_ERR_INTR:    check_killed(); return SYSERR_TIMEOUT;
-        case TCP_ERR_TIMEOUT: return SYSERR_TIMEOUT;
-        case TCP_ERR_REFUSED: return SYSERR_REFUSED;
-        case TCP_ERR_RESET:   return SYSERR_RESET;
-        case TCP_ERR_CLOSED:  return SYSERR_CLOSED;
-        case TCP_ERR_NOROUTE: return SYSERR_NOROUTE;
-        case TCP_ERR_INUSE:   return SYSERR_INUSE;
-        case TCP_ERR_NOSOCK:  return is_new_socket ? SYSERR_AGAIN : SYSERR_BADFD;
-        default:              return SYSERR_IO;
-    }
-}
-
-static int64_t sys_resolve(uint64_t host_ptr, uint64_t ip_ptr) {
-    char host[128];
-    if (copy_user_string(host, host_ptr, sizeof(host)) != 0 || !user_range_ok(ip_ptr, 4, 1)) return SYSERR_FAULT;
-    if (!net_is_up()) return SYSERR_NOROUTE;
-    uint8_t ip[4];
-    if (net_resolve(host, ip) != 0) return SYSERR_NOHOST;
-    memcpy((void *)ip_ptr, ip, 4);
-    return 0;
-}
-
-static int64_t sys_connect(uint64_t packed, uint64_t port, uint64_t timeout_ms) {
-    if (!net_is_up()) return SYSERR_NOROUTE;
-    if (!port || port > 65535) return SYSERR_BADCALL;
-    uint8_t ip[4] = { (uint8_t)(packed >> 24), (uint8_t)(packed >> 16), (uint8_t)(packed >> 8), (uint8_t)packed };
-    return sock_result(tcp_connect(ip, (uint16_t)port, timeout_ms ? (uint32_t)timeout_ms : 10000), 1);
-}
-
-#define NO_LIMIT_MS 0x7FFFFFFu                        /* "no limit": about 37 hours */
-
-static int64_t sys_accept(uint64_t s, uint64_t timeout_ms) {
-    if (!own_socket((int)s)) return SYSERR_BADFD;
-    uint32_t ms = timeout_ms && timeout_ms < NO_LIMIT_MS ? (uint32_t)timeout_ms : NO_LIMIT_MS;
-    return sock_result(tcp_accept((int)s, ms), 1);
-}
-
-static int64_t sys_send(uint64_t s, uint64_t buf, uint64_t len) {
-    if (!own_socket((int)s)) return SYSERR_BADFD;
-    if (!user_range_ok(buf, len, 0)) return SYSERR_FAULT;
-    if (len > 0x7FFFFFFF) len = 0x7FFFFFFF;
-    return sock_result(tcp_send((int)s, (const void *)buf, (uint32_t)len), 0);
-}
-
-static int64_t sys_recv(uint64_t s, uint64_t buf, uint64_t len, uint64_t timeout_ms) {
-    if (!own_socket((int)s)) return SYSERR_BADFD;
-    if (!user_range_ok(buf, len, 1)) return SYSERR_FAULT;
-    if (len > 0x7FFFFFFF) len = 0x7FFFFFFF;
-    uint32_t ms = timeout_ms && timeout_ms < NO_LIMIT_MS ? (uint32_t)timeout_ms : NO_LIMIT_MS;
-    return sock_result(tcp_recv((int)s, (void *)buf, (uint32_t)len, ms), 0);
-}
 
 /* ---- Files -------------------------------------------------------------- */
 
@@ -861,7 +798,7 @@ int process_interrupted(void) {
 
 /* Called where a program can be stopped safely: Ctrl+C, `kill`. A program
  * with a SIGINT handler gets Ctrl+C as that signal instead. */
-static void check_killed(void) {
+void check_killed(void) {
     task_t *t = task_current();
     process_t *p = t->is_user ? t->process : 0;
     if (p && t->kill_code == EXIT_INTERRUPTED && p->sig_handler[SIGINT]) {
@@ -1371,12 +1308,10 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
         case SYS_UNAME:   r = sys_uname(f->rdi); break;
         case SYS_MOUSE:   r = sys_mouse(f->rdi); break;
         case SYS_GFX:     r = sys_gfx(f->rdi, f->rsi); break;
-        case SYS_RESOLVE: r = sys_resolve(f->rdi, f->rsi); break;
-        case SYS_CONNECT: r = sys_connect(f->rdi, f->rsi, f->rdx); break;
-        case SYS_LISTEN:  r = sock_result(tcp_listen((uint16_t)f->rdi), 1); break;
-        case SYS_ACCEPT:  r = sys_accept(f->rdi, f->rsi); break;
-        case SYS_SEND:    r = sys_send(f->rdi, f->rsi, f->rdx); break;
-        case SYS_RECV:    r = sys_recv(f->rdi, f->rsi, f->rdx, f->r10); break;
+        case SYS_RESOLVE: case SYS_CONNECT: case SYS_LISTEN: case SYS_ACCEPT:
+        case SYS_SEND:    case SYS_RECV:    case SYS_SOCKINFO: case SYS_SOCKCLOSE:
+            r = sys_net(f->rax, f->rdi, f->rsi, f->rdx, f->r10);   /* syscall_net.c */
+            break;
         case SYS_FDINFO: {                                /* what poll() needs of a pipe, file or console */
             file_t *fl = fd_get(f->rdi);
             if (!fl) { r = SYSERR_BADFD; break; }
@@ -1409,23 +1344,6 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
             }
             break;
         }
-        case SYS_SOCKINFO: {
-            struct os_sockinfo *si = (struct os_sockinfo *)f->rsi;
-            if (!own_socket((int)f->rdi)) { r = SYSERR_BADFD; break; }
-            if (!user_range_ok(f->rsi, sizeof(*si), 1)) { r = SYSERR_FAULT; break; }
-            uint32_t avail;
-            uint16_t lp, rp;
-            uint8_t ip[4];
-            int fl = tcp_info((int)f->rdi, &avail, &lp, &rp, ip);
-            if (fl < 0) { r = SYSERR_BADFD; break; }
-            si->available = avail;
-            si->lport = lp;
-            si->rport = rp;
-            memcpy(si->rip, ip, 4);
-            r = fl;
-            break;
-        }
-        case SYS_SOCKCLOSE: r = own_socket((int)f->rdi) ? (tcp_close((int)f->rdi), 0) : SYSERR_BADFD; break;
         case SYS_SEEK:    r = sys_seek(f->rdi, (int64_t)f->rsi, f->rdx); break;
         case SYS_SOUND:   r = sys_sound(f->rdi, f->rsi, f->rdx); break;
         case SYS_MKDIR:   r = sys_mkdir(f->rdi); break;
