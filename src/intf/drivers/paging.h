@@ -51,6 +51,10 @@ uint64_t paging_get_user_entry(uint64_t root, uint64_t virt);       /* 0 if unma
 int paging_map_user_prot(uint64_t root, uint64_t virt, uint64_t phys, int writable);
 uint64_t *paging_user_pte(uint64_t root, uint64_t virt, int create);  /* the entry itself */
 void paging_walk_user(uint64_t root, void (*fn)(uint64_t virt, uint64_t *pte, void *ctx), void *ctx);
+/* On this core: CR0.WP (the kernel faults on read-only and copy-on-write
+ * pages of programs instead of writing through them) and, where the CPU has
+ * it, SMEP (the kernel never runs code from a program's pages). */
+void paging_cpu_protect(void);
 void paging_flush(void);                             /* reload CR3: forget cached entries */
 #define PAGE_COW 0x200                               /* software bit: copy on write */
 void paging_free_address_space(uint64_t root);       /* also frees every mapped page */

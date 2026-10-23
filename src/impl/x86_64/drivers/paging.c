@@ -284,6 +284,19 @@ void paging_walk_user(uint64_t root, void (*fn)(uint64_t virt, uint64_t *pte, vo
     if (root) walk_level(TABLE(root), 4, 0, fn, ctx);
 }
 
+void paging_cpu_protect(void) {
+    uint64_t cr0, cr4;
+    asm volatile("mov %%cr0, %0" : "=r"(cr0));
+    asm volatile("mov %0, %%cr0" :: "r"(cr0 | (1ULL << 16)) : "memory");      /* WP */
+    uint32_t a, b, c, d;
+    asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0), "c"(0));
+    if (a < 7) return;
+    asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(7), "c"(0));
+    if (!(b & (1u << 7))) return;
+    asm volatile("mov %%cr4, %0" : "=r"(cr4));
+    asm volatile("mov %0, %%cr4" :: "r"(cr4 | (1ULL << 20)) : "memory");     /* SMEP */
+}
+
 void paging_flush(void) {
     uint64_t cr3;
     asm volatile("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) :: "memory");

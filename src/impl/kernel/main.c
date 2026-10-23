@@ -241,6 +241,7 @@ void kernel_main() {
 
     // Initialize IDT (installs the CPU exception handlers) and PIC
     idt_init();
+    paging_cpu_protect();   // after the handlers: a mistake is a panic screen, not a reset
     pic_remap();
 
     // Set keyboard IRQ (IRQ1) handler
