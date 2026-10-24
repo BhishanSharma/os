@@ -3,6 +3,7 @@
 #include "sys/task.h"
 #include "sys/process.h"
 #include "sys/syscall_nums.h"
+#include "sys/users.h"
 #include "drivers/heap.h"
 #include "drivers/timer.h"
 #include "lib/string.h"
@@ -26,7 +27,7 @@ typedef struct {
 } port_t;
 
 static port_t ports[MAX_PORTS];
-static struct { char name[32]; int port; } services[MAX_SERVICES];
+static struct { char name[32]; int port; unsigned uid; } services[MAX_SERVICES];   /* uid: who registered it */
 
 static void port_unref(int port) {
     port_t *p = &ports[port - 1];
@@ -149,14 +150,23 @@ int port_receive(port_space_t *s, int name, void *buf, uint32_t max, uint32_t ti
 int port_register(port_space_t *s, const char *service, int name) {
     port_right_t *r = name_get(s, name);
     if (!r) return SYSERR_BADFD;
+    if (r->type != PORT_RIGHT_RECEIVE) return SYSERR_PERM;   /* only its own port */
+    unsigned uid = user_current()->uid;
     int slot = -1;
     for (int i = 0; i < MAX_SERVICES; i++) {
-        if (services[i].port && !strcmp(services[i].name, service)) { slot = i; break; }
+        if (services[i].port && !strcmp(services[i].name, service)) {
+            /* Taken: only whoever registered it (or root) may move it; else any
+             * program could stand in for the window server. */
+            if (uid != 0 && services[i].uid != uid) return SYSERR_INUSE;
+            slot = i;
+            break;
+        }
         if (!services[i].port && slot < 0) slot = i;
     }
     if (slot < 0) return SYSERR_AGAIN;
     kstrncpy(services[slot].name, service, sizeof(services[slot].name));
     services[slot].port = r->port;
+    services[slot].uid = uid;
     return 0;
 }
 
