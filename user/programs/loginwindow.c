@@ -407,6 +407,7 @@ static void lobby(const struct os_user *u, int full_light) {
     load_accounts();
     sel = 0;
     route();
+    printf("loginwindow: ready\n");                  /* (for the tests: the profiles again) */
 }
 
 static void sign_in(int i, const char *password) {

@@ -1101,6 +1101,7 @@ static void start_open(window_t *w) {
     damage_anim(w);
 }
 
+static void log_zoom_button(const window_t *w);
 static int create_window(const struct ws_request *q, struct ws_reply *r) {
     int max_w = W - win_left() - 12 * S, max_h = H - win_top() - 12 * S;
     if (q->w < 1 || q->h < 1) return SYSERR_BADCALL;
@@ -1239,6 +1240,7 @@ static void serve(void *arg) {
             for (int k = 0; k < MAX_WINDOWS; k++)
                 if (wins[k].used && wins[k].id == q.id && wins[k].pid == q.pid && q.op == WS_RESIZABLE) {
                     wins[k].resizable = 1;
+                    log_zoom_button(&wins[k]);
                 } else if (wins[k].used && wins[k].id == q.id && wins[k].pid == q.pid) {
                     snprintf(wins[k].title, sizeof(wins[k].title), "%s", q.title);
                     damage_window(&wins[k]);
@@ -1835,6 +1837,12 @@ static void fit_text(char *out, int n, const char *s, int maxw, int style) {
 #define CTL_H (28 * S)
 static int ctl_x(const window_t *w, int i) { return w->w - 10 * S - (3 - i) * CTL_W - (2 - i) * 4 * S; }
 static int ctl_y(void) { return (TITLE_H - CTL_H) / 2; }               /* from the title bar's top */
+
+/* Where a new window's maximise button is (for the tests, which click it). */
+static void log_zoom_button(const window_t *w) {
+    printf("windowserver: %s zoom button at %d,%d\n", w->title,
+           w->x + ctl_x(w, 1) + CTL_W / 2, w->y - TITLE_H + ctl_y() + CTL_H / 2);
+}
 
 /* Which control is at a point (the whole bar's height counts as its target). */
 static int ctl_at(const window_t *w, int x, int y) {

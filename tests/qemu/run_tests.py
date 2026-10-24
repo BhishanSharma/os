@@ -530,8 +530,9 @@ def test_desktop():
 
 
 def test_gui():
-    """All graphical: the boot screen, the Setup Assistant makes an account and
-    opens the desktop; Log Out; a wrong and then the right password."""
+    """All graphical: the boot screen, the Setup Assistant makes an account
+    (a name only: no password until one is turned on in Settings) and opens
+    the desktop; Log Out shows the profiles; Return signs in again."""
     m = Machine("gui", usb_stick())
     try:
         m.expect(r"\] Timer", 120)
@@ -542,28 +543,20 @@ def test_gui():
         time.sleep(1)
         m.screenshot("setup")
         m.type("anna")
-        m.type("pw1")
-        m.type("nope")                               # the passwords differ: asked again
-        time.sleep(0.5)
-        check("created anna" not in m.text(), "different passwords were accepted")
-        m.type("pw1")
-        m.type("pw1")
         m.expect(r"loginwindow: created anna", 20)
         m.expect(r"loginwindow: anna logged in", 20)
         m.expect(r"windowserver: \d+x\d+", 30)
         time.sleep(2)
         m.screenshot("gui")
-        m.keys("ctrl-q")                             # Log Out: a fresh login screen
         start = len(m.text())
+        m.keys("ctrl-q")                             # Log Out: the profiles
         m.expect(r"loginwindow: ready", 30, since=start)
         time.sleep(1)
-        m.type("anna")
-        m.type("wrong")
-        time.sleep(0.5)
-        check(m.text().count("anna logged in") == 1, "a wrong password was accepted")
-        m.type("pw1")
-        m.expect(r"loginwindow: anna logged in", 20)
-        m.expect(r"windowserver: \d+x\d+", 30)            # the desktop again, not the text console
+        m.screenshot("profiles")
+        check(m.text().count("anna logged in") == 1, "Log Out signed straight back in")
+        m.keys("ret")                                # no password: Return signs in
+        m.expect(r"loginwindow: anna logged in", 20, since=start)
+        m.expect(r"windowserver: \d+x\d+", 30, since=start)   # the desktop again, not the text console
         time.sleep(2)
         m.screenshot("gui2")
     finally:
@@ -603,7 +596,7 @@ def test_apps():
 
 
 def test_zoom():
-    """The green button fills the screen with Terminal; Up recalls a command."""
+    """The maximise button fills the screen with Terminal; Up recalls a command."""
     m = Machine("zoom", usb_stick())
     try:
         login(m)
@@ -611,7 +604,8 @@ def test_zoom():
         ws = m.expect(r"windowserver: (\d+)x(\d+), scale (\d), cells (\d+)x(\d+)", 30)
         time.sleep(3)
         S, cw, ch = int(ws.group(3)), int(ws.group(4)), int(ws.group(5))
-        target = (142 * S, 64 * S)                   # Terminal's green button (first window)
+        btn = m.expect(r"windowserver: Terminal zoom button at (\d+),(\d+)", 10, since=0)
+        target = (int(btn.group(1)), int(btn.group(2)))   # its maximise button (title bar, right)
         move_mouse(m, -4000, -4000)
         time.sleep(0.5)
         at = (0, 0)
