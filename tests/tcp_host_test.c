@@ -269,6 +269,29 @@ int main(void) {
     tcp_close(l);
     for (int i = 0; i < 1000; i++) net_wait();
 
+    /* A SYN that asks for an MSS of 0: sending must still make progress
+     * (it used to loop forever, sending empty segments). */
+    reset_peer();
+    l = tcp_listen(8081);
+    peer.port = 5556; peer.our_port = 8081; peer.iss = 9100;
+    {
+        uint8_t syn[24] = {0};
+        put16(syn, 5556); put16(syn + 2, 8081); put32(syn + 4, peer.iss);
+        syn[12] = 6 << 4; syn[13] = 0x02; put16(syn + 14, 65535);
+        syn[20] = 2; syn[21] = 4;                          /* MSS option, value 0 */
+        put16(syn + 16, csum(PEER, ME, 6, syn, 24));
+        link_put(syn, 24, 0);
+    }
+    peer.snd_nxt = peer.snd_una = peer.iss + 1;
+    c = tcp_accept(l, 3000);
+    CHECK(c >= 0, "accept a connection whose SYN says MSS 0");
+    CHECK(c >= 0 && tcp_send(c, "zero", 4) == 4, "send on it returns");
+    for (int i = 0; i < 50; i++) net_wait();
+    CHECK(peer.in_len == 4 && !memcmp(peer.in, "zero", 4), "and the data arrives");
+    if (c >= 0) tcp_close(c);
+    tcp_close(l);
+    for (int i = 0; i < 1000; i++) net_wait();
+
     /* Nothing leaks: every socket can be opened again. */
     int opened = 0;
     for (int i = 0; i < TCP_MAX_SOCKETS; i++) if (tcp_listen((uint16_t)(9000 + i)) >= 0) opened++;

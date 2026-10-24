@@ -216,7 +216,10 @@ static uint16_t mss_option(const uint8_t *opt, int len) {
         if (opt[i] == 0) break;
         if (opt[i] == 1) { i++; continue; }
         if (i + 1 >= len || opt[i + 1] < 2) break;
-        if (opt[i] == 2 && opt[i + 1] == 4 && i + 3 < len) return be16(opt + i + 2);
+        if (opt[i] == 2 && opt[i + 1] == 4 && i + 3 < len) {
+            uint16_t mss = be16(opt + i + 2);                /* 0 would make output() loop forever */
+            return mss < 64 ? 536 : mss;
+        }
         i += opt[i + 1];
     }
     return 536;
