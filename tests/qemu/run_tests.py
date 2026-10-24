@@ -380,6 +380,8 @@ def test_user():
         check("notes.txt" in out and "sub/" in out, "ls ..", out)
         out = m.run("cat /PASSWD")
         check("permission denied" in out, "an everyday user read the password file", out)
+        out = m.run("attack port", 60)                # echod (root) has "echo": not boss's to take
+        check("attack port: refused" in out, "an everyday user took over a root service", out)
     finally:
         m.stop()
 
@@ -480,6 +482,12 @@ def test_kernel():
         check("FAILED" not in out and "1 MiB message: ok" in out, "porttest", out)
         out = m.run("forktest", 60)
         check("FAILED" not in out and " ok" in out, "forktest", out)
+        for kind in ("elf", "tramp"):                 # what the kernel must refuse (attack.c)
+            out = m.run("attack " + kind, 60)
+            check("attack %s: refused" % kind in out, "attack " + kind, out)
+        out = m.run("attack sigreturn", 60)           # ends only the program, not the kernel
+        check("NOT REFUSED" not in out and "KERNEL PANIC" not in m.text(), "attack sigreturn", out)
+        check("still here" in m.run("echo still here"), "the shell after attack sigreturn")
         out = m.run("echo hello world | wc")
         check(re.search(r"1\s+2\s+12", out), "a pipe", out)
         m.run("echo hi > o.txt")
@@ -564,8 +572,8 @@ def test_gui():
         time.sleep(1)
         m.screenshot("setup")
         m.type("anna")
-        m.expect(r"loginwindow: created anna", 20)
-        m.expect(r"loginwindow: anna logged in", 20)
+        m.expect(r"loginwindow: created anna", 60)      # (the door, then two password hashes)
+        m.expect(r"loginwindow: anna logged in", 60)
         m.expect(r"windowserver: \d+x\d+", 30)
         time.sleep(2)
         m.screenshot("gui")
@@ -580,6 +588,16 @@ def test_gui():
         m.expect(r"windowserver: \d+x\d+", 30, since=start)   # the desktop again, not the text console
         time.sleep(2)
         m.screenshot("gui2")
+        start = len(m.text())                        # root has no password yet: no way in as root
+        m.keys("ctrl-q")
+        m.expect(r"loginwindow: ready", 30, since=start)
+        time.sleep(1)
+        m.type(">console")
+        m.expect(r"login: ", 30, since=start)
+        m.type("root")
+        m.expect(r"Password: ", 10)
+        m.type("")
+        m.expect(r"Login incorrect", 10)
     finally:
         m.stop()
 

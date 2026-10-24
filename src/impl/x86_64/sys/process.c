@@ -124,7 +124,9 @@ static void copy_to_space(uint64_t root, uint64_t vaddr, const void *src, uint64
         uint64_t page_off = vaddr & (PAGE_SIZE - 1);
         uint64_t n = PAGE_SIZE - page_off;
         if (n > len) n = len;
-        uint64_t phys = paging_get_user_entry(root, vaddr) & ~0xFFFULL;
+        uint64_t e = paging_get_user_entry(root, vaddr);
+        if (!(e & PAGE_PRESENT)) kpanic("copy_to_space: page not mapped");   /* (never physical page 0) */
+        uint64_t phys = e & ~0xFFFULL;
         memcpy((uint8_t *)page_address(phys) + page_off, s, n);
         vaddr += n;
         s += n;
@@ -1203,7 +1205,8 @@ static uint64_t load_elf(uint64_t root, vm_space_t *vm, const uint8_t *data, uin
     if (have < sizeof(*eh) || eh->ident[0] != 0x7F || eh->ident[1] != 'E' || eh->ident[2] != 'L' ||
         eh->ident[3] != 'F' || eh->ident[4] != 2 /* 64-bit */ || eh->ident[5] != 1 /* little endian */ ||
         eh->type != ELF_TYPE_EXEC || eh->machine != ELF_MACHINE_X64 ||
-        eh->phentsize != sizeof(elf64_phdr_t) || eh->phoff + (uint64_t)eh->phnum * sizeof(elf64_phdr_t) > have)
+        eh->phentsize != sizeof(elf64_phdr_t) || eh->phoff > have ||
+        (uint64_t)eh->phnum * sizeof(elf64_phdr_t) > have - eh->phoff)
         return 0;
     vm_object_t *file = path ? vm_file_object(path) : 0;
     if (path && !file) return 0;
@@ -1213,8 +1216,9 @@ static uint64_t load_elf(uint64_t root, vm_space_t *vm, const uint8_t *data, uin
     for (int i = 0; i < eh->phnum; i++) {
         const elf64_phdr_t *ph = (const elf64_phdr_t *)(data + eh->phoff + i * sizeof(elf64_phdr_t));
         if (ph->type != PT_LOAD || ph->memsz == 0) continue;
-        if (ph->vaddr < USER_BASE || ph->vaddr + ph->memsz > limit || ph->filesz > ph->memsz ||
-            ph->offset + ph->filesz > size)
+        /* (written so that nothing can wrap around: the file is the program's to craft) */
+        if (ph->vaddr < USER_BASE || ph->vaddr >= limit || ph->memsz > limit - ph->vaddr ||
+            ph->filesz > ph->memsz || ph->offset > size || ph->filesz > size - ph->offset)
             return 0;
         if (file) {
             uint64_t start = PAGE_DOWN(ph->vaddr), fend = PAGE_UP(ph->vaddr + ph->filesz);
@@ -2294,6 +2298,7 @@ static int64_t sys_port(struct exc_frame *f) {
 
 static int64_t sys_signal(uint64_t sig, uint64_t handler, uint64_t tramp) {
     if (sig < 1 || sig >= 32 || sig == SIGKILL) return SYSERR_BADCALL;
+    if (tramp && (tramp < USER_BASE || tramp >= USER_TOP)) return SYSERR_FAULT;   /* (iretq goes there) */
     process_t *p = P();
     p->sig_handler[sig] = handler;
     if (tramp) p->sig_tramp = tramp;
@@ -2339,6 +2344,9 @@ static void sys_sigreturn(struct exc_frame *f, uint64_t ptr) {
     if (!user_range_ok(ptr, sizeof(struct exc_frame), 0)) process_exit(EXIT_SEGFAULT);
     struct exc_frame saved;
     memcpy(&saved, (const void *)ptr, sizeof(saved));
+    /* iretq to a kernel or non-canonical address faults in the kernel (a panic):
+     * a program that asks for one has crashed. */
+    if (saved.rip < USER_BASE || saved.rip >= USER_TOP) process_exit(EXIT_SEGFAULT);
     saved.cs = 0x2B;                                    /* never anything but user mode */
     saved.ss = 0x33;
     saved.rflags = (saved.rflags & 0xCD5) | 0x202;
@@ -2442,11 +2450,12 @@ static int64_t sys_system(uint64_t op, uint64_t a, uint64_t b) {
             return 0;
         case SYSTEM_LOG: {
             if (!user_range_ok(a, sizeof(struct os_log), 1)) return SYSERR_FAULT;
-            struct os_log *l = (struct os_log *)a;
-            if (l->max < 0 || !user_range_ok((uint64_t)(uintptr_t)l->buf, (uint64_t)l->max, 1)) return SYSERR_FAULT;
-            uint64_t from = l->from;
-            uint32_t n = print_log_read(&from, l->buf, (uint32_t)l->max);
-            l->from = from;
+            /* Read once into the kernel: another thread may change it meanwhile. */
+            struct os_log l = *(const struct os_log *)a;
+            if (l.max < 0 || !user_range_ok((uint64_t)(uintptr_t)l.buf, (uint64_t)l.max, 1)) return SYSERR_FAULT;
+            uint64_t from = l.from;
+            uint32_t n = print_log_read(&from, l.buf, (uint32_t)l.max);
+            ((struct os_log *)a)->from = from;
             return n;
         }
         case SYSTEM_CPUS:
