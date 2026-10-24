@@ -147,6 +147,12 @@ static int check_password(const account_t *a, const char *password) {
     return same_hash(hash, a->hash);
 }
 
+/* Root with no password yet (the graphical setup): nobody becomes root by
+ * pressing Return. Turning on a sign-in password in Settings sets root's too. */
+static int root_unprotected(const account_t *a) {
+    return a->user.uid == 0 && check_password(a, "");
+}
+
 static void set_password(account_t *a, const char *password) {
     random_salt(a->salt);
     hash_password(password, a->salt, a->hash);
@@ -414,7 +420,7 @@ static int in_program(void) {
 
 int users_check_password(const char *name, const char *password, user_t *out) {
     account_t *a = find_account(name);
-    if (!a || !check_password(a, password)) return -1;
+    if (!a || !check_password(a, password) || root_unprotected(a)) return -1;
     *out = a->user;
     return 0;
 }
@@ -514,7 +520,7 @@ void users_login(void) {
         print_str("Password: ");
         if (read_input(password, sizeof(password), 0) < 0) continue;
         account_t *a = find_account(name);
-        int ok = a && check_password(a, password);
+        int ok = a && check_password(a, password) && !root_unprotected(a);
         memset(password, 0, sizeof(password));
         if (ok) {
             push_session(a);
@@ -661,6 +667,10 @@ static void cmd_su(const char *name) {
         return;
     }
     if (!user_is_root()) {
+        if (root_unprotected(a)) {
+            print_str("su: root has no password yet (turn on a sign-in password in Settings)\n");
+            return;
+        }
         char password[64];
         print_str("Password: ");
         if (read_input(password, sizeof(password), 0) < 0) return;
@@ -712,6 +722,7 @@ int users_authenticate(const char *name, user_t *out) {
     if (!a) return USERS_NO_SUCH_USER;
     const user_t *me = user_current();
     if (me->uid != 0 && strcmp(me->name, a->user.name) != 0) {
+        if (root_unprotected(a)) return USERS_AUTH_FAILED;
         char password[64];
         print_str("Password: ");
         if (read_input(password, sizeof(password), 0) < 0) return USERS_AUTH_FAILED;
