@@ -220,7 +220,32 @@ static int isqrt(int v) {
 /* A soft shadow of a w x h rectangle with corners of radius r: darkest well
  * inside its edge, fading out `size` pixels beyond it. The middle (which the
  * window covers) is skipped. With `outside` only: for see-through things. */
+/* Shadows are dithered: their faint edge has only a few whole alpha levels,
+ * which a 6-bit laptop panel shows as rings. The darkening is worked out in
+ * 1/256ths and rounded with an 8x8 ordered dither, in the panel's steps
+ * (shaders.cl shade_dith). */
+static const unsigned char bayer8[64] = {
+    0, 32, 8, 40, 2, 34, 10, 42, 48, 16, 56, 24, 50, 18, 58, 26, 12, 44, 4, 36, 14, 46, 6, 38,
+    60, 28, 52, 20, 62, 30, 54, 22, 3, 35, 11, 43, 1, 33, 9, 41, 51, 19, 59, 27, 49, 17, 57, 25,
+    15, 47, 7, 39, 13, 45, 5, 37, 63, 31, 55, 23, 61, 29, 53, 21 };
+
+static unsigned panel_step(void) {
+    static int step;
+    if (!step) {
+        int depth = gfx_depth();
+        step = depth > 0 && depth < 8 ? 1 << (8 - depth) : 1;
+    }
+    return (unsigned)step;
+}
+
+static unsigned shade_dith(unsigned c, int a_fx, unsigned t, unsigned step) {
+    int v = (int)c * 256 - (int)c * a_fx / 255;
+    unsigned q = ((unsigned)v + t * step) / (256 * step) * step;
+    return q > 255 ? 255 : q;
+}
+
 void ui_shadow_ex(ui_canvas *c, int x, int y, int w, int h, int r, int size, int alpha, int outside) {
+    unsigned step = panel_step();
     int x0 = x - size, y0 = y - size, x1 = x + w + size, y1 = y + h + size;
     if (x0 < c->cx0) x0 = c->cx0;
     if (y0 < c->cy0) y0 = c->cy0;
@@ -255,8 +280,11 @@ void ui_shadow_ex(ui_canvas *c, int x, int y, int w, int h, int r, int size, int
             int f = size * 4 - d;
             if (f <= 0) continue;
             if (f > span) f = span;
-            unsigned a = (unsigned)(alpha * f / span * f / span);
-            if (a) row[px] = mix(row[px], 0x000000, a);
+            int a_fx = alpha * 256 * f / span * f / span;
+            if (!a_fx) continue;
+            unsigned v = row[px], t = (unsigned)bayer8[(py & 7) * 8 + (px & 7)] * 4 + 2;
+            row[px] = shade_dith(v >> 16 & 255, a_fx, t, step) << 16 | shade_dith(v >> 8 & 255, a_fx, t, step) << 8 |
+                      shade_dith(v & 255, a_fx, t, step);
         }
     }
 }

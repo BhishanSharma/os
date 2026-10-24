@@ -1507,7 +1507,11 @@ static void make_wallpaper(void) {
  * Like NSVisualEffectView's backdrop layer: the picture behind is sampled at a
  * quarter of its resolution (scale 0.25), with a 10 pt bleed so the edges have
  * context, blurred (four 3x3 box passes), saturated and tinted, then scaled up.
- * Only the wallpaper and the windows are sampled (not the Dock itself). */
+ * Only the wallpaper and the windows are sampled (not the Dock itself).
+ * The samples are 10 bits a channel (r << 20 | g << 10 | b): the blur and
+ * the tint keep a quarter level, and the upscale dithers down to what the
+ * panel shows, as the wallpaper does. In 8 bits the tint squeezed the
+ * wallpaper's gradient into a few levels, which showed as bands. */
 #define SAMP_W 512
 #define SAMP_H 320
 #define MAT_MAX (1 << 20)
@@ -1678,24 +1682,37 @@ static void box3(const unsigned *src, unsigned *dst, int bw, int bh, int horizon
                 int xx = clampi(x + (horizontal ? d : 0), 0, bw - 1);
                 int yy = clampi(y + (horizontal ? 0 : d), 0, bh - 1);
                 unsigned c = src[yy * bw + xx];
-                r += c >> 16 & 255;
-                gr += c >> 8 & 255;
-                b += c & 255;
+                r += c >> 20 & 1023;
+                gr += c >> 10 & 1023;
+                b += c & 1023;
             }
-            dst[y * bw + x] = (r / 3) << 16 | (gr / 3) << 8 | (b / 3);
+            dst[y * bw + x] = (r / 3) << 20 | (gr / 3) << 10 | (b / 3);
         }
 }
 
 static unsigned saturate_tint(unsigned c, int sat, unsigned tint, int alpha) {
-    int r = (int)(c >> 16 & 255), gr = (int)(c >> 8 & 255), b = (int)(c & 255);
+    int r = (int)(c >> 20 & 1023), gr = (int)(c >> 10 & 1023), b = (int)(c & 1023);
     int gray = (r * 30 + gr * 59 + b * 11) / 100;
-    r = clampi(gray + (r - gray) * sat / 100, 0, 255);
-    gr = clampi(gray + (gr - gray) * sat / 100, 0, 255);
-    b = clampi(gray + (b - gray) * sat / 100, 0, 255);
-    r = (r * (255 - alpha) + (int)(tint >> 16 & 255) * alpha) / 255;
-    gr = (gr * (255 - alpha) + (int)(tint >> 8 & 255) * alpha) / 255;
-    b = (b * (255 - alpha) + (int)(tint & 255) * alpha) / 255;
-    return (unsigned)(r << 16 | gr << 8 | b);
+    r = clampi(gray + (r - gray) * sat / 100, 0, 1023);
+    gr = clampi(gray + (gr - gray) * sat / 100, 0, 1023);
+    b = clampi(gray + (b - gray) * sat / 100, 0, 1023);
+    r = (r * (255 - alpha) + (int)(tint >> 16 & 255) * 4 * alpha) / 255;   /* (the tint is 8-bit) */
+    gr = (gr * (255 - alpha) + (int)(tint >> 8 & 255) * 4 * alpha) / 255;
+    b = (b * (255 - alpha) + (int)(tint & 255) * 4 * alpha) / 255;
+    return (unsigned)(r << 20 | gr << 10 | b);
+}
+
+/* A pixel of the frame from 10-bit samples: one channel bilinear (f, rf of
+ * 256), dithered to 8 bits in the panel's steps (shaders.cl up_channel). */
+static unsigned up_channel(unsigned a0, unsigned a1, unsigned b0, unsigned b1, unsigned f, unsigned rf, unsigned t) {
+    unsigned top = a0 * (256 - f) + a1 * f, bot = b0 * (256 - f) + b1 * f;
+    unsigned v = (top * (256 - rf) + bot * rf) >> 10;
+    unsigned q = (v + t * (unsigned)wall_step) / (256u * (unsigned)wall_step) * (unsigned)wall_step;
+    return q > 255 ? 255 : q;
+}
+
+static unsigned wide10(unsigned c) {                   /* 8-bit 0x00RRGGBB -> a 10-bit sample */
+    return (c >> 16 & 255) << 22 | (c >> 8 & 255) << 12 | (c & 255) << 2;
 }
 
 /* The frosted pictures, each kept until what is behind it changes: the
@@ -1727,7 +1744,7 @@ static void material(painter_t *p, struct os_gpu_draws *d, int x, int y, int w, 
     int ns = bw * bh;
     for (int cy = 0; cy < bh; cy++)
         for (int cx = 0; cx < bw; cx++)
-            p->samp[cy * bw + cx] = backdrop_at(x - bleed + cx * 4 + 2, y - bleed + cy * 4 + 2);
+            p->samp[cy * bw + cx] = wide10(backdrop_at(x - bleed + cx * 4 + 2, y - bleed + cy * 4 + 2));
     mutex_lock(&mat_lock);
     mat_t *m = 0;
     for (int i = 0; i < MAT_SLOTS && !m; i++)
@@ -1804,11 +1821,12 @@ static int material_make(painter_t *p, unsigned *out, int w, int h, int bw, int 
         if (r0 >= bh - 1) { r0 = bh - 1; rf = 0; }
         const unsigned *a = p->samp + r0 * bw, *b = rf ? a + bw : a;
         for (int i = 0; i < w; i++) {
-            int c = p->xi[i];
-            unsigned f = p->xf[i];
-            unsigned top = f ? lerp_rgb(a[c], a[c + 1], f) : a[c];
-            unsigned bot = f ? lerp_rgb(b[c], b[c + 1], f) : b[c];
-            out[(long)j * w + i] = rf ? lerp_rgb(top, bot, rf) : top;
+            int c = p->xi[i], c1 = p->xf[i] ? c + 1 : c;
+            unsigned f = p->xf[i], a0 = a[c], a1 = a[c1], b0 = b[c], b1 = b[c1];
+            unsigned t = (unsigned)bayer8[(j & 7) * 8 + (i & 7)] * 4 + 2;
+            out[(long)j * w + i] = up_channel(a0 >> 20 & 1023, a1 >> 20 & 1023, b0 >> 20 & 1023, b1 >> 20 & 1023, f, rf, t) << 16 |
+                                   up_channel(a0 >> 10 & 1023, a1 >> 10 & 1023, b0 >> 10 & 1023, b1 >> 10 & 1023, f, rf, t) << 8 |
+                                   up_channel(a0 & 1023, a1 & 1023, b0 & 1023, b1 & 1023, f, rf, t);
         }
     }
     return 0;
@@ -2193,8 +2211,8 @@ static void glass(painter_t *p, int x, int y, int w, int h, int r, int corners, 
     gd_fill(&d, x - 1, y - 1, w + 2, h + 2, r + 1, TH.hair, TH.hair_strong, corners);   /* rim */
     material(p, &d, x, y, w, h, r, corners, TH.glass, TH.glass_alpha, TH.s1);
     if (sheen && h >= 4 * r)                                                       /* light falling from above */
-        for (int k = 0; k < 5; k++)
-            gd_fill(&d, x, y, w, h * (5 - k) / 11, r, TH.sheen, TH.sheen_alpha / 14 + 1, corners & (UI_TL | UI_TR));
+        for (int k = 0; k < 12; k++)                                              /* (fine steps: no bands) */
+            gd_fill(&d, x, y, w, h * (12 - k) / 26, r, TH.sheen, TH.sheen_alpha / 34 + 1, corners & (UI_TL | UI_TR));
     gd_run(p, &d);
     ui_fill_a(&p->c, x + r, y, w - 2 * r, S, TH.sheen, TH.sheen_alpha / 2);        /* the lit top edge */
     ui_fill_a(&p->c, x + r, y + h - S, w - 2 * r, S, 0x000000, 36);                /* and the shade below */

@@ -1075,27 +1075,40 @@ static uint32_t ref_box3(const uint32_t *s, int pitch, int w, int h, int x, int 
     uint32_t r = 0, g = 0, b = 0;
     for (int d = -1; d <= 1; d++) {
         int xx = horizontal ? clampi(x + d, 0, w - 1) : x, yy = horizontal ? y : clampi(y + d, 0, h - 1);
-        uint32_t c = s[yy * pitch + xx];
-        r += c >> 16 & 255;
-        g += c >> 8 & 255;
-        b += c & 255;
+        uint32_t c = s[yy * pitch + xx];                /* (10-bit samples: shaders.cl) */
+        r += c >> 20 & 1023;
+        g += c >> 10 & 1023;
+        b += c & 1023;
     }
-    return (r / 3) << 16 | (g / 3) << 8 | (b / 3);
+    return (r / 3) << 20 | (g / 3) << 10 | (b / 3);
 }
 
 static uint32_t ref_satint(uint32_t c, int sat, uint32_t tint, int alpha) {
-    int r = (int)(c >> 16 & 255), g = (int)(c >> 8 & 255), b = (int)(c & 255);
+    int r = (int)(c >> 20 & 1023), g = (int)(c >> 10 & 1023), b = (int)(c & 1023);
     int gray = (r * 30 + g * 59 + b * 11) / 100;
-    r = clampi(gray + (r - gray) * sat / 100, 0, 255);
-    g = clampi(gray + (g - gray) * sat / 100, 0, 255);
-    b = clampi(gray + (b - gray) * sat / 100, 0, 255);
-    r = (r * (255 - alpha) + (int)(tint >> 16 & 255) * alpha) / 255;
-    g = (g * (255 - alpha) + (int)(tint >> 8 & 255) * alpha) / 255;
-    b = (b * (255 - alpha) + (int)(tint & 255) * alpha) / 255;
-    return (uint32_t)(r << 16 | g << 8 | b);
+    r = clampi(gray + (r - gray) * sat / 100, 0, 1023);
+    g = clampi(gray + (g - gray) * sat / 100, 0, 1023);
+    b = clampi(gray + (b - gray) * sat / 100, 0, 1023);
+    r = (r * (255 - alpha) + (int)(tint >> 16 & 255) * 4 * alpha) / 255;
+    g = (g * (255 - alpha) + (int)(tint >> 8 & 255) * 4 * alpha) / 255;
+    b = (b * (255 - alpha) + (int)(tint & 255) * 4 * alpha) / 255;
+    return (uint32_t)(r << 20 | g << 10 | b);
 }
 
-static uint32_t ref_upscale(const uint32_t *s, int pitch, int bw, int bh, int bleed, int i, int j) {
+static const uint8_t bayer8[64] = {
+    0, 32, 8, 40, 2, 34, 10, 42, 48, 16, 56, 24, 50, 18, 58, 26, 12, 44, 4, 36, 14, 46, 6, 38,
+    60, 28, 52, 20, 62, 30, 54, 22, 3, 35, 11, 43, 1, 33, 9, 41, 51, 19, 59, 27, 49, 17, 57, 25,
+    15, 47, 7, 39, 13, 45, 5, 37, 63, 31, 55, 23, 61, 29, 53, 21 };
+
+static uint32_t ref_up_channel(uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1, uint32_t f, uint32_t rf,
+                               uint32_t t, uint32_t step) {
+    uint32_t top = a0 * (256 - f) + a1 * f, bot = b0 * (256 - f) + b1 * f;
+    uint32_t v = (top * (256 - rf) + bot * rf) >> 10;
+    uint32_t q = (v + t * step) / (256 * step) * step;
+    return q > 255 ? 255 : q;
+}
+
+static uint32_t ref_upscale(const uint32_t *s, int pitch, int bw, int bh, int bleed, int i, int j, uint32_t step) {
     int u = (i + bleed) * 64 - 96, c0 = u >> 8;
     uint32_t f = (uint32_t)(u & 255);
     if (c0 < 0) { c0 = 0; f = 0; }
@@ -1105,9 +1118,13 @@ static uint32_t ref_upscale(const uint32_t *s, int pitch, int bw, int bh, int bl
     if (r0 < 0) { r0 = 0; rf = 0; }
     if (r0 >= bh - 1) { r0 = bh - 1; rf = 0; }
     const uint32_t *a = s + r0 * pitch, *b = rf ? a + pitch : a;
-    uint32_t top = f ? ref_lerp(a[c0], a[c0 + 1], f) : a[c0];
-    uint32_t bot = f ? ref_lerp(b[c0], b[c0 + 1], f) : b[c0];
-    return rf ? ref_lerp(top, bot, rf) : top;
+    int c1 = f ? c0 + 1 : c0;
+    uint32_t a0 = a[c0], a1 = a[c1], b0 = b[c0], b1 = b[c1];
+    uint32_t t = (uint32_t)bayer8[(j & 7) * 8 + (i & 7)] * 4 + 2;
+    if (!step) step = 1;
+    return ref_up_channel(a0 >> 20 & 1023, a1 >> 20 & 1023, b0 >> 20 & 1023, b1 >> 20 & 1023, f, rf, t, step) << 16 |
+           ref_up_channel(a0 >> 10 & 1023, a1 >> 10 & 1023, b0 >> 10 & 1023, b1 >> 10 & 1023, f, rf, t, step) << 8 |
+           ref_up_channel(a0 & 1023, a1 & 1023, b0 & 1023, b1 & 1023, f, rf, t, step);
 }
 
 /* ui.c's arithmetic (corners, shadows) and the window server's (layers, scaling). */
@@ -1159,7 +1176,14 @@ static uint32_t ref_rect_cover(int i, int j, int w, int h, int r, int corners) {
     return (uint32_t)(inside * 255 / 16);
 }
 
-static uint32_t ref_shadow(uint32_t dst, int px, int py, int x, int y, int w, int h, int r, int size, int alpha, int outside) {
+static uint32_t ref_shade(uint32_t c, int a_fx, uint32_t t, uint32_t step) {
+    int v = (int)c * 256 - (int)c * a_fx / 255;
+    uint32_t q = ((uint32_t)v + t * step) / (256 * step) * step;
+    return q > 255 ? 255 : q;
+}
+
+static uint32_t ref_shadow(uint32_t dst, int px, int py, int x, int y, int w, int h, int r, int size, int alpha, int outside,
+                           uint32_t step) {
     int hs = size / 2;
     if (py >= y + hs && py < y + h - hs && px >= x + r + hs && px < x + w - r - hs) return dst;
     int qy = y + r - py;
@@ -1179,8 +1203,11 @@ static uint32_t ref_shadow(uint32_t dst, int px, int py, int x, int y, int w, in
     int span = size * 6, f = size * 4 - d;
     if (f <= 0) return dst;
     if (f > span) f = span;
-    uint32_t a = (uint32_t)(alpha * f / span * f / span);
-    return a ? ref_mix(dst, 0, a) : dst;
+    int a_fx = alpha * 256 * f / span * f / span;
+    if (!a_fx) return dst;
+    uint32_t t = (uint32_t)bayer8[(py & 7) * 8 + (px & 7)] * 4 + 2;
+    return ref_shade(dst >> 16 & 255, a_fx, t, step) << 16 | ref_shade(dst >> 8 & 255, a_fx, t, step) << 8 |
+           ref_shade(dst & 255, a_fx, t, step);
 }
 
 static uint32_t ref_over(uint32_t d, uint32_t v) {
@@ -1255,7 +1282,7 @@ static uint32_t want_fill(int x, int y) { (void)x; (void)y; return 0x00C0FFEEu; 
 static uint32_t want_box_h(int x, int y) { return ref_box3(t_src, T_PITCH, 37, 7, x, y, 1); }
 static uint32_t want_box_v(int x, int y) { return ref_box3(t_src, T_PITCH, 37, 7, x, y, 0); }
 static uint32_t want_satint(int x, int y) { return ref_satint(t_src[y * T_PITCH + x], 180, 0xF2F4F8, 168); }
-static uint32_t want_upscale(int x, int y) { return ref_upscale(t_src, T_PITCH, 12, 6, 20, x, y + 3); }
+static uint32_t want_upscale(int x, int y) { return ref_upscale(t_src, T_PITCH, 12, 6, 20, x, y + 3, 4); }
 static uint32_t picture(int x, int y) {
     return ((uint32_t)(x * 37 + y * 11) & 255) << 16 | ((uint32_t)(x * 5 + y * 71) & 255) << 8 | ((uint32_t)(x * y * 3) & 255);
 }
@@ -1272,8 +1299,8 @@ static uint32_t mask_pic(int x, int y) {
     uint32_t m = (x < 6 || y < 2 || x > 50) ? (uint32_t)(x * 45 + y * 20) & 255 : 255;
     return m * 0x010101u;
 }
-static uint32_t want_shadow(int x, int y) { return ref_shadow(t_dst[y * T_PITCH + x], x, y, 6, 3, 26, 8, 3, 5, 200, 0); }
-static uint32_t want_shadow_out(int x, int y) { return ref_shadow(t_dst[y * T_PITCH + x], x, y, -4, -2, 30, 12, 6, 8, 150, 1); }
+static uint32_t want_shadow(int x, int y) { return ref_shadow(t_dst[y * T_PITCH + x], x, y, 6, 3, 26, 8, 3, 5, 200, 0, 4); }
+static uint32_t want_shadow_out(int x, int y) { return ref_shadow(t_dst[y * T_PITCH + x], x, y, -4, -2, 30, 12, 6, 8, 150, 1, 1); }
 static uint32_t want_over(int x, int y) {
     uint32_t d = t_dst[y * T_PITCH + x];
     return (x >= 5 && x < 20 && y >= 2 && y < 5) ? d : ref_over(d, t_src[y * T_PITCH + x]);
@@ -1395,7 +1422,7 @@ int igfx_gpu_init(void) {
         p.a = 180; p.b = 0xF2F4F8; p.c = 168;
         bad |= run_test("satint", GPU_SATINT, p, 37, 7, want_satint);
         p = tparams(40, 10);
-        p.a = 12; p.b = 6; p.c = 20; p.d = 3;
+        p.a = 12; p.b = 6; p.c = 20; p.d = 3; p.e = 4;     /* (dithered as for a 6-bit panel) */
         bad |= run_test("upscale", GPU_UPSCALE, p, 40, 10, want_upscale);
         p = tparams(37, 7);
         p.a = 100;
@@ -1403,7 +1430,7 @@ int igfx_gpu_init(void) {
         if (bad) gpu_good &= ~(1u << GPU_BOX3);      /* (two tests share it) */
         int bad2 = 0;
         p = tparams(40, 14);
-        p.a = 6; p.b = 3; p.c = 26; p.d = 8; p.e = 3 | 5u << 16; p.f = 200;
+        p.a = 6; p.b = 3; p.c = 26; p.d = 8; p.e = 3 | 5u << 16; p.f = 200 | 4u << 24;   /* (dithered as for a 6-bit panel) */
         bad2 |= run_test2("shadow", GPU_SHADOW, p, 40, 14, want_shadow, picture, fade_old);
         p.a = (uint32_t)-4; p.b = (uint32_t)-2; p.c = 30; p.d = 12; p.e = 6 | 8u << 16; p.f = 150 | 1u << 16;
         bad2 |= run_test2("shadow outside", GPU_SHADOW, p, 40, 14, want_shadow_out, picture, fade_old);
@@ -1509,6 +1536,7 @@ int igfx_gpu_material(uint64_t root, uint32_t *samp, uint32_t *scratch, int bw, 
     p.w = (uint32_t)w;
     p.h = (uint32_t)(j1 - j0);
     p.a = (uint32_t)bw; p.b = (uint32_t)bh; p.c = (uint32_t)bleed; p.d = (uint32_t)j0;
+    p.e = panel_bpc > 0 && panel_bpc < 8 ? 1u << (8 - panel_bpc) : 1;   /* dither to what the panel shows */
     gpu_pass(GPU_UPSCALE, &p, ((uint32_t)w + 15) / 16, (uint32_t)(j1 - j0));
     if (gpu_run("material")) return refused(__LINE__);
     uint64_t t1 = gtsc();
@@ -1607,7 +1635,8 @@ int igfx_gpu_draw(uint64_t root, const struct os_gpu_draws *d, int (*ok)(uint64_
             p->c = (uint32_t)o->w;
             p->d = (uint32_t)o->h;
             p->e = (uint32_t)o->r | (uint32_t)o->size << 16;
-            p->f = (uint32_t)o->alpha | (uint32_t)(o->flags & 1) << 16;
+            p->f = (uint32_t)o->alpha | (uint32_t)(o->flags & 1) << 16 |
+                   (uint32_t)(panel_bpc > 0 && panel_bpc < 8 ? 1u << (8 - panel_bpc) : 1) << 24;   /* dither step */
         } else if (o->op == GD_FILL) {
             int r = o->r;
             if (r * 2 > o->h) r = o->h / 2;

@@ -97,10 +97,36 @@ static void present(void) {
  * A soft glow round a rectangle, computed at a quarter of the resolution and
  * enlarged with bilinear sampling: the light has no hard edge and costs little. */
 
-static unsigned ramp[256];                                               /* 0 = the room, 255 = the light */
+static unsigned ramp_from, ramp_to;                                      /* the room, the light */
+static int panel_step = 1;              /* 4 on a 6-bit panel: it shows every fourth level */
 
 static void build_ramp(unsigned from, unsigned to) {
-    for (int i = 0; i < 256; i++) ramp[i] = mix(from, to, i);
+    ramp_from = from;
+    ramp_to = to;
+    int depth = gfx_depth();
+    panel_step = depth > 0 && depth < 8 ? 1 << (8 - depth) : 1;
+}
+
+/* The wallpaper's 8x8 ordered dither (windowserver): the glow's colour worked
+ * out in 1/256ths of a level, then rounded in the panel's steps, so it fades
+ * as an even grain, not in bands. */
+static const unsigned char bayer8[64] = {
+    0, 32, 8, 40, 2, 34, 10, 42, 48, 16, 56, 24, 50, 18, 58, 26, 12, 44, 4, 36, 14, 46, 6, 38,
+    60, 28, 52, 20, 62, 30, 54, 22, 3, 35, 11, 43, 1, 33, 9, 41, 51, 19, 59, 27, 49, 17, 57, 25,
+    15, 47, 7, 39, 13, 45, 5, 37, 63, 31, 55, 23, 61, 29, 53, 21 };
+
+static int dith(int from, int to, int v, int t) {      /* v: 0..4080 (255 * 16) of the way */
+    int c = (from << 8) + (to - from) * 256 * v / 4080;
+    int q = (c + t * panel_step) / (256 * panel_step) * panel_step;
+    return q > 255 ? 255 : q < 0 ? 0 : q;
+}
+
+static unsigned ramp_at(int v, int x, int y) {
+    int t = bayer8[(y & 7) * 8 + (x & 7)] * 4 + 2;
+    unsigned a = ramp_from, b = ramp_to;
+    return (unsigned)(dith((int)(a >> 16 & 255), (int)(b >> 16 & 255), v, t) << 16 |
+                      dith((int)(a >> 8 & 255), (int)(b >> 8 & 255), v, t) << 8 |
+                      dith((int)(a & 255), (int)(b & 255), v, t));
 }
 
 /* Fills the whole frame: C_BG plus the light round (x0,y0)-(x1,y1), `amp` (0..255) at
@@ -132,7 +158,7 @@ static void glow_frame(unsigned *dst, int x0, int y0, int x1, int y1, int amp, i
                 unsigned *row = dst + (long)y * W;
                 for (int x = xa; x < xb; x++) {
                     int fx = x - xa;
-                    row[x] = ramp[((4 - fx) * l4 + fx * r4) >> 4];
+                    row[x] = ramp_at((4 - fx) * l4 + fx * r4, x, y);
                 }
             }
         }

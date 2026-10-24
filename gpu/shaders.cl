@@ -44,6 +44,10 @@ KERNEL void fill(void) {
     if (x < p->w && y < p->h) ((__global uint *)p->dst)[y * p->dst_pitch + x] = p->a;
 }
 
+// The glass's samples are 10 bits a channel (r << 20 | g << 10 | b, 0-1023):
+// the blur and the tint keep a quarter level, and upscale dithers them down,
+// so a gentle gradient behind the glass is not cut into bands.
+
 // box3: one 3-tap box pass (a = 1: horizontal, 0: vertical), clamped at the edges.
 KERNEL void box3(void) {
     __global params_t *p = job();
@@ -55,11 +59,11 @@ KERNEL void box3(void) {
         int xx = p->a ? clamp((int)x + d, 0, (int)p->w - 1) : (int)x;
         int yy = p->a ? (int)y : clamp((int)y + d, 0, (int)p->h - 1);
         uint c = s[yy * p->src_pitch + xx];
-        r += c >> 16 & 255;
-        g += c >> 8 & 255;
-        b += c & 255;
+        r += c >> 20 & 1023;
+        g += c >> 10 & 1023;
+        b += c & 1023;
     }
-    ((__global uint *)p->dst)[y * p->dst_pitch + x] = (r / 3) << 16 | (g / 3) << 8 | (b / 3);
+    ((__global uint *)p->dst)[y * p->dst_pitch + x] = (r / 3) << 20 | (g / 3) << 10 | (b / 3);
 }
 
 // satint: saturation a (percent), then tint b over it with alpha c (0-255).
@@ -70,19 +74,36 @@ KERNEL void satint(void) {
     uint c = ((__global const uint *)p->src)[y * p->src_pitch + x];
     int sat = (int)p->a, alpha = (int)p->c;
     uint tint = p->b;
-    int r = (int)(c >> 16 & 255), g = (int)(c >> 8 & 255), b = (int)(c & 255);
+    int r = (int)(c >> 20 & 1023), g = (int)(c >> 10 & 1023), b = (int)(c & 1023);
     int gray = (r * 30 + g * 59 + b * 11) / 100;
-    r = clamp(gray + (r - gray) * sat / 100, 0, 255);
-    g = clamp(gray + (g - gray) * sat / 100, 0, 255);
-    b = clamp(gray + (b - gray) * sat / 100, 0, 255);
-    r = (r * (255 - alpha) + (int)(tint >> 16 & 255) * alpha) / 255;
-    g = (g * (255 - alpha) + (int)(tint >> 8 & 255) * alpha) / 255;
-    b = (b * (255 - alpha) + (int)(tint & 255) * alpha) / 255;
-    ((__global uint *)p->dst)[y * p->dst_pitch + x] = (uint)(r << 16 | g << 8 | b);
+    r = clamp(gray + (r - gray) * sat / 100, 0, 1023);
+    g = clamp(gray + (g - gray) * sat / 100, 0, 1023);
+    b = clamp(gray + (b - gray) * sat / 100, 0, 1023);
+    r = (r * (255 - alpha) + (int)(tint >> 16 & 255) * 4 * alpha) / 255;   /* (the tint is 8-bit) */
+    g = (g * (255 - alpha) + (int)(tint >> 8 & 255) * 4 * alpha) / 255;
+    b = (b * (255 - alpha) + (int)(tint & 255) * 4 * alpha) / 255;
+    ((__global uint *)p->dst)[y * p->dst_pitch + x] = (uint)(r << 20 | g << 10 | b);
 }
 
-// upscale: the small src (a x b) over the w x h destination, bilinear, as
-// material() does it: bleed c, rows from d (the first row drawn).
+// The wallpaper's 8x8 ordered dither (windowserver.c dither16()).
+__constant uchar bayer8[64] = {
+    0, 32, 8, 40, 2, 34, 10, 42, 48, 16, 56, 24, 50, 18, 58, 26, 12, 44, 4, 36, 14, 46, 6, 38,
+    60, 28, 52, 20, 62, 30, 54, 22, 3, 35, 11, 43, 1, 33, 9, 41, 51, 19, 59, 27, 49, 17, 57, 25,
+    15, 47, 7, 39, 13, 45, 5, 37, 63, 31, 55, 23, 61, 29, 53, 21 };
+
+// One channel of four 10-bit samples, bilinear (f, rf of 256), to 8 bits:
+// rounded with the dither threshold t, in steps of `step` levels (4 on a
+// 6-bit panel, which shows only every fourth level).
+static uint up_channel(uint a0, uint a1, uint b0, uint b1, uint f, uint rf, uint t, uint step) {
+    uint top = a0 * (256 - f) + a1 * f, bot = b0 * (256 - f) + b1 * f;
+    uint v = (top * (256 - rf) + bot * rf) >> 10;      // 8-bit levels, in 1/256ths
+    uint q = (v + t * step) / (256 * step) * step;
+    return q > 255 ? 255 : q;
+}
+
+// upscale: the small src (a x b, 10-bit samples) over the w x h destination,
+// bilinear, as material() does it: bleed c, rows from d (the first row drawn),
+// dithered in steps of e levels.
 KERNEL void upscale(void) {
     __global params_t *p = job();
     uint i = get_group_id(0) * LANES + get_sub_group_local_id(), jj = get_group_id(1);
@@ -98,9 +119,13 @@ KERNEL void upscale(void) {
     if (r0 >= bh - 1) { r0 = bh - 1; rf = 0; }
     __global const uint *s = (__global const uint *)p->src;
     __global const uint *a = s + r0 * (int)p->src_pitch, *b = rf ? a + p->src_pitch : a;
-    uint top = f ? lerp_rgb(a[c0], a[c0 + 1], f) : a[c0];
-    uint bot = f ? lerp_rgb(b[c0], b[c0 + 1], f) : b[c0];
-    ((__global uint *)p->dst)[jj * p->dst_pitch + i] = rf ? lerp_rgb(top, bot, rf) : top;
+    int c1 = f ? c0 + 1 : c0;
+    uint a0 = a[c0], a1 = a[c1], b0 = b[c0], b1 = b[c1];
+    uint t = (uint)bayer8[(j & 7) * 8 + (i & 7)] * 4 + 2, step = p->e ? p->e : 1;
+    uint r = up_channel(a0 >> 20 & 1023, a1 >> 20 & 1023, b0 >> 20 & 1023, b1 >> 20 & 1023, f, rf, t, step);
+    uint g = up_channel(a0 >> 10 & 1023, a1 >> 10 & 1023, b0 >> 10 & 1023, b1 >> 10 & 1023, f, rf, t, step);
+    uint bl = up_channel(a0 & 1023, a1 & 1023, b0 & 1023, b1 & 1023, f, rf, t, step);
+    ((__global uint *)p->dst)[jj * p->dst_pitch + i] = r << 16 | g << 8 | bl;
 }
 
 // fade: dst = lerp(src (the old picture), dst (the new), a), as draw_faded().
@@ -168,14 +193,24 @@ static uint rect_cover(int i, int j, int w, int h, int r, int corners) {
     return corner_cover(ci, cj, r);
 }
 
+// A shadow's darkening, dithered: a_fx is the alpha in 1/256ths, the result
+// rounded in steps of `step` levels with the 8x8 threshold t (as ui.c).
+static uint shade_dith(uint c, int a_fx, uint t, uint step) {
+    int v = (int)c * 256 - (int)c * a_fx / 255;        // the channel, in 1/256ths of a level
+    uint q = ((uint)v + t * step) / (256 * step) * step;
+    return q > 255 ? 255 : q;
+}
+
 // shadow: ui_shadow_ex. Rectangle (a, b) c x d, e = radius | size << 16,
-// f = alpha | outside << 16. Its middle (under the thing) is left alone.
+// f = alpha | outside << 16 | dither step << 24. Its middle (under the thing)
+// is left alone.
 KERNEL void shadow(void) {
     __global params_t *p = job();
     int px = (int)(get_group_id(0) * LANES + get_sub_group_local_id()), py = (int)get_group_id(1);
     if (px >= (int)p->w || py >= (int)p->h) return;
     int x = (int)p->a, y = (int)p->b, w = (int)p->c, h = (int)p->d;
-    int r = (int)(p->e & 0xFFFF), size = (int)(p->e >> 16), alpha = (int)(p->f & 0xFFFF), outside = (int)(p->f >> 16);
+    int r = (int)(p->e & 0xFFFF), size = (int)(p->e >> 16), alpha = (int)(p->f & 0xFFFF), outside = (int)(p->f >> 16 & 255);
+    uint step = p->f >> 24 ? p->f >> 24 : 1;
     int hs = size / 2;
     if (py >= y + hs && py < y + h - hs && px >= x + r + hs && px < x + w - r - hs) return;
     int qy = y + r - py;
@@ -195,10 +230,12 @@ KERNEL void shadow(void) {
     int span = size * 6, f = size * 4 - d;
     if (f <= 0) return;
     if (f > span) f = span;
-    uint a = (uint)(alpha * f / span * f / span);
-    if (!a) return;
+    int a_fx = alpha * 256 * f / span * f / span;      // 1/256ths: the faint edge gets every shade
+    if (!a_fx) return;
     __global uint *o = (__global uint *)p->dst + py * p->dst_pitch + px;
-    *o = mix255(*o, 0, a);
+    uint c = *o, t = (uint)bayer8[(py & 7) * 8 + (px & 7)] * 4 + 2;
+    *o = shade_dith(c >> 16 & 255, a_fx, t, step) << 16 | shade_dith(c >> 8 & 255, a_fx, t, step) << 8 |
+         shade_dith(c & 255, a_fx, t, step);
 }
 
 // over: a picture with premultiplied alpha (src, the region's pixel) over
