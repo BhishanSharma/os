@@ -8,7 +8,8 @@
 #                     with test.mpg on it (Terminal OS mounts it as /), and
 #                     photo.jpg, anim.gif, tone.mp3, tone.wav, notes.dat (text
 #                     with an unknown ending), blob.bin (not text) and clip.mp4,
-#                     clip.mkv, clip.webm (H.264, HEVC, VP9) for Files and Videos
+#                     clip.mkv, clip.webm (H.264, HEVC, VP9) for Files and Videos,
+#                     and hello.tapp (examples/hello) for `tapp install`
 # Needs sfdisk, mtools and ffmpeg (all in the build image).
 # Usage: scripts/mktestdisks.sh <output folder>
 set -eu
@@ -54,5 +55,9 @@ make_disk "$out/nvme-install.img"
 make_disk "$out/nvme-files.img"
 mformat -i "$out/nvme-files.img@@$((P2_START * 512))" -F -v TERMINALOS ::
 mcopy -i "$out/nvme-files.img@@$((P2_START * 512))" "$out/test.mpg" "$out/photo.jpg" "$out/anim.gif" "$out/tone.mp3" "$out/tone.wav" "$out/notes.dat" "$out/blob.bin" "$out/clip.mp4" "$out/clip.mkv" "$out/clip.webm" ::/
+# A package for `tapp install` (the Makefile's test-assets makes it).
+if [ -s "$out/hello.tapp" ]; then
+    mcopy -i "$out/nvme-files.img@@$((P2_START * 512))" "$out/hello.tapp" ::/
+fi
 
 echo "test disks in $out"

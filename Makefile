@@ -509,6 +509,8 @@ test-wpa: ## Unit-test the WPA2 handshake on the host (IEEE/RFC vectors, simulat
 test-unit: test-net test-tcp test-wpa ## All the host-side unit tests
 
 test-assets: $(USB_IMG) $(KERNEL_ISO) scripts/mktestdisks.sh ## Disk images and a video for the system tests
+	$(MAKE) tapp SRC=examples/hello
+	@mkdir -p $(BUILD)/test && cp $(BUILD)/packages/hello.tapp $(BUILD)/test/
 	sh scripts/mktestdisks.sh $(BUILD)/test
 
 test: test-unit test-assets ## Unit tests and what the system tests need (in Docker); then `make test-os` on the host

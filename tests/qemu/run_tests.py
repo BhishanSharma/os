@@ -384,6 +384,27 @@ def test_user():
         m.stop()
 
 
+def test_bundle():
+    """Stage 8: a .tapp package installed with tapp is an app bundle in
+    ~/Apps/ID/; the window server lists it and opens it by its id."""
+    m = Machine("bundle", usb_stick() + nvme(asset("nvme-files.img")))
+    try:
+        m.expect(r"Files\s+on the NVMe TERMINALOS partition", 120)
+        login_user(m, "boss", "pass2")
+        out = m.run("tapp install /hello.tapp", 60)
+        check("FAILED" not in out.upper() and "error" not in out.lower(), "tapp install", out)
+        out = m.run("tapp list")
+        check("hello" in out, "tapp list does not show hello", out)
+        m.type("windowserver hello")
+        m.expect(r"windowserver: installed app Hello \(/HOME/BOSS/Apps/hello/hello\)", 30)
+        m.expect(r"windowserver: open /HOME/BOSS/Apps/hello/hello: started", 30)
+        time.sleep(2)
+        m.screenshot("bundle")
+        check("quit unexpectedly" not in m.text(), "the installed app crashed", m.text()[-600:])
+    finally:
+        m.stop()
+
+
 def test_install():
     """`install` on an empty partition, then the restart boots from the SSD."""
     disk = os.path.join(OUT, "install-nvme.img")
@@ -659,7 +680,7 @@ def test_logs():
 
 
 TESTS = [("boot", test_boot), ("files", test_files), ("fault", test_fault), ("panic", test_panic),
-         ("kernel", test_kernel), ("desktop", test_desktop), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("logs", test_logs), ("user", test_user), ("video", test_nvme_video), ("install", test_install), ("network", test_network),
+         ("kernel", test_kernel), ("desktop", test_desktop), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("logs", test_logs), ("user", test_user), ("video", test_nvme_video), ("bundle", test_bundle), ("install", test_install), ("network", test_network),
          ("bios", test_legacy_bios)]
 NEEDS_INTERNET = {"network"}
 

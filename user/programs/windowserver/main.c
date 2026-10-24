@@ -312,6 +312,7 @@ static void load_installed(void) {
         if (stat(path, &st) == 0 && !st.is_dir) snprintf(icon, 128, "%s", path);
         if (icon[0]) ui_has_icon(icon);                /* read it now, not while painters draw */
         dock_add(name, program, icon, color);
+        printf("windowserver: installed app %s (%s)\n", name, program);   /* (for the tests) */
         k++;
     }
 }
@@ -3243,8 +3244,10 @@ int main(int argc, char **argv) {
     for (int k = 1; k < n_painters; k++) thread_create(painter, (void *)(long)k);
     for (int i = 1; i < argc; i++) {                   /* apps to open: from the Dock, or any program */
         if (!strcmp(argv[i], "--veil")) continue;
-        int k = 0;
-        while (k < DOCK_APPS && strcmp(argv[i], apps[k].program)) k++;
+        int k = 0;                                     /* (an installed app by its id: ~/Apps/ID/ID) */
+        while (k < DOCK_APPS && strcmp(argv[i], apps[k].program) &&
+               (!strrchr(apps[k].program, '/') || strcmp(argv[i], strrchr(apps[k].program, '/') + 1)))
+            k++;
         char *arg = strchr(argv[i], ':');                  /* "program:argument" */
         if (arg) *arg++ = 0;
         if (k < DOCK_APPS) launch(k);

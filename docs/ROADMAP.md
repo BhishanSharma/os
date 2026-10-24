@@ -40,6 +40,14 @@ acceleration; icons are Microsoft's Fluent UI Emoji (MIT, `ICONS.BIN` from
 login that starts the desktop as the user; Log Out returns to it, and the
 user name `>console` gives the text login (the tests use it).
 
+Stage 8 is done, in a different shape from the sketch below: a bundle is a
+`.tapp` package (`make tapp SRC=folder`, docs/PACKAGES.md) that `tapp
+install` unpacks into the user's own `~/Apps/ID/` (`app.cfg`, the program,
+`icon.png`); the window server lists those after the built-in apps, reloads
+on WS_APPS, and `windowserver ID` opens one. System test: `bundle`. Cut: no
+system-wide `/APPS/NAME.APP/` (built-in apps stay in `apps/`, listed by
+DOCK.CFG) and no permissions in the bundle yet (stage 10's entitlements).
+
 Each stage below is the *lean* version: the smallest design that gives the
 macOS-style structure, with the cuts written down. One stage per working
 session; it ends with `make test` + `make test-os` green, a USB stick, one
