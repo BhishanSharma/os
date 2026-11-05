@@ -96,6 +96,12 @@
 #define SYS_EXEPATH   71 /* exepath(buf, size): this program's file (/proc/self/exe) -> length */
 #define SYS_FDPATH    73 /* fdpath(fd, buf, size): the path of an open file (one received from another program too) -> length */
 #define SYS_MMAPAT    72 /* mmapat(addr, len, prot, fd): MAP_FIXED; fd -1 zeroed, or shared memory -> addr */
+
+/* Owners and permissions (stage 9: on ext2 volumes; FAT32 has none) */
+#define SYS_STATX     74 /* statx(path, struct os_statx *): stat with owner, mode, time -> 0 */
+#define SYS_CHMOD     75 /* chmod(path, mode): the owner or root           -> 0, SYSERR_NOTSUP on FAT32 */
+#define SYS_CHOWN     76 /* chown(path, uid, gid): root; -1 keeps each       -> 0 */
+#define SYS_RENAME    77 /* rename(from, to): same volume; a file at `to` is replaced -> 0 */
 #define SYS_POLLWAIT  67 /* pollwait(gen, ms, net): gen -1 -> the I/O counter; else sleep until it is
                             not gen (a pipe or local socket changed), the next interrupt (net = 1:
                             TCP sockets are watched too) or ms pass -> the counter */
@@ -238,6 +244,8 @@ struct os_wifi {
 #define SYSERR_DEAD    -27   /* the port's receiver is gone */
 #define SYSERR_PIPE    -28   /* nobody reads the pipe any more */
 #define SYSERR_WOULDBLOCK -29 /* non-blocking: nothing to read, no room, nobody to accept */
+#define SYSERR_NOTSUP  -30   /* not possible on this volume (FAT32: no owners) */
+#define SYSERR_XDEV    -31   /* rename: not on the same volume */
 
 struct os_time {
     int year, month, day, hour, minute, second;
@@ -266,6 +274,15 @@ struct os_dirent {
 struct os_stat {
     unsigned int size;     /* bytes (0 for a folder) */
     unsigned char is_dir;
+};
+
+struct os_statx {
+    unsigned long size;    /* bytes (0 for a folder) */
+    unsigned char is_dir;
+    unsigned char owners;  /* 1: the volume keeps owners (ext2); on FAT32 they are made up */
+    unsigned short mode;   /* permission bits: 0755 */
+    unsigned int uid, gid;
+    unsigned long mtime;   /* seconds since 1970, UTC (0 if unknown) */
 };
 
 struct os_meminfo {

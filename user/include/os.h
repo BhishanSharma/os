@@ -46,6 +46,10 @@ int readdir(int index, struct os_dirent *entry);   /* 1 = filled, 0 = no more */
 int listdir(const char *path, struct os_dirent *entries, int max);   /* path 0: current -> count */
 int mkdir(const char *path);
 int stat(const char *path, struct os_stat *st);
+int statx(const char *path, struct os_statx *st);   /* with owner, mode and time */
+int chmod(const char *path, unsigned mode);  /* SYSERR_NOTSUP on FAT32 */
+int chown(const char *path, int uid, int gid);   /* root; -1 keeps */
+int rename(const char *from, const char *to);
 int meminfo(struct os_meminfo *m);
 int getuser(struct os_user *user);           /* who is running this program */
 int getpid(void);                            /* this program's process id */

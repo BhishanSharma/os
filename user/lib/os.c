@@ -32,6 +32,10 @@ int readdir(int index, struct os_dirent *e)     { return (int)os_syscall(SYS_REA
 int listdir(const char *path, struct os_dirent *e, int max) { return (int)os_syscall(SYS_LISTDIR, (long)path, (long)e, max); }
 int mkdir(const char *path)                     { return (int)os_syscall(SYS_MKDIR, (long)path, 0, 0); }
 int stat(const char *path, struct os_stat *st)  { return (int)os_syscall(SYS_STAT, (long)path, (long)st, 0); }
+int statx(const char *path, struct os_statx *st) { return (int)os_syscall(SYS_STATX, (long)path, (long)st, 0); }
+int chmod(const char *path, unsigned mode)      { return (int)os_syscall(SYS_CHMOD, (long)path, mode, 0); }
+int chown(const char *path, int uid, int gid)   { return (int)os_syscall(SYS_CHOWN, (long)path, uid, gid); }
+int rename(const char *from, const char *to)    { return (int)os_syscall(SYS_RENAME, (long)from, (long)to, 0); }
 int meminfo(struct os_meminfo *m)               { return (int)os_syscall(SYS_MEMINFO, (long)m, 0, 0); }
 int getuser(struct os_user *u)                  { return (int)os_syscall(SYS_GETUSER, (long)u, 0, 0); }
 int getpid(void)                                { return (int)os_syscall(SYS_GETPID, 0, 0, 0); }
@@ -104,6 +108,8 @@ const char *os_strerror(int err) {
         case SYSERR_TIMEOUT: return "timed out";
         case SYSERR_DEAD:    return "the other side is gone";
         case SYSERR_PIPE:    return "nobody reads the pipe";
+        case SYSERR_NOTSUP:  return "not possible on FAT32 (no owners or permissions there)";
+        case SYSERR_XDEV:    return "not on the same volume";
         default:             return "error";
     }
 }

@@ -1,10 +1,16 @@
 // part.c - GPT (UEFI) and MBR (old BIOS) partition tables
 #include "drivers/part.h"
+#include "drivers/ext2.h"
 #include "drivers/heap.h"
 #include "lib/string.h"
 
 static uint32_t le32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
 static uint64_t le64(const uint8_t *p) { return le32(p) | (uint64_t)le32(p + 4) << 32; }
+static void put32(uint8_t *p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = (uint8_t)(v >> 8 * i); }
+static void put64(uint8_t *p, uint64_t v) { put32(p, (uint32_t)v); put32(p + 4, (uint32_t)(v >> 32)); }
+
+const uint8_t part_type_linux[16] = { 0xAF, 0x3D, 0xC6, 0x0F, 0x83, 0x84, 0x72, 0x47,
+                                      0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4 };
 
 /* GPT type GUIDs, as stored on disk (mixed endian). */
 static const struct { uint8_t guid[16]; const char *kind; } gpt_types[] = {
@@ -36,7 +42,15 @@ static void probe_fat32(sector_reader_t rd, partition_t *p, uint8_t *buf) {
     else if (!memcmp(buf + 3, "NTFS    ", 8)) p->fs = "NTFS";
     else if (!memcmp(buf + 3, "EXFAT   ", 8)) p->fs = "exFAT";
     else if (!memcmp(buf + 3, "-FVE-FS-", 8)) p->fs = "BitLocker";
-    if (buf[510] != 0x55 || buf[511] != 0xAA) return;
+    if (buf[510] != 0x55 || buf[511] != 0xAA) {
+        if (p->sectors > 4 && rd(p->start + 2, 1, buf) == 0 && ext2_probe(buf, p->label)) {
+            uint32_t compat = le32(buf + 92), incompat = le32(buf + 96);
+            p->ext2 = 1;
+            p->fs = incompat & 0x2C0 ? "ext4" : compat & 4 ? "ext3" : "ext2";
+            p->ours = !strcmp(p->label, OUR_LABEL) || !strcmp(p->label, DATA_LABEL);
+        }
+        return;
+    }
     if (memcmp(buf + 82, "FAT32   ", 8) != 0) return;
     p->fs = "FAT32";
     p->fat32 = 1;
@@ -127,6 +141,85 @@ int part_scan(sector_reader_t rd, partition_t *out, int max) {
     }
     kfree(buf);
     return n;
+}
+
+static uint32_t crc32(const uint8_t *p, uint32_t n) {
+    uint32_t c = 0xFFFFFFFFu;
+    while (n--) {
+        c ^= *p++;
+        for (int k = 0; k < 8; k++) c = c >> 1 ^ (0xEDB88320u & (0u - (c & 1)));
+    }
+    return ~c;
+}
+
+int part_gpt_add(sector_reader_t rd, sector_writer_t wr, uint64_t sectors, uint64_t start, uint64_t end,
+                 const uint8_t type[16], const char *name) {
+    uint8_t *mbr = kmalloc(512), *hdr = kmalloc(512), *tab = kmalloc(65536);
+    int r = -1;
+    if (!mbr || !hdr || !tab || rd(0, 1, mbr) != 0 || rd(1, 1, hdr) != 0 || memcmp(hdr, "EFI PART", 8)) goto out;
+    uint32_t hsize = le32(hdr + 12), count = le32(hdr + 80), esize = le32(hdr + 84);
+    uint64_t entries = le64(hdr + 72), first = le64(hdr + 40);
+    uint32_t bytes = count * esize, nsec = bytes / 512;
+    if (hsize < 92 || hsize > 512 || esize < 128 || esize > 512 || bytes > 65536 || bytes % 512 ||
+        le64(hdr + 24) != 1 || rd(entries, nsec, tab) != 0 || crc32(tab, bytes) != le32(hdr + 88))
+        goto out;
+    uint64_t last = sectors - 2 - nsec;                     /* room for the backup table at the end */
+    if (start < first || end > last || start > end) goto out;
+    int slot = -1;
+    for (uint32_t i = 0; i < count; i++) {
+        const uint8_t *e = tab + i * esize;
+        int empty = 1;
+        for (int k = 0; k < 16; k++) empty &= e[k] == 0;
+        if (empty) {
+            if (slot < 0) slot = (int)i;
+        } else if (le64(e + 32) <= end && le64(e + 40) >= start) {
+            goto out;                                       /* overlaps a partition */
+        }
+    }
+    if (slot < 0) goto out;
+    uint8_t *e = tab + (uint32_t)slot * esize;
+    memset(e, 0, esize);
+    memcpy(e, type, 16);
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    uint64_t x = ((uint64_t)hi << 32 | lo) ^ 0x9E3779B97F4A7C15ull;
+    for (int k = 0; k < 16; k++) {                          /* its own GUID */
+        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        e[16 + k] = (uint8_t)(x >> 29);
+    }
+    e[16 + 7] = (uint8_t)((e[16 + 7] & 0x0F) | 0x40);       /* version 4 (random) */
+    e[16 + 8] = (uint8_t)((e[16 + 8] & 0x3F) | 0x80);
+    put64(e + 32, start);
+    put64(e + 40, end);
+    for (int k = 0; name[k] && k < 36; k++) e[56 + 2 * k] = (uint8_t)name[k];
+    put32(hdr + 88, crc32(tab, bytes));
+    put64(hdr + 48, last);
+
+    /* The backup (header in the last sector, the table before it), then the primary. */
+    uint8_t *bak = mbr + 0;                                 /* (mbr is read again below) */
+    memcpy(bak, hdr, 512);
+    put64(bak + 24, sectors - 1);
+    put64(bak + 32, 1);
+    put64(bak + 72, sectors - 1 - nsec);
+    put32(bak + 16, 0);
+    put32(bak + 16, crc32(bak, hsize));
+    if (wr(sectors - 1 - nsec, nsec, tab) != 0 || wr(sectors - 1, 1, bak) != 0) goto out;
+    put64(hdr + 32, sectors - 1);
+    put32(hdr + 16, 0);
+    put32(hdr + 16, crc32(hdr, hsize));
+    if (wr(entries, nsec, tab) != 0 || wr(1, 1, hdr) != 0) goto out;
+    /* The protective MBR covers the whole drive now. */
+    if (rd(0, 1, mbr) != 0) goto out;
+    for (int i = 0; i < 4; i++) {
+        uint8_t *m = mbr + 0x1BE + 16 * i;
+        if (m[4] == 0xEE) put32(m + 12, sectors - 1 > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)(sectors - 1));
+    }
+    r = wr(0, 1, mbr);
+out:
+    kfree(mbr);
+    kfree(hdr);
+    kfree(tab);
+    return r;
 }
 
 int part_is_protected(const partition_t *p) {

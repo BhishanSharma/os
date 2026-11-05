@@ -1,4 +1,7 @@
-// ls [folder] - list a folder: folders first, then files with their sizes
+// ls [-l] [folder] - list a folder: folders first, then files with their sizes
+//
+// -l also shows each one's permissions, owner and when it last changed (on
+// FAT32 volumes, which keep no owners: rwxr-xr-x folders, rw-r--r-- files, root).
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,9 +47,49 @@ static void pad(int from, int to) {
     for (int i = from; i < to; i++) putchar(' ');
 }
 
+/* -l: "drwxr-x---  alice  2026-11-05 14:02" */
+static void long_info(const char *dir, const char *name, int local_offset) {
+    char path[600];
+    snprintf(path, sizeof(path), "%s%s%s", dir, dir[0] && dir[strlen(dir) - 1] != '/' ? "/" : "", name);
+    struct os_statx st;
+    if (statx(path, &st) != 0) {
+        printf("  ?????????? %-8s %16s ", "", "");
+        return;
+    }
+    char m[11] = "-rwxrwxrwx";
+    if (st.is_dir) m[0] = 'd';
+    for (int i = 0; i < 9; i++)
+        if (!(st.mode & (0400 >> i))) m[1 + i] = '-';
+    if (st.mode & 01000) m[9] = st.mode & 1 ? 't' : 'T';
+    struct os_user me;
+    char owner[16];
+    getuser(&me);
+    if (st.uid == 0) snprintf(owner, sizeof(owner), "root");
+    else if (st.uid == me.uid) snprintf(owner, sizeof(owner), "%s", me.name);
+    else snprintf(owner, sizeof(owner), "%u", st.uid);
+    char when[20] = "";
+    if (st.mtime) {                                      /* days since 1970 -> a date (Howard Hinnant's) */
+        long t = (long)st.mtime + local_offset * 60L, z = t / 86400 + 719468, secs = t % 86400;
+        long era = z / 146097, doe = z - era * 146097, yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        long doy = doe - (365 * yoe + yoe / 4 - yoe / 100), mp = (5 * doy + 2) / 153;
+        long d = doy - (153 * mp + 2) / 5 + 1, mo = mp < 10 ? mp + 3 : mp - 9, y = yoe + era * 400 + (mo <= 2);
+        snprintf(when, sizeof(when), "%04ld-%02ld-%02ld %02ld:%02ld", y, mo, d, secs / 3600, secs / 60 % 60);
+    }
+    printf("  %s %-8s %16s ", m, owner, when);
+}
+
+/* Minutes local time is ahead of UTC. */
+static int local_offset(void) {
+    struct os_time l, u;
+    if (gettime(&l) != 0 || gettime_utc(&u) != 0) return 0;
+    int d = l.day != u.day ? (l.day == u.day + 1 || l.day == 1 ? 1440 : -1440) : 0;
+    return d + (l.hour - u.hour) * 60 + (l.minute - u.minute);
+}
+
 int main(int argc, char **argv) {
     char path[256];
-    args_join(path, sizeof(path), argc, argv, 1);        /* ls My Folder */
+    int longer = argc > 1 && !strcmp(argv[1], "-l"), offset = longer ? local_offset() : 0;
+    args_join(path, sizeof(path), argc, argv, 1 + longer);   /* ls My Folder */
     struct os_dirent *e = malloc(MAX_ENTRIES * sizeof(*e));
     if (!e) {
         printf("ls: out of memory\n");
@@ -76,6 +119,7 @@ int main(int argc, char **argv) {
     char size[16];
     for (int i = 0; i < n; i++) {
         int len = (int)strlen(e[i].name);
+        if (longer) long_info(path, e[i].name, offset);
         if (e[i].is_dir) {
             set_theme_color(THEME_ACCENT);
             printf("  %s/", e[i].name);

@@ -186,11 +186,14 @@ static void cmd_help(void)
 {
     print_info("Available commands:\n");
     print_str("\n=== Files ===\n");
-    print_str("ls                 - list current directory\n");
+    print_str("ls [-l]            - list current directory (-l: permissions, owner, date)\n");
     print_str("cat <file>         - display a text file\n");
     print_str("write <file> <txt> - write text to file (\"quote\" a name with spaces)\n");
     print_str("touch <file>       - create empty file\n");
     print_str("rm <file>          - delete file\n");
+    print_str("mv <from> <to>     - rename or move (ext3 volumes)\n");
+    print_str("chmod <mode> <file> - who may read, write, run (644, 700, u+x)\n");
+    print_str("chown <user> <file> - give a file to a user (root)\n");
     print_str("mkdir <dir>        - create directory\n");
     print_str("cd <dir>           - change directory\n");
     print_str("pwd                - print working directory\n");
@@ -447,9 +450,14 @@ static void cmd_crash(const char *what)
     {
         kpanic("manual panic from the shell");
     }
+    else if (strcmp(what, "journal") == 0)
+    {
+        vfs_crash_after_commit();
+        print_str("The next change on an ext3 volume stops after its journal commit, as if the power went.\n");
+    }
     else
     {
-        print_str("Usage: crash <div0|ud|gp|pf|null|stack|int3|irq|panic>\n");
+        print_str("Usage: crash <div0|ud|gp|pf|null|stack|int3|irq|panic|journal>\n");
     }
 }
 
@@ -524,6 +532,7 @@ static int kernel_command(const char *line, int run_programs) {
     else if (strcmp(line, "shutdown") == 0 || strcmp(line, "poweroff") == 0)
     {
         print_str("Shutting down...\n");
+        vfs_shutdown();
         power_off();
         efi_reset(1);                                   // ACPI failed: ask the firmware
         print_str("shutdown: the computer could not be switched off; hold the power button.\n");
@@ -547,6 +556,7 @@ static int kernel_command(const char *line, int run_programs) {
     {
         if (!need_root("reboot")) return 1;
         print_str("Rebooting...\n");
+        vfs_shutdown();
         reboot();
     }
     else if (strcmp(line, "status") == 0)

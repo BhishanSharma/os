@@ -8,11 +8,18 @@ move to the "Fixed" section below so you can see what changed and where.
 1. **The "C compiler" is a stub.** It only understands `main` with `printf("...")` and
    `return N`. Tokenizing handles more than the code generator does.
 2. **FAT32:** long names are ASCII only (other characters show as `?`); `ls` shows at
-   most 128 entries, `tree` 32; `cat` refuses files over 1 MB.
+   most 128 entries, `tree` 32; `cat` refuses files over 1 MB. FAT32 volumes cannot
+   rename (`mv` says so) and have no owners: there the home-folder rule decides.
 3. **System calls read program memory directly.** After `user_range_ok` the kernel
    dereferences the pointer itself, so SMAP guards everything except the system call
    window (`user_access_begin`/`user_access_end` around `syscall_dispatch`). Narrower
    `copy_from_user`/`copy_to_user` helpers would close that window too.
+4. **ext3:** a file deleted while a program still reads it (or has it mapped) is read
+   from freed blocks; Linux keeps such a file until it is closed. Files are written whole
+   at `close`, as on FAT32, so the largest file is 4 GB.
+5. **Host unit tests under Docker Desktop:** AddressSanitizer can die at start ("DEADLYSIGNAL"
+   over and over) under 32-bit mmap randomisation. `setarch -R` (the Makefile's NOASLR)
+   needs `docker run --security-opt seccomp=unconfined ...`.
 
 ## Fixed
 

@@ -174,10 +174,15 @@ class Machine:
 
     def stop(self):
         try:
-            self.monitor("quit")
-            self.proc.wait(5)
+            if self.proc.poll() is None:              # (not powered off already)
+                self.monitor("quit")
+                self.proc.wait(5)
         except Exception:
             self.proc.kill()
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
 
 
 def tail(text, lines=25):
@@ -405,6 +410,86 @@ def test_bundle():
         check("quit unexpectedly" not in m.text(), "the installed app crashed", m.text()[-600:])
     finally:
         m.stop()
+
+
+def stick_with_room(path, mb):
+    """A copy of the USB image on a stick of `mb` MiB (room for the data partition)."""
+    shutil.copy(USB_IMG, path)
+    with open(path, "r+b") as f:
+        f.truncate(mb << 20)
+    return ["-device", "qemu-xhci,id=xhci",
+            "-drive", "if=none,id=stick,file=%s,format=raw" % path,
+            "-device", "usb-storage,bus=xhci.0,drive=stick"]
+
+
+def test_storage():
+    """Stage 9: the first start makes the stick's data partition (ext3) and
+    it becomes "/": files have owners and modes, they outlive a reboot, a
+    change cut off after its journal commit is finished at the next start,
+    and e2fsck finds nothing wrong."""
+    stick = os.path.join(OUT, "storage-stick.img")
+    args = stick_with_room(stick, 1280)
+    m = Machine("storage", args)
+    try:
+        m.expect(r"making room for your files on the USB stick", 120)
+        m.expect(r"Files\s+on the USB stick \(ext3", 120)
+        login_user(m, "boss", "pass2")
+        check("/HOME/BOSS" in m.run("pwd"), "boss does not start in /HOME/BOSS")
+        out = m.run("write notes.txt kept")
+        check("Wrote 4 bytes" in out, "write in the home folder", out)
+        out = m.run("ls -l")
+        check(re.search(r"-rw-r--r-- boss", out), "a new file is boss's, rw-r--r--", out)
+        m.run("chmod 600 notes.txt")
+        out = m.run("ls -l")
+        check(re.search(r"-rw------- boss", out), "chmod 600", out)
+        out = m.run("ls -l /HOME")
+        check(re.search(r"drwx------ boss", out), "the home folder is boss's and private", out)
+        out = m.run("ls -l /")
+        check(re.search(r"drwxrwxrwt root .*TMP", out), "/TMP is everyone's, sticky", out)
+        out = m.run("cat /PASSWD")
+        check("permission denied" in out, "an everyday user read the password file", out)
+        out = m.run("mkdir /mine")
+        check("permission denied" in out, "an everyday user made a folder in /", out)
+        out = m.run("mv notes.txt kept.txt")
+        check("mv:" not in out, "mv", out)
+        out = m.run("cat kept.txt")
+        check("kept" in out, "the renamed file", out)
+        m.type("shutdown")
+        m.proc.wait(60)
+    finally:
+        m.stop()
+
+    m = Machine("storage2", args)                     # the accounts and files are still there
+    try:
+        m.expect(r"Files\s+on the USB stick \(ext3", 120)
+        check("making room" not in m.text(), "the data partition was made again")
+        login(m)
+        out = m.run("cat /HOME/BOSS/kept.txt")
+        check("kept" in out, "boss's file after a reboot", out)
+        m.run("write /TMP/before.txt replayed")
+        m.run("crash journal")
+        m.run("mv /TMP/before.txt /TMP/after.txt")
+        m.proc.kill()                                  # the power goes
+        m.proc.wait(10)
+    finally:
+        m.stop()
+
+    m = Machine("storage3", args)
+    try:
+        m.expect(r"finished 1 change a crash cut off", 120)
+        login(m)
+        out = m.run("cat /TMP/after.txt")
+        check("replayed" in out, "the change cut off after its commit", out)
+        out = m.run("cat /TMP/before.txt")
+        check("replayed" not in out, "the old name is still there", out)
+        m.type("shutdown")
+        m.proc.wait(60)
+    finally:
+        m.stop()
+    fsck = subprocess.run(["docker", "run", "--rm", "-v", ROOT + ":/root/env", "myos-buildenv", "sh", "-c",
+                           "dd if=/root/env/build/test/qemu/storage-stick.img of=/tmp/p.img bs=1M skip=1024 "
+                           "status=none && e2fsck -fn /tmp/p.img"], capture_output=True, text=True)
+    check(fsck.returncode == 0, "e2fsck on the data partition", fsck.stdout + fsck.stderr)
 
 
 def test_install():
@@ -698,7 +783,7 @@ def test_logs():
 
 
 TESTS = [("boot", test_boot), ("files", test_files), ("fault", test_fault), ("panic", test_panic),
-         ("kernel", test_kernel), ("desktop", test_desktop), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("logs", test_logs), ("user", test_user), ("video", test_nvme_video), ("bundle", test_bundle), ("install", test_install), ("network", test_network),
+         ("kernel", test_kernel), ("desktop", test_desktop), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("logs", test_logs), ("user", test_user), ("video", test_nvme_video), ("bundle", test_bundle), ("storage", test_storage), ("install", test_install), ("network", test_network),
          ("bios", test_legacy_bios)]
 NEEDS_INTERNET = {"network"}
 

@@ -5,11 +5,13 @@
 //     name:uid:salt:hash:home
 //
 // salt is 16 random bytes and hash is SHA-256 applied HASH_ROUNDS times to
-// the salt and password (both hex). uid 0 is root. FAT32 has no file owners,
-// so permissions go by location: root may change anything, everyone else only
-// what is under their home folder (/HOME/<NAME>) and /TMP. The check sits in
-// the FAT32 driver (fat32_set_write_guard), so it covers shell commands, the
-// editor, downloads, scripts and user programs alike.
+// the salt and password (both hex). uid 0 is root. On an ext2 volume files
+// have owners and modes, checked by the VFS with creds() below: a home is its
+// user's and private (0700), /TMP is for everyone (sticky), PASSWD is root's
+// (0600). FAT32 has no file owners, so there permissions go by location:
+// root may change anything, everyone else only what is under their home
+// folder (/HOME/<NAME>) and /TMP (write_guard below). Both sit in the VFS, so
+// they cover shell commands, the editor, downloads, scripts and programs alike.
 #include "sys/users.h"
 #include "sys/sysinfo.h"
 #include "sys/task.h"
@@ -297,6 +299,8 @@ static int save_accounts(void) {
     enter_root(saved, sizeof(saved));
     fat32_create_file(DB_FILE);
     int result = fat32_write_file(DB_FILE, (const uint8_t *)data, (uint32_t)len) < 0 ? -1 : 0;
+    vfs_chown("/" DB_FILE, 0, 0);                    /* (ext2) only root reads the hashes */
+    vfs_chmod("/" DB_FILE, 0600);
     leave_root(saved);
     privileged--;
     kfree(data);
@@ -308,7 +312,10 @@ static void make_dirs(const char *top, const char *sub) {
     char saved[256];
     privileged++;
     enter_root(saved, sizeof(saved));
-    if (top && !fat32_file_exists(top)) fat32_mkdir(top);
+    if (top && !fat32_file_exists(top)) {
+        fat32_mkdir(top);
+        if (!strcmp(top, "TMP")) vfs_chmod("/TMP", 01777);   /* (ext2) everyone's, sticky */
+    }
     if (top && sub && fat32_change_directory(top) == 0 && !fat32_file_exists(sub)) fat32_mkdir(sub);
     fat32_change_directory("/");
     leave_root(saved);
@@ -329,6 +336,10 @@ static account_t *add_account(const char *name, uint32_t uid, const char *passwo
         to_upper(upper);
         k_snprintf(a->user.home, sizeof(a->user.home), "/HOME/%s", upper);
         make_dirs("HOME", upper);
+        privileged++;                                /* (ext2) the user's own, and private */
+        vfs_chown(a->user.home, uid, uid);
+        vfs_chmod(a->user.home, 0700);
+        privileged--;
     }
     set_password(a, password);
     return a;
@@ -377,6 +388,11 @@ static int path_inside(const char *path, const char *dir) {
 }
 
 int user_may_write(const char *path) {
+    return vfs_access(path, VFS_W);
+}
+
+/* FAT32's rule: root anywhere, the others in their home and /TMP. */
+static int path_may_write(const char *path) {
     if (privileged || (session_depth == 0 && !in_program())) return 1;   // the kernel itself, before login
     const user_t *u = user_current();
     if (u->uid == 0) return 1;
@@ -386,7 +402,15 @@ int user_may_write(const char *path) {
 }
 
 static int write_guard(const char *path) {
-    return user_may_write(path);
+    return path_may_write(path);
+}
+
+/* For ext2's owners and modes (vfs_set_creds): who asks, and whether checks apply. */
+static int creds(uint32_t *uid, uint32_t *gid) {
+    if (privileged || (session_depth == 0 && !in_program())) return 1;   /* the kernel: as root */
+    const user_t *u = user_current();
+    *uid = *gid = u->uid;                            /* everyone has a group of their own */
+    return u->uid == 0;
 }
 
 /* Like /etc/shadow: only root reads the password hashes (and the saved
@@ -482,6 +506,7 @@ static void first_start(void) {
 void users_init(void) {
     fat32_set_write_guard(write_guard);
     fat32_set_read_guard(read_guard);
+    vfs_set_creds(creds);
     session_depth = 0;
     load_accounts();
     if (!find_account("root") && !fbcon_active()) first_start();

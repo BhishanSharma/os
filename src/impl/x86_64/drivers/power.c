@@ -16,6 +16,7 @@
 #include "drivers/timer.h"
 #include "sys/task.h"
 #include "sys/smp.h"
+#include "sys/vfs.h"
 #include "lib/print.h"
 #include "lib/serial.h"
 #include "lib/string.h"
@@ -650,6 +651,7 @@ void power_poll(void) {
         /* The press that switched the laptop on can still be pending. */
         if ((uint32_t)(now - ready_since) > 2 * TIMER_FREQ) {
             kprintf("\nPower button: shutting down.\n");
+            vfs_shutdown();
             power_off();
         }
     }

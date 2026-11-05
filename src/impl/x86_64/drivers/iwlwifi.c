@@ -1869,6 +1869,7 @@ static void save_config(void) {
     n += k_snprintf(buf + n, sizeof(buf) - n, "\n");
     in_root(cwd, sizeof(cwd));
     fat32_write_file(CONFIG_FILE, (const uint8_t *)buf, (uint32_t)n);
+    vfs_chmod("/" CONFIG_FILE, 0600);                       /* (ext2) the key is root's */
     if (cwd[0]) fat32_change_directory(cwd);
 }
 

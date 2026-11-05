@@ -891,6 +891,8 @@ static int64_t fs_result(int r) {
         case FATV_FULL:            return SYSERR_NOSPC;
         case FATV_READ_ONLY:       return SYSERR_ROFS;
         case FAT32_ERR_PERMISSION: return SYSERR_PERM;
+        case VFS_ERR_NO_OWNERS:    return SYSERR_NOTSUP;
+        case VFS_ERR_CROSS:        return SYSERR_XDEV;
         default:                   return SYSERR_IO;
     }
 }
@@ -934,18 +936,48 @@ static int64_t sys_stat(uint64_t path_ptr, uint64_t ptr) {
     if (user_path(path_ptr, path, sizeof(path)) != 0) return SYSERR_FAULT;
     if (!user_range_ok(ptr, sizeof(struct os_stat), 1)) return SYSERR_FAULT;
     struct os_stat *out = (struct os_stat *)ptr;
-    fat32_file_info_t one;
-    int64_t result = 0;
-    if (fat32_list_directory_ex(path, &one, 1) >= 0) {        /* a folder */
-        out->is_dir = 1;
-        out->size = 0;
-    } else if (fat32_file_exists(path)) {
-        out->is_dir = 0;
-        out->size = fat32_get_file_size(path);
-    } else {
-        result = SYSERR_NOENT;
-    }
-    return result;
+    vfs_stat_t st;
+    int r = vfs_stat(path, &st);
+    if (r) return fs_result(r);
+    out->is_dir = (unsigned char)st.is_dir;
+    out->size = st.size;
+    return 0;
+}
+
+static int64_t sys_statx(uint64_t path_ptr, uint64_t ptr) {
+    char path[MAX_PATH];
+    if (user_path(path_ptr, path, sizeof(path)) != 0) return SYSERR_FAULT;
+    if (!user_range_ok(ptr, sizeof(struct os_statx), 1)) return SYSERR_FAULT;
+    vfs_stat_t st;
+    int r = vfs_stat(path, &st);
+    if (r) return fs_result(r);
+    struct os_statx *out = (struct os_statx *)ptr;
+    out->size = st.size;
+    out->is_dir = (unsigned char)st.is_dir;
+    out->owners = (unsigned char)st.owners;
+    out->mode = st.mode;
+    out->uid = st.uid;
+    out->gid = st.gid;
+    out->mtime = st.mtime;
+    return 0;
+}
+
+static int64_t sys_chmod(uint64_t path_ptr, uint64_t mode) {
+    char path[MAX_PATH];
+    if (user_path(path_ptr, path, sizeof(path)) != 0) return SYSERR_FAULT;
+    return fs_result(vfs_chmod(path, (uint32_t)mode & 07777));
+}
+
+static int64_t sys_chown(uint64_t path_ptr, uint64_t uid, uint64_t gid) {
+    char path[MAX_PATH];
+    if (user_path(path_ptr, path, sizeof(path)) != 0) return SYSERR_FAULT;
+    return fs_result(vfs_chown(path, (int64_t)(int32_t)uid, (int64_t)(int32_t)gid));
+}
+
+static int64_t sys_rename(uint64_t from_ptr, uint64_t to_ptr) {
+    char from[MAX_PATH], to[MAX_PATH];
+    if (user_path(from_ptr, from, sizeof(from)) != 0 || user_path(to_ptr, to, sizeof(to)) != 0) return SYSERR_FAULT;
+    return fs_result(vfs_rename(from, to));
 }
 
 /* The whole folder at once (with long names): path 0 is the current one. */
@@ -1104,6 +1136,10 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
         case SYS_SOUND:   r = sys_sound(f->rdi, f->rsi, f->rdx); break;
         case SYS_MKDIR:   r = sys_mkdir(f->rdi); break;
         case SYS_STAT:    r = sys_stat(f->rdi, f->rsi); break;
+        case SYS_STATX:   r = sys_statx(f->rdi, f->rsi); break;
+        case SYS_CHMOD:   r = sys_chmod(f->rdi, f->rsi); break;
+        case SYS_CHOWN:   r = sys_chown(f->rdi, f->rsi, f->rdx); break;
+        case SYS_RENAME:  r = sys_rename(f->rdi, f->rsi); break;
         case SYS_LISTDIR: r = sys_listdir(f->rdi, f->rsi, f->rdx); break;
         case SYS_MEMINFO: r = sys_meminfo(f->rdi); break;
         case SYS_MMAP:    r = sys_mmap(f->rdi, f->rsi, (int64_t)f->rdx); break;
@@ -2497,6 +2533,7 @@ static int64_t sys_system(uint64_t op, uint64_t a, uint64_t b) {
         }
         case SYSTEM_POWER:
             print_set_graphics(0);
+            vfs_shutdown();                                     /* ext3: clean, nothing to replay */
             if (a == 1) reboot();
             power_off();
             efi_reset(1);

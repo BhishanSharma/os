@@ -506,7 +506,13 @@ test-wpa: ## Unit-test the WPA2 handshake on the host (IEEE/RFC vectors, simulat
 	    $(BEARSSL_DIR)/build/libbearssl.a -o $(BUILD)/test/wpa_host_test
 	$(NOASLR) $(BUILD)/test/wpa_host_test
 
-test-unit: test-net test-tcp test-wpa ## All the host-side unit tests
+test-ext2: ## Unit-test the ext2/ext3 driver on the host; e2fsck checks what it wrote
+	mkdir -p $(BUILD)/test
+	gcc -g -O1 -Wall -Wextra -Wno-unused-parameter -fsanitize=address,undefined -I src/intf \
+	    tests/ext2_host_test.c $(SRC_X86)/drivers/ext2.c -o $(BUILD)/test/ext2_host_test
+	$(NOASLR) $(BUILD)/test/ext2_host_test
+
+test-unit: test-net test-tcp test-wpa test-ext2 ## All the host-side unit tests
 
 test-assets: $(USB_IMG) $(KERNEL_ISO) scripts/mktestdisks.sh ## Disk images and a video for the system tests
 	$(MAKE) tapp SRC=examples/hello

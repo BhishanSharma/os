@@ -10,6 +10,7 @@ typedef enum { DISK_NONE, DISK_ATA, DISK_RAM, DISK_NVME, DISK_USB } disk_kind_t;
 typedef struct {
     int (*read)(void *ctx, uint64_t lba, uint32_t count, void *buf);
     int (*write)(void *ctx, uint64_t lba, uint32_t count, const void *buf);
+    int (*flush)(void *ctx);             /* optional: the device's write cache onto the medium */
     void *ctx;
     uint64_t sectors;
     int writable;

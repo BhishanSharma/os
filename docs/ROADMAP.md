@@ -48,6 +48,23 @@ on WS_APPS, and `windowserver ID` opens one. System test: `bundle`. Cut: no
 system-wide `/APPS/NAME.APP/` (built-in apps stay in `apps/`, listed by
 DOCK.CFG) and no permissions in the bundle yet (stage 10's entitlements).
 
+Stage 9 is done: ext2/ext3 (`drivers/ext2.c`), with ext3's journal, so Linux
+and e2fsck read and repair it. Every change is one transaction (metadata to the
+journal, then in place; file contents to new blocks first), so a crash leaves
+it whole. The boot stick's first start adds an ext3 partition from 1 GiB to its
+end (GPT entry, backup table moved to the end) and mounts it at `/`; a stick
+written anew finds the file system there again. Files have owners and modes,
+checked by the VFS the Unix way (search on folders, write on the parent,
+sticky /TMP); homes are 0700, PASSWD and WIFI.CFG 0600. New calls: `statx`,
+`chmod`, `chown`, `rename`; programs `chmod`, `chown`, `mv`, `ls -l`; `crash
+journal` stops after a commit. Tests: `make test-ext2` (e2fsck checks what the
+driver wrote, crash replay, volumes made by mke2fs) and the system test
+`storage`. Cuts: FAT32 keeps the home-folder rule and cannot rename; the
+installer still makes FAT32 (firmware boots only from FAT); no symlinks, hard
+links or extended attributes are made (Linux's are read); groups are one per
+user; a file deleted while open reads stale blocks; the mlibc port still
+reports made-up modes until it is rebuilt with `statx`.
+
 Each stage below is the *lean* version: the smallest design that gives the
 macOS-style structure, with the cuts written down. One stage per working
 session; it ends with `make test` + `make test-os` green, a USB stick, one
@@ -64,7 +81,7 @@ laptop check, and a commit. Every stage adds its own system test to
 | 6 | launchd | 3, 4 | S |
 | 7 | WindowServer, UI library, Dock, Terminal, Finder | 1, 3, 6 | XL |
 | 8 | App bundles and launcher | 7 | S |
-| 9 | File system with permissions | 4 | L (optional) |
+| 9 | File system with permissions (done) | 4 | L |
 | 10 | Sandbox, sleep/wake, settings | 8 | M |
 
 ## 1. Virtual memory

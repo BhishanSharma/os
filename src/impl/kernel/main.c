@@ -44,6 +44,7 @@
 #include "drivers/vmmdev.h"
 #include "drivers/registry.h"
 #include "drivers/pci.h"
+#include "drivers/ext2.h"
 
 extern void irq0_stub();
 extern void irq1_stub();
@@ -117,9 +118,12 @@ static void mount_persistent(void) {
  * USB", mkusbimg.sh) is mounted at /USB, writable: logd keeps the logs there
  * (/USB/LOGS), so they can be read in Windows later. Only that partition:
  * never another stick's or an external drive's. */
-static int usb_scan_stick;
+static int usb_scan_stick, boot_stick = -1;
 static int usb_stick_reader(uint64_t lba, uint32_t count, void *buf) {
     return usb_storage_read(usb_scan_stick, lba, count, buf);
+}
+static int usb_stick_writer(uint64_t lba, uint32_t count, const void *buf) {
+    return usb_storage_write(usb_scan_stick, lba, count, buf);
 }
 
 static void mount_usb_stick(void) {
@@ -137,11 +141,74 @@ static void mount_usb_stick(void) {
             }
             registry_add(registry_find("storage"), "TERMOS USB", "volume", "USB stick %d, partition %d, mounted at /USB",
                          s + 1, i + 1);
+            boot_stick = s;
             print_boot_status(BOOT_OK, "USB stick", "the boot stick at /USB (%u MiB; logs in /USB/LOGS)",
                               (uint32_t)(parts[i].sectors / 2048));
             return;
         }
     }
+}
+
+/* The boot stick's data partition: ext3 labelled TERMOS DATA, from 1 GiB to
+ * the end of the stick. It becomes "/" when nothing else keeps files (no
+ * NVMe TERMINALOS partition), with the RAM disk at /SYS: homes, accounts and
+ * settings survive a reboot, and a crash or power cut cannot leave the file
+ * system half changed (its journal). The first start makes it in the stick's
+ * free space (the image ends well before 1 GiB). Writing the stick anew
+ * removes its partition entry but not the file system at 1 GiB, which is
+ * then found and listed again: the files outlive an update of the system. */
+#define DATA_START (1ull << 21)                    /* 1 GiB, in sectors */
+#define DATA_MIN   (128ull << 11)                  /* 128 MiB */
+
+static void mount_stick_data(void) {
+    static partition_t parts[16];
+    if (boot_stick < 0 || vfs_root_persistent()) return;
+    usb_scan_stick = boot_stick;
+    uint64_t total = usb_storage_sectors(boot_stick);
+    int n = part_scan(usb_stick_reader, parts, 16), found = -1;
+    for (int i = 0; i < n; i++)
+        if (parts[i].ext2 && !strcmp(parts[i].label, DATA_LABEL)) found = i;
+    uint64_t start = DATA_START, end = total - 34;              /* (the backup GPT takes the last 33) */
+    if (found >= 0) {
+        start = parts[found].start;
+        end = start + parts[found].sectors - 1;
+    } else {
+        if (total < DATA_START + DATA_MIN + 34) return;         /* a small stick: as before */
+        for (int i = 0; i < n; i++)
+            if (parts[i].start + parts[i].sectors > DATA_START) return;   /* someone else's layout */
+        uint8_t super[512];
+        char label[17];
+        int old = usb_storage_read(boot_stick, DATA_START + 2, 1, super) == 0 && ext2_probe(super, label) &&
+                  !strcmp(label, DATA_LABEL);
+        if (!old) print_boot_status(BOOT_OK, "Files", "making room for your files on the USB stick (once)...");
+        if (part_gpt_add(usb_stick_reader, usb_stick_writer, total, start, end, part_type_linux,
+                         "Terminal OS data") != 0) {
+            print_boot_status(BOOT_WARN, "Files", "could not add a data partition to the USB stick");
+            return;
+        }
+        if (!old) {
+            blockdev_t dev;
+            if (disk_open_usb_partition(boot_stick, start, end - start + 1, 1, &dev) != 0 || ext2_format(&dev, DATA_LABEL) != 0) {
+                print_boot_status(BOOT_WARN, "Files", "could not make the file system on the USB stick");
+                return;
+            }
+        }
+    }
+    blockdev_t dev, ram;
+    if (disk_open_usb_partition(boot_stick, start, end - start + 1, 1, &dev) != 0) return;
+    int r = vfs_mount("/", &dev);
+    if (r != 0) {
+        print_boot_status(BOOT_WARN, "Files", "the USB stick's data partition: %s (`fsck` it in Linux)", vfs_error(r));
+        return;
+    }
+    if (disk_open(DISK_RAM, &ram) == 0) vfs_mount("/SYS", &ram);
+    fat32_change_directory("/");
+    uint64_t size, free_bytes;
+    vfs_space("/", &size, &free_bytes);
+    registry_add(registry_find("storage"), DATA_LABEL, "volume", "USB stick %d, ext3, %u MiB, mounted at /",
+                 boot_stick + 1, (uint32_t)(size >> 20));
+    print_boot_status(BOOT_OK, "Files", "on the USB stick (ext3, %u MiB free, kept across reboots); system files at /SYS",
+                      (uint32_t)(free_bytes >> 20));
 }
 
 /* The registry node of the first PCI function of this class (0: the root). */
@@ -359,6 +426,7 @@ void kernel_main() {
             registry_add(find_class_node(0x01, 0x08), "NVMe drive", "storage", "%s", nvme_how);
             mount_persistent();
         }
+        mount_stick_data();
         char sound_how[96];
         int snd = sound_init(sound_how, sizeof(sound_how));
         print_boot_status(snd == 0 ? BOOT_OK : BOOT_WARN, "Sound", "%s", sound_how);

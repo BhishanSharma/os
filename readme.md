@@ -46,7 +46,7 @@ The USB stick image ends up at `dist/x86_64/terminalos.img` (`make iso` still bu
 | Interrupts     | 8259 PIC for legacy devices, plus PCI MSI / MSI-X through the local APIC for USB (xHCI), NVMe and Intel Wi-Fi (`interrupts` counts them); the timer polls stay as a backstop |
 | Desktop        | `windowserver` composites the programs' shared-memory windows, with the Rail, Launcher and Dock; `loginwindow` signs you in; apps live in `apps/` (see [docs/APPS.md](docs/APPS.md)); on Intel Gen12 graphics the blur and fades run on the GPU ([docs/GPU.md](docs/GPU.md)) |
 | User space     | Programs run in ring 3, each with its own address space; preemptive multitasking with background jobs (`&`, `jobs`, `ps`, `fg`, `kill`); system calls (`int 0x80`) including `spawn`/`wait`, a small C library; the shell itself is a user program started at login; faults, Ctrl+C and `kill` end only the program. See [docs/USERSPACE.md](docs/USERSPACE.md) |
-| Storage        | NVMe SSDs (polled or MSI-X, GPT/MBR partitions), ATA PIO, and the RAM disk loaded at boot. A VFS with mounts and real paths (`/A/B/C.TXT`, `..`, across mounts); FAT32 read/write with long file names (VFAT, up to 255 characters, case kept, Windows-compatible `~1` aliases). On a laptop, a FAT32 partition labelled TERMINALOS (made in Windows) becomes `/` and keeps files, accounts and Wi-Fi settings across reboots; every other partition is read-only |
+| Storage        | NVMe SSDs (polled or MSI-X, GPT/MBR partitions), ATA PIO, and the RAM disk loaded at boot. A VFS with mounts and real paths (`/A/B/C.TXT`, `..`, across mounts); FAT32 read/write with long file names (VFAT, up to 255 characters, case kept, Windows-compatible `~1` aliases), and ext2/ext3 (Linux's) with its journal: a crash or power cut leaves every change done or not done, never half way, and files have owners and Unix permissions (`ls -l`, `chmod`, `chown`, `mv`). Booted from a USB stick of more than 1.2 GB, the first start makes an ext3 data partition in the stick's free space (from 1 GiB to the end) that becomes `/`: files, accounts and Wi-Fi settings survive reboots, and writing a new image to the stick keeps them. On a laptop, a FAT32 partition labelled TERMINALOS (made in Windows) takes that role instead; every other partition is read-only |
 | Users          | Login prompt, root and normal accounts (`useradd`, `passwd`, `su`), salted password hashes, users may only change files in their home folder |
 | Shell          | ~30 commands (files, memory, disk, themes), see [docs/SHELL.md](docs/SHELL.md)   |
 | Editor         | Line-based text editor (`edit <file>`)                                           |
@@ -114,6 +114,11 @@ never-formatted one (it formats it). Windows' partitions are never offered. It t
 "Terminal OS" to the end of the PC's boot menu, so Windows stays the default; `bootmenu`
 lists the entries. Make the partition in Windows' Disk Management first (Shrink C:, New
 Simple Volume).
+
+Without installing, the stick keeps your files itself: on the first start it adds an ext3
+partition ("TERMOS DATA") after the first GiB and makes it `/`, with the system files at
+`/SYS`. Homes are private to their user (`drwx------`), `/TMP` is everyone's, and only root
+reads `/PASSWD`. Windows does not show that partition; Linux mounts it as ext3.
 
 ---
 

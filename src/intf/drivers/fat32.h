@@ -69,9 +69,11 @@ typedef struct {
 typedef struct {
     char name[256];
     uint32_t size;
-    uint32_t first_cluster;
+    uint32_t first_cluster;              /* (ext2: the inode) */
     uint8_t attributes;
     uint8_t is_directory;
+    uint16_t mode;                       /* ext2: type and permission bits; 0 on FAT32 */
+    uint32_t uid, gid, mtime;
 } fat32_file_info_t;
 
 /* Returned by the functions that change the disk when the write guard says no. */
