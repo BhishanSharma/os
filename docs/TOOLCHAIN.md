@@ -33,6 +33,72 @@ compiled with `x86_64-pc-terminalos-gcc`/`g++` and linked into `NAME.elf` on
 the RAM disk. In the plain `myos-buildenv` image (no such compiler) ports are
 skipped. `ports/cxxtest` checks the toolchain: run `cxxtest` on the OS.
 
+### Dynamic linking
+
+Programs are linked statically unless they ask. In `myos-ladybird` (the
+image `build.ps1` uses) mlibc is also built as shared libraries: the dynamic
+linker `ld.so` and `libc.so` (plus the empty `libdl`, `libm`, `libpthread`,
+`librt`), in the sysroot's `/usr/lib/dynamic` and on the RAM disk in `LIB`
+(/SYS/LIB on an installed system, else /LIB). To link a program against
+them, add `-specs=/opt/terminalos/dynamic.specs` (in `ports/NAME/LIBS`);
+`-shared` with `-fPIC` objects makes a shared library.
+
+The program then names `/lib/ld.so` as its interpreter (PT_INTERP). The
+kernel loads ld.so from the system folder only (never a user's files), at
+0x7E0000000000, and starts there with the program's headers in the
+auxiliary vector (AT_PHDR, AT_ENTRY, AT_BASE). ld.so loads libc.so and the
+rest from /SYS/LIB and /LIB (or `LD_LIBRARY_PATH`), each where mmap puts it,
+then starts the program. `dlopen`/`dlsym` work. ld.so has its own small set
+of system calls (`generic/rtld.cpp`: open, read, seek, close, mmap, futex,
+thread pointer); the rest of the port needs the C library it is loading.
+
+Cuts: C++ programs still link libstdc++ and libgcc statically (GCC is built
+without shared libgcc_s; changing that rebuilds every image). No PIE.
+Ladybird stays static. A library's pages are copied into each program, not
+shared. `dyncheck` checks it (system test `dynamic`).
+
+## Ports: other people's programs, `toolchain/ports/NAME/`
+
+A port is a recipe, `toolchain/ports/NAME/port.sh`: where the source is
+(`URL`, and its `SHA256`, checked before anything is built) and a `build`
+function, run in the unpacked source with `CC`, `CXX`, `AR`, `RANLIB` and
+`HOST` set for the OS (dynamically linked). What it copies into `$DEST/bin`
+goes on the RAM disk, in the system folder. `build.ps1` runs
+`toolchain/ports/build.sh` before the OS build when it uses `myos-ladybird`;
+a source is downloaded once (`build/ports/cache`), a port is built again only
+when its recipe changes, and one that cannot be downloaded is left out with a
+warning. By hand: `sh toolchain/ports/build.sh lua` in the image.
+
+| Port | What you get |
+| --- | --- |
+| `lua` | Lua 5.4.7: `lua`, `luac` (C modules load with `require`, dlopen) |
+| `sqlite` | SQLite 3.47: `sqlite3` (no locking, no WAL: one user at a time) |
+| `bash` | GNU bash 5.2: `bash`, with readline (line editing, history); no job control |
+
+For a configure-based port, `/tc/config.sub` knows `terminalos`, and
+`--host=$HOST` cross-compiles. The C library's gaps show up as configure
+answers to give (`bash`'s recipe has the usual ones). `stat` and `access`
+of `X` find the program `X.elf`, so shells that search `PATH` find the OS's
+own programs. System test `ports` runs them.
+
+## Terminals: pseudo-terminals and termios
+
+The Terminal window gives its shell a pseudo-terminal (`USOCK_PTY`: the
+window holds the master end, the shell and its programs have the slave as
+0-2). `tcgetattr`/`tcsetattr` and the termios ioctls (`TCGETS`, `TCSETS`,
+`TIOCGWINSZ`, `TIOCSWINSZ`) work on it, `isatty` says yes, and `TERM` is set
+to `xterm` (a built-in `/etc/termcap` describes the window). In the cooked
+mode the window edits the line (and keeps the history) and sends it whole;
+Ctrl+D is an end of file. In raw mode (readline, an editor) every key goes
+straight to the program, the arrows as escape sequences; Ctrl+C is SIGINT
+for the program that set the mode. The window is a VT100 screen: cursor
+movement, erasing, 16 colours, scroll regions, the alternate screen.
+`ptytest` checks the kernel's side (system test `kernel`).
+
+Cuts: no process groups or job control (Ctrl+Z), no UTF-8 on the screen
+(bytes are the font's characters), 256 and true colours are approximated.
+The kernel's text console has no modes: `tcsetattr` there does nothing.
+
 ## What is in `toolchain/`
 
 | File | What it does |
@@ -40,8 +106,9 @@ skipped. `ports/cxxtest` checks the toolchain: run `cxxtest` on the OS.
 | `Dockerfile` | binutils, mlibc headers, GCC + libgcc, mlibc, libstdc++ |
 | `patch-sources.sh` | teaches binutils and GCC the OS name `terminalos` |
 | `terminalos.h` | GCC's target description: crt files, static linking, predefined macros (`__terminalos__`, `__unix__`) |
+| `specs`, `dynamic.specs` | the link rule: `-shared` makes a shared library; `-specs=dynamic.specs` links against the shared C library |
 | `cross-file.txt` | Meson cross file (for mlibc and Meson-built ports) |
-| `mlibc/terminalos/` | mlibc's port: `generic/sysdeps.cpp` maps the C library's needs to the kernel's system calls |
+| `mlibc/terminalos/` | mlibc's port: `generic/sysdeps.cpp` maps the C library's needs to the kernel's system calls (`generic/rtld.cpp`: the dynamic linker's) |
 | `mlibc/setup-port.sh` | puts the port into mlibc's source tree |
 
 The ABI (errno numbers, `struct stat`, `O_*` flags, signal numbers) is

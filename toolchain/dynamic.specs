@@ -1,0 +1,9 @@
+*link:
+%{shared:-shared;:-dynamic-linker /lib/ld.so} -L=/usr/lib/dynamic -rpath-link=/opt/terminalos/sysroot/usr/lib/dynamic -z max-page-size=4096 --eh-frame-hdr
+
+*startfile:
+%{!shared:crt1.o%s} crti.o%s %{shared:crtbeginS.o%s;:crtbegin.o%s}
+
+*endfile:
+%{shared:crtendS.o%s;:crtend.o%s} crtn.o%s
+

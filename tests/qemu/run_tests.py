@@ -520,6 +520,37 @@ def test_sleep():
         m.stop()
 
 
+def test_dynamic():
+    """Dynamic linking: dyncheck starts through ld.so, uses libc.so and dlopens
+    a library (needs the toolchain image's build: build.ps1)."""
+    m = Machine("dynamic", usb_stick())
+    try:
+        login(m)
+        out = m.run("dyncheck", 60)
+        check("dynamic linking works" in out, "dyncheck", out)
+        out = m.run("echo back")                      # the shell after a dynamic program
+        check("back" in out, "the shell after dyncheck", out)
+    finally:
+        m.stop()
+
+
+def test_ports():
+    """The ports (toolchain/ports): Lua and SQLite run, dynamically linked."""
+    m = Machine("ports", usb_stick())
+    try:
+        login(m)
+        out = m.run("lua -e \"print(string.format('lua %d', 6 * 7))\"", 60)
+        check("lua 42" in out, "lua", out)
+        out = m.run("sqlite3 :memory: \"select 'sqlite ' || (6 * 7);\"", 60)
+        check("sqlite 42" in out, "sqlite3", out)
+        out = m.run("bash -c 'echo bash $((6 * 7))'", 60)
+        check("bash 42" in out, "bash", out)
+        out = m.run("bash -c 'echo from-bash > /TMP/b.txt; cat /TMP/b.txt'", 60)   # PATH, fork, exec
+        check("from-bash" in out.replace("echo from-bash", ""), "bash runs the OS's programs", out)
+    finally:
+        m.stop()
+
+
 def test_install():
     """`install` on an empty partition, then the restart boots from the SSD."""
     disk = os.path.join(OUT, "install-nvme.img")
@@ -595,6 +626,8 @@ def test_kernel():
         check("FAILED" not in out and "1 MiB message: ok" in out, "porttest", out)
         out = m.run("forktest", 60)
         check("FAILED" not in out and " ok" in out, "forktest", out)
+        out = m.run("ptytest", 60)                    # pseudo-terminals: cooked, raw, Ctrl+C/D
+        check("ptytest: all ok" in out, "ptytest", out)
         for kind in ("elf", "tramp"):                 # what the kernel must refuse (attack.c)
             out = m.run("attack " + kind, 60)
             check("attack %s: refused" % kind in out, "attack " + kind, out)
@@ -811,9 +844,12 @@ def test_logs():
 
 
 TESTS = [("boot", test_boot), ("files", test_files), ("fault", test_fault), ("panic", test_panic),
-         ("kernel", test_kernel), ("desktop", test_desktop), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("logs", test_logs), ("user", test_user), ("video", test_nvme_video), ("bundle", test_bundle), ("storage", test_storage), ("sleep", test_sleep), ("install", test_install), ("network", test_network),
+         ("kernel", test_kernel), ("desktop", test_desktop), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("logs", test_logs), ("user", test_user), ("video", test_nvme_video), ("bundle", test_bundle), ("storage", test_storage), ("sleep", test_sleep), ("dynamic", test_dynamic), ("ports", test_ports), ("install", test_install), ("network", test_network),
          ("bios", test_legacy_bios)]
 NEEDS_INTERNET = {"network"}
+# Tests of programs only the full toolchain builds (myos-ladybird: build.ps1).
+NEEDS_TOOLCHAIN = {"dynamic": os.path.join(ROOT, "build", "user", "dyncheck.elf"),
+                   "ports": os.path.join(ROOT, "build", "ports", "out", "lua", "bin", "lua")}
 
 
 def main(argv):
@@ -834,6 +870,10 @@ def main(argv):
             continue
         if offline and name in NEEDS_INTERNET:
             results.append((name, "SKIP", 0, "needs the internet"))
+            continue
+        if name in NEEDS_TOOLCHAIN and not os.path.exists(NEEDS_TOOLCHAIN[name]):
+            results.append((name, "SKIP", 0, "needs the toolchain's build"))
+            print("%-8s SKIP  (needs the toolchain's build)" % name)
             continue
         print("%-8s ..." % name, end="", flush=True)
         t = time.time()

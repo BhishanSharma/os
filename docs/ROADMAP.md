@@ -84,6 +84,25 @@ sandbox per process (inherited, never widened), the VFS asks it about every
 path, the network calls check it. Cuts: ports (Mach IPC) and shared memory
 are not limited; built-in apps are not sandboxed; a settings app for it.
 
+Dynamic linking is in, lean: mlibc is also built as shared libraries (the
+dynamic linker `ld.so` and `libc.so`, in the RAM disk's `LIB` folder:
+/SYS/LIB on an installed system). A program linked with
+`-specs=/opt/terminalos/dynamic.specs` names `/lib/ld.so` as its
+interpreter; the kernel loads ld.so beside it (from the system folder only)
+and starts there, ld.so loads libc.so and what else it needs, and `dlopen`
+works (`ports/dyncheck`, system test `dynamic`). Programs stay static unless
+they ask. Cuts: C++ programs link libstdc++ and libgcc statically (GCC is
+built without shared libgcc_s, a rebuild of every image); no PIE; Ladybird
+stays static; pages of a library are copied per program, not shared.
+
+A ports system and terminals are in, lean: `toolchain/ports/NAME/port.sh`
+recipes (a checked source, a build function) for Lua, SQLite and bash, built
+before the OS and put on the RAM disk; the Terminal window runs its shell on
+a pseudo-terminal with termios (raw mode, Ctrl+C, the window size) and draws
+a VT100 screen, so bash's readline and full-screen programs work
+(docs/TOOLCHAIN.md). Cuts: no job control or process groups yet; no package
+download on the OS itself (ports are built with the OS).
+
 Each stage below is the *lean* version: the smallest design that gives the
 macOS-style structure, with the cuts written down. One stage per working
 session; it ends with `make test` + `make test-os` green, a USB stick, one

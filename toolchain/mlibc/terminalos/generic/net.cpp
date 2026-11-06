@@ -22,6 +22,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <termios.h>
 #include <time.h>
 
 namespace tos {
@@ -238,6 +239,19 @@ const char services[] =
 	"imaps 993/tcp\npop3s 995/tcp\nhttp-alt 8080/tcp\n";
 const char hosts[] = "127.0.0.1 localhost\n";
 const char resolv[] = "nameserver 127.0.0.53\n";   // (answered by the kernel's resolver)
+// The Terminal window (apps/terminal: a VT100 screen), for programs that
+// look a terminal up (readline, termcap): TERM=xterm on a pty (entry.cpp).
+const char termcap[] =
+	"xterm|xterm-256color|vt100|vt102|ansi|terminalos|Terminal OS window:"
+	":am:km:mi:ms:xn:bs:co#80:li#25:it#8:"
+	":cl=\\E[H\\E[2J:cd=\\E[J:ce=\\E[K:cm=\\E[%i%d;%dH:ho=\\E[H:"
+	":up=\\E[A:do=^J:nd=\\E[C:le=^H:cr=^M:nl=^J:sf=^J:sr=\\EM:ta=^I:"
+	":UP=\\E[%dA:DO=\\E[%dB:RI=\\E[%dC:LE=\\E[%dD:ch=\\E[%i%dG:cv=\\E[%i%dd:"
+	":al=\\E[L:dl=\\E[M:AL=\\E[%dL:DL=\\E[%dM:dc=\\E[P:DC=\\E[%dP:ic=\\E[@:IC=\\E[%d@:"
+	":cs=\\E[%i%d;%dr:ec=\\E[%dX:"
+	":so=\\E[7m:se=\\E[27m:us=\\E[4m:ue=\\E[24m:md=\\E[1m:mr=\\E[7m:me=\\E[0m:"
+	":ti=\\E[?1049h:te=\\E[?1049l:vi=\\E[?25l:ve=\\E[?25h:sc=\\E7:rc=\\E8:"
+	":ku=\\EOA:kd=\\EOB:kr=\\EOC:kl=\\EOD:ks=\\E[?1h:ke=\\E[?1l:kb=^?:\n";
 
 struct Builtin {
 	const char *path;
@@ -253,6 +267,7 @@ const Builtin builtins[] = {
 	{"/etc/services", VF_TEXT, services, sizeof(services) - 1},
 	{"/etc/hosts", VF_TEXT, hosts, sizeof(hosts) - 1},
 	{"/etc/resolv.conf", VF_TEXT, resolv, sizeof(resolv) - 1},
+	{"/etc/termcap", VF_TEXT, termcap, sizeof(termcap) - 1},
 };
 
 const Builtin *find_builtin(const char *path) {
@@ -930,6 +945,30 @@ int Sysdeps<Ioctl>::operator()(int fd, unsigned long request, void *arg, int *re
 			n = (int)si.available;
 		}
 		*(int *)arg = n;
+		return 0;
+	}
+	if (request == TCGETS)
+		return sysdep<Tcgetattr>(fd, (struct termios *)arg);
+	if (request == TCSETS || request == TCSETSW || request == TCSETSF)
+		return sysdep<Tcsetattr>(fd, 0, (const struct termios *)arg);
+	if ((request == TIOCGWINSZ || request == TIOCSWINSZ) && tos::is_pty(fd)) {
+		struct winsize *w = (struct winsize *)arg;
+		tos_winsize k;
+		if (request == TIOCSWINSZ) {
+			k.rows = w->ws_row, k.cols = w->ws_col, k.xpixel = w->ws_xpixel, k.ypixel = w->ws_ypixel;
+			return sc(TOS_USOCK, TOS_USOCK_SETWINSZ, fd, (long)&k) < 0 ? ENOTTY : 0;
+		}
+		if (sc(TOS_USOCK, TOS_USOCK_WINSZ, fd, (long)&k) < 0)
+			return ENOTTY;
+		memset(w, 0, sizeof(*w));
+		w->ws_row = k.rows, w->ws_col = k.cols, w->ws_xpixel = k.xpixel, w->ws_ypixel = k.ypixel;
+		return 0;
+	}
+	if (request == TIOCGPGRP || request == TIOCSPGRP || request == TIOCSCTTY || request == TIOCNOTTY) {
+		if (sysdep<Isatty>(fd))
+			return ENOTTY;
+		if (request == TIOCGPGRP)                   // (no process groups: the caller leads its own)
+			*(pid_t *)arg = (pid_t)sc(TOS_GETPID);
 		return 0;
 	}
 	if (request == TIOCGWINSZ && fd >= 0 && fd <= 2) {

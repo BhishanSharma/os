@@ -84,3 +84,21 @@ RUN cd /src && sh /tc/mlibc/setup-port.sh mlibc > /dev/null && cd mlibc && \
     grep -q "HashStyle::none) return" $f && \
     (ninja -j$JOBS -C build && DESTDIR=$SYSROOT ninja -C build install) > /src/mlibc4.log 2>&1 || \
     (grep -B2 -A12 "FAILED\|error:" /src/mlibc4.log | head -60; false)
+
+# Dynamic linking: the C library as shared libraries too, the dynamic linker
+# ld.so and libc.so, in /usr/lib/dynamic (the OS has them in /SYS/LIB).
+# Programs stay static unless they ask: -specs=/opt/terminalos/dynamic.specs
+# links one against them (ports/dyncheck). toolchain/specs: -shared makes a
+# shared library (the compiler's own link rule was always -static).
+COPY specs dynamic.specs /tc/
+RUN cp /tc/specs "$(dirname "$(x86_64-pc-terminalos-gcc -print-libgcc-file-name)")/specs" && \
+    cp /tc/dynamic.specs /opt/terminalos/dynamic.specs && \
+    cd /src/mlibc && rm -rf build-shared && \
+    (meson setup --cross-file /tc/cross-file.txt --prefix=/usr -Ddefault_library=shared \
+        -Ddefault_library_paths=/SYS/LIB,/LIB -Dlinux_kernel_headers=/opt/linux-headers build-shared && \
+     ninja -j$JOBS -C build-shared) > /src/mlibc-shared.log 2>&1 || \
+    (grep -B2 -A12 "FAILED\|error:" /src/mlibc-shared.log | head -60; false)
+RUN mkdir -p $SYSROOT/usr/lib/dynamic && cp /src/mlibc/build-shared/*.so $SYSROOT/usr/lib/dynamic/ && \
+    printf 'int main(void) { return 0; }\n' > /tmp/t.c && \
+    x86_64-pc-terminalos-gcc -specs=/opt/terminalos/dynamic.specs /tmp/t.c -o /tmp/t && \
+    x86_64-pc-terminalos-readelf -l /tmp/t | grep -q "/lib/ld.so" && rm /tmp/t /tmp/t.c

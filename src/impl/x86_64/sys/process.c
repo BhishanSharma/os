@@ -85,8 +85,14 @@ typedef struct {
 } __attribute__((packed)) elf64_phdr_t;
 
 #define ELF_TYPE_EXEC   2
+#define ELF_TYPE_DYN    3     /* a shared object: the dynamic linker */
 #define ELF_MACHINE_X64 62
 #define PT_LOAD         1
+#define PT_INTERP       3
+
+/* Where a dynamically linked program's dynamic linker (ld.so) goes: below
+ * the mappings (vm.c's MMAP_TOP), far above any program and its heap. */
+#define INTERP_BASE     0x00007E0000000000ULL
 
 /* ---- The current program -------------------------------------------- */
 
@@ -451,6 +457,59 @@ static int64_t stream_write(file_t *f, pipe_t *pp, const char *src, uint64_t len
     return pipe_write(pp, src, len);                    /* -2: nobody reads; -1: interrupted */
 }
 
+/* ---- Pseudo-terminals (USOCK_PTY; the modes: syscall_usock.c) ---- */
+
+/* The window types (writes to the master): into what the slave reads. In
+ * raw mode with ISIG, Ctrl+C is SIGINT for the program that set the mode;
+ * with ECHO the keys come back to the window. In the cooked mode the window
+ * has edited the line (and shown it); Ctrl+D there is an end of file. */
+static int64_t pty_type(file_t *f, const char *src, uint64_t len) {
+    pty_t *t = f->us->pty;
+    pipe_t *to_slave = f->us->pipe[1], *to_window = f->us->pipe[0];
+    int raw = !(t->t.lflag & PTY_ICANON);
+    uint64_t from = 0;
+    for (uint64_t i = 0; i <= len; i++) {
+        unsigned char c = i < len ? (unsigned char)src[i] : 0;
+        int intr = i < len && raw && (t->t.lflag & PTY_ISIG) && c && c == t->t.cc[PTY_VINTR];
+        int eof = i < len && !raw && c && c == t->t.cc[PTY_VEOF];
+        if (i < len && !intr && !eof) continue;
+        if (i > from) {                                   /* the plain bytes before it */
+            int64_t n = stream_write(f, to_slave, src + from, i - from);
+            if (n < 0) return n == -2 ? SYSERR_PIPE : n == SYSERR_WOULDBLOCK ? n : SYSERR_TIMEOUT;
+            if (raw && (t->t.lflag & PTY_ECHO)) pipe_write(to_window, src + from, i - from);
+        }
+        from = i + 1;
+        if (intr && t->fg) signal_send(t->fg, SIGINT);
+        if (eof) {
+            t->eof++;
+            io_event();
+        }
+    }
+    return (int64_t)len;
+}
+
+/* The slave reads: what was typed, or 0 once for each Ctrl+D. Waits on the
+ * I/O counter rather than in the pipe, so a Ctrl+D wakes it too. */
+static int64_t pty_read(file_t *f, char *dst, uint64_t len) {
+    pty_t *t = f->us->pty;
+    pipe_t *pp = f->us->pipe[1];
+    for (;;) {
+        uint64_t gen = io_generation();
+        uint32_t waiting, room;
+        int no_writers, no_readers;
+        pipe_state(pp, &waiting, &room, &no_writers, &no_readers);
+        if (waiting || no_writers || !len) return stream_read(f, pp, dst, len);
+        if (t->eof) {
+            t->eof--;
+            return 0;
+        }
+        if (f->nonblock) return SYSERR_WOULDBLOCK;
+        io_wait(gen, 100);
+        check_killed();
+        if (P()->sig_pending) return SYSERR_TIMEOUT;     /* interrupted (EINTR) */
+    }
+}
+
 /* poll()'s wait: until a pipe or local socket changes, ms pass, or (net) the
  * next interrupt, since a packet may have come. */
 static int64_t sys_pollwait(int64_t gen, uint64_t ms, uint64_t net) {
@@ -674,6 +733,7 @@ static int64_t sys_write(uint64_t fd, uint64_t buf, uint64_t len) {
         print_batch_end();
         return (int64_t)len;
     }
+    if (f->kind == F_USOCK && f->us && f->us->pty && f->side == 0) return pty_type(f, src, len);
     if (f->kind == F_USOCK) {
         if (!f->us) return SYSERR_BADFD;
         int64_t n = stream_write(f, f->us->pipe[!f->side], (const char *)src, len);
@@ -717,6 +777,7 @@ static int64_t sys_read(uint64_t fd, uint64_t buf, uint64_t len) {
         return (int64_t)n;
     }
     if (f->kind == F_PIPE_R) return stream_read(f, f->pipe, dst, len);
+    if (f->kind == F_USOCK && f->us && f->us->pty && f->side == 1) return pty_read(f, dst, len);
     if (f->kind == F_USOCK) return f->us ? stream_read(f, f->us->pipe[f->side], dst, len) : SYSERR_BADFD;
     if (f->kind == F_SHM) {
         int64_t n = vm_shm_copy(f->shm, f->pos, dst, len, 0);
@@ -1173,8 +1234,9 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
                 else
                     r = (room || no_readers ? SOCK_WRITABLE : 0) | (no_readers ? SOCK_HANGUP : 0);
             } else if (fl->kind == F_USOCK) {
-                r = SOCK_LOCAL;
+                r = fl->us && fl->us->pty ? SOCK_PTY : SOCK_LOCAL;
                 if (!fl->us) { r |= SOCK_HANGUP; break; }
+                if (fl->us->pty && fl->side == 1 && fl->us->pty->eof) r |= SOCK_READABLE;
                 uint32_t waiting, room;
                 int no_writers, no_readers;
                 pipe_state(fl->us->pipe[fl->side], &waiting, &room, &no_writers, &no_readers);
@@ -1295,14 +1357,17 @@ static uint64_t phdr_at, phdr_num;
 #define BIG_PROGRAM  (8u << 20)
 #define PROGRAM_HEAD (64u * 1024)
 
+/* With bias 0 a program (its PT_INTERP, if any, in interp); else a shared
+ * object (the dynamic linker), moved up by bias. */
 static uint64_t load_elf(uint64_t root, vm_space_t *vm, const uint8_t *data, uint32_t size,
-                         uint64_t *image_end, const char *path) {
+                         uint64_t *image_end, const char *path, uint64_t bias, char *interp) {
     phdr_at = phdr_num = 0;
+    if (interp) interp[0] = 0;
     uint32_t have = path && size > PROGRAM_HEAD ? PROGRAM_HEAD : size;   /* bytes in data */
     const elf64_ehdr_t *eh = (const elf64_ehdr_t *)data;
     if (have < sizeof(*eh) || eh->ident[0] != 0x7F || eh->ident[1] != 'E' || eh->ident[2] != 'L' ||
         eh->ident[3] != 'F' || eh->ident[4] != 2 /* 64-bit */ || eh->ident[5] != 1 /* little endian */ ||
-        eh->type != ELF_TYPE_EXEC || eh->machine != ELF_MACHINE_X64 ||
+        eh->type != (bias ? ELF_TYPE_DYN : ELF_TYPE_EXEC) || eh->machine != ELF_MACHINE_X64 ||
         eh->phentsize != sizeof(elf64_phdr_t) || eh->phoff > have ||
         (uint64_t)eh->phnum * sizeof(elf64_phdr_t) > have - eh->phoff)
         return 0;
@@ -1313,16 +1378,23 @@ static uint64_t load_elf(uint64_t root, vm_space_t *vm, const uint8_t *data, uin
     uint64_t lo = USER_TOP, hi = USER_BASE;
     for (int i = 0; i < eh->phnum; i++) {
         const elf64_phdr_t *ph = (const elf64_phdr_t *)(data + eh->phoff + i * sizeof(elf64_phdr_t));
+        if (ph->type == PT_INTERP && interp) {         /* "/lib/ld.so": dynamically linked */
+            if (ph->offset > have || ph->filesz < 2 || ph->filesz > MAX_PATH || ph->filesz > have - ph->offset ||
+                data[ph->offset + ph->filesz - 1] != 0)
+                return 0;
+            memcpy(interp, data + ph->offset, ph->filesz);
+        }
         if (ph->type != PT_LOAD || ph->memsz == 0) continue;
+        uint64_t vaddr = ph->vaddr + bias;
         /* (written so that nothing can wrap around: the file is the program's to craft) */
-        if (ph->vaddr < USER_BASE || ph->vaddr >= limit || ph->memsz > limit - ph->vaddr ||
+        if (ph->vaddr > limit || vaddr < USER_BASE || vaddr >= limit || ph->memsz > limit - vaddr ||
             ph->filesz > ph->memsz || ph->offset > size || ph->filesz > size - ph->offset)
             return 0;
         if (file) {
-            uint64_t start = PAGE_DOWN(ph->vaddr), fend = PAGE_UP(ph->vaddr + ph->filesz);
-            uint64_t mend = PAGE_UP(ph->vaddr + ph->memsz);
+            uint64_t start = PAGE_DOWN(vaddr), fend = PAGE_UP(vaddr + ph->filesz);
+            uint64_t mend = PAGE_UP(vaddr + ph->memsz);
             int prot = VM_READ | ((ph->flags & 2) ? VM_WRITE : 0);   /* PF_W */
-            if (ph->vaddr - start != (ph->offset & (PAGE_SIZE - 1)) || start < hi) {
+            if (vaddr - start != (ph->offset & (PAGE_SIZE - 1)) || start < hi) {
                 vm_object_put(file);                   /* (not page aligned, or segments share a page) */
                 return 0;
             }
@@ -1330,7 +1402,7 @@ static uint64_t load_elf(uint64_t root, vm_space_t *vm, const uint8_t *data, uin
                 vm_region_t *r = vm_add(vm, start, fend, prot, VM_FILE, file);
                 if (!r) { vm_object_put(file); return 0; }
                 vm_object_get(file);
-                r->offset = ph->offset - (ph->vaddr - start);
+                r->offset = ph->offset - (vaddr - start);
                 r->limit = ph->offset + ph->filesz;
             }
             if (mend > fend && !vm_add(vm, fend > start ? fend : start, mend, prot, VM_ANON, 0)) {
@@ -1338,18 +1410,48 @@ static uint64_t load_elf(uint64_t root, vm_space_t *vm, const uint8_t *data, uin
                 return 0;
             }
         } else {
-            if (map_user_range(root, ph->vaddr, ph->vaddr + ph->memsz) != 0) return 0;
-            copy_to_space(root, ph->vaddr, data + ph->offset, ph->filesz);
+            if (map_user_range(root, vaddr, vaddr + ph->memsz) != 0) return 0;
+            copy_to_space(root, vaddr, data + ph->offset, ph->filesz);
         }
-        if (PAGE_DOWN(ph->vaddr) < lo) lo = PAGE_DOWN(ph->vaddr);
-        if (PAGE_UP(ph->vaddr + ph->memsz) > hi) hi = PAGE_UP(ph->vaddr + ph->memsz);
-        if (ph->offset == 0) phdr_at = ph->vaddr + eh->phoff;      /* the headers are loaded with it */
+        if (PAGE_DOWN(vaddr) < lo) lo = PAGE_DOWN(vaddr);
+        if (PAGE_UP(vaddr + ph->memsz) > hi) hi = PAGE_UP(vaddr + ph->memsz);
+        if (ph->offset == 0) phdr_at = vaddr + eh->phoff;          /* the headers are loaded with it */
     }
     if (file) vm_object_put(file);                     /* (the regions hold theirs) */
-    if (hi <= lo || eh->entry < lo || eh->entry >= hi) return 0;
+    if (hi <= lo || eh->entry + bias < lo || eh->entry + bias >= hi) return 0;
     *image_end = hi;
     phdr_num = eh->phnum;
-    return eh->entry;
+    return eh->entry + bias;
+}
+
+/* The program, and for a dynamically linked one its dynamic linker: the
+ * file PT_INTERP names, from the system folder only (the RAM disk's
+ * /SYS/LIB/ld.so on an installed system), never from a user's files.
+ * Returns where to start (ld.so's entry, or the program's); the program's
+ * own entry goes in *program_entry (AT_ENTRY), ld.so's base in interp_base
+ * (AT_BASE, 0 without one). */
+static uint64_t interp_base;
+
+static uint64_t load_program(uint64_t root, vm_space_t *vm, const uint8_t *data, uint32_t size,
+                             uint64_t *image_end, const char *path, uint64_t *program_entry) {
+    char interp[MAX_PATH], file[MAX_PATH + 8];
+    interp_base = 0;
+    uint64_t entry = load_elf(root, vm, data, size, image_end, path, 0, interp);
+    *program_entry = entry;
+    if (!entry || !interp[0]) return entry;
+    if (interp[0] != '/') return 0;
+    k_snprintf(file, sizeof(file), "%s%s", strcmp(vfs_system_dir(), "/") ? vfs_system_dir() : "", interp);
+    uint32_t n = fat32_get_file_size(file);
+    if (n == 0 || n == 0xFFFFFFFF || n > BIG_PROGRAM) return 0;
+    uint8_t *image = kmalloc(n);
+    if (!image) return 0;
+    uint64_t at = phdr_at, num = phdr_num, end;
+    uint64_t start = fat32_read_file(file, image, n) < 0 ? 0 : load_elf(root, vm, image, n, &end, 0, INTERP_BASE, 0);
+    kfree(image);
+    phdr_at = at;                                      /* (AT_PHDR: the program's, not ld.so's) */
+    phdr_num = num;
+    if (start) interp_base = INTERP_BASE;
+    return start;
 }
 
 /* argc, argv[], NULL and the strings at the top of the stack, as the SysV ABI
@@ -1375,8 +1477,9 @@ static uint64_t build_stack(uint64_t root, int argc, int envc, char **args, uint
     }
     sp &= ~(uint64_t)15;
     /* The auxiliary vector: AT_PHDR 3, AT_PHENT 4, AT_PHNUM 5, AT_PAGESZ 6,
-     * AT_ENTRY 9, AT_RANDOM 25, AT_NULL. */
-    uint64_t aux[] = { 3, phdr_at, 4, 56, 5, phdr_num, 6, PAGE_SIZE, 9, entry_at, 25, random, 0, 0 };
+     * AT_ENTRY 9, AT_RANDOM 25, AT_BASE 7, AT_NULL. */
+    uint64_t aux[] = { 3, phdr_at, 4, 56, 5, phdr_num, 6, PAGE_SIZE, 9, entry_at, 25, random,
+                       7, interp_base, 0, 0 };     /* AT_BASE 7: where ld.so is (0: none) */
     int words = n + 2 + 1 + (int)(sizeof(aux) / 8);   /* argc, argv..NULL, envp..NULL, auxv */
     if (words % 2) sp -= 8;               // keep the final rsp 16-byte aligned
     for (int i = (int)(sizeof(aux) / 8) - 1; i >= 0; i--) {
@@ -1419,14 +1522,15 @@ static int spawn_as(const uint8_t *data, uint32_t size, const char *path, int ar
     memset(p, 0, sizeof(*p));
 
     vm_init_space(&p->vm);
-    uint64_t image_end = 0, entry = load_elf(root, &p->vm, data, size, &image_end, path), sp = 0;
+    uint64_t image_end = 0, program_entry = 0, sp = 0;
+    uint64_t entry = load_program(root, &p->vm, data, size, &image_end, path, &program_entry);
     int err = entry ? 0 : PROC_ERR_NOT_ELF;
     p->stack_lo = USER_TOP - USER_STACK_SIZE;
     if (!err && (!vm_add(&p->vm, p->stack_lo, USER_TOP, VM_READ | VM_WRITE, VM_ANON, 0) ||
                  !vm_add(&p->vm, image_end, image_end, VM_READ | VM_WRITE, VM_ANON, 0) ||
                  map_user_range(root, USER_TOP - PAGE_SIZE, USER_TOP) != 0))
         err = PROC_ERR_NO_MEMORY;
-    if (!err && !(sp = build_stack(root, argc, 0, argv, entry))) err = PROC_ERR_NO_MEMORY;
+    if (!err && !(sp = build_stack(root, argc, 0, argv, program_entry))) err = PROC_ERR_NO_MEMORY;
     if (err) {
         vm_free(&p->vm);
         paging_free_address_space(root);
@@ -1827,14 +1931,16 @@ static int64_t sys_kcommand(uint64_t line_ptr) {
     if (copy_user_string(line, line_ptr, sizeof(line)) != 0) return SYSERR_FAULT;
     process_t *p = P();
     file_t *out = fd_get(1), *in = fd_get(0);
-    if (out && out->kind == F_PIPE_W) {
+    int pty_out = out && out->kind == F_USOCK && out->us && out->us->pty && out->side == 1;
+    if (out && (out->kind == F_PIPE_W || pty_out)) {
         if (!strncmp(line, "edit", 4) && (line[4] == ' ' || !line[4])) {   /* full screen: not in a pipe */
             static const char msg[] = "edit: open the file in TextEdit (textedit <file>)\n";
-            pipe_write(out->pipe, msg, sizeof(msg) - 1);
+            pipe_write(pty_out ? out->us->pipe[0] : out->pipe, msg, sizeof(msg) - 1);
             return 1;
         }
-        p->tap_out = out->pipe;
-        p->tap_in = in && in->kind == F_PIPE_R ? in->pipe : 0;
+        p->tap_out = pty_out ? out->us->pipe[0] : out->pipe;
+        p->tap_in = in && in->kind == F_PIPE_R ? in->pipe
+                  : in && in->kind == F_USOCK && in->us && in->us->pty && in->side == 1 ? in->us->pipe[1] : 0;
         p->tap_len = 0;
         p->tap_echo = 0;
         print_set_tap(tap_print);
@@ -2267,13 +2373,13 @@ static int64_t sys_exec(struct exc_frame *f, uint64_t path_ptr, uint64_t argv_pt
     uint64_t root = paging_create_address_space();
     vm_space_t vm;
     vm_init_space(&vm);
-    uint64_t image_end = 0, sp = 0;
-    uint64_t entry = root ? load_elf(root, &vm, image, size, &image_end, big[0] ? big : 0) : 0;
+    uint64_t image_end = 0, sp = 0, program_entry = 0;
+    uint64_t entry = root ? load_program(root, &vm, image, size, &image_end, big[0] ? big : 0, &program_entry) : 0;
     uint64_t stack_lo = USER_TOP - USER_STACK_SIZE;
     int ok = entry && vm_add(&vm, stack_lo, USER_TOP, VM_READ | VM_WRITE, VM_ANON, 0) &&
              vm_add(&vm, image_end, image_end, VM_READ | VM_WRITE, VM_ANON, 0) &&
              map_user_range(root, USER_TOP - PAGE_SIZE, USER_TOP) == 0 &&
-             (sp = build_stack(root, argc, envc, argv, entry)) != 0;
+             (sp = build_stack(root, argc, envc, argv, program_entry)) != 0;
     kfree(image);
     kfree(strings);
     if (!ok) {
@@ -2408,6 +2514,14 @@ static int64_t sys_signal(uint64_t sig, uint64_t handler, uint64_t tramp) {
     p->sig_handler[sig] = handler;
     if (tramp) p->sig_tramp = tramp;
     return 0;
+}
+
+int64_t signal_send(int64_t pid, uint64_t sig) { return sys_sigsend(pid, sig); }
+
+int signal_handled(int pid, int sig) {
+    task_t *t = task_by_pid(pid);
+    process_t *q = t && t->is_user && t->state != TASK_ZOMBIE ? t->process : 0;
+    return q && sig > 0 && sig < 32 && q->sig_handler[sig] != 0;
 }
 
 static int64_t sys_sigsend(int64_t pid, uint64_t sig) {

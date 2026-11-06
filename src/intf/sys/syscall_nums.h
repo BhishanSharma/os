@@ -170,6 +170,7 @@ struct os_wifi {
 #define SIGPIPE  13
 #define SIGTERM  15
 #define SIGCHLD  17
+#define SIGWINCH 28
 
 /* seek() whence */
 #define SEEK_SET  0
@@ -438,6 +439,7 @@ struct os_regnode {
 #define SOCK_LISTENING 16
 #define SOCK_LOCAL     32   /* (fdinfo) a local socket, not a pipe or file */
 #define SOCK_SHM       64   /* (fdinfo) shared memory (SYS_SHMFD) */
+#define SOCK_PTY      128   /* (fdinfo) a pseudo-terminal's end (USOCK_PTY) */
 
 /* Shared memory descriptors (memfd_create, shm_open): mmap2 maps them shared;
  * they pass to other programs like any descriptor. */
@@ -460,6 +462,30 @@ struct os_regnode {
 #define USOCK_NONBLOCK 8   /* a = fd (any pipe or local socket), b = 1 on / 0 off -> 0 */
 #define USOCK_NAME     9   /* a = fd, b = char[108]: its name, or the listener it connected to -> 0 */
 #define USOCK_MAX_FDS 16   /* passed files waiting, each way */
+
+/* Pseudo-terminals: a local socket pair whose master end (a terminal window)
+ * types into the slave end (the shell and its programs, as 0-2). In the
+ * cooked mode (PTY_ICANON) the window edits the line and sends it whole; in
+ * raw mode every key goes through as it is typed, with PTY_ISIG Ctrl+C is
+ * SIGINT for the program that set the mode, with PTY_ECHO it is echoed.
+ * Ctrl+D in the cooked mode: the slave's next read returns 0 (end of file).
+ * The modes are Linux's termios (flags and c_cc indices). */
+#define USOCK_PTY     10   /* a = int fds[2]: [0] the master, [1] the slave -> 0 */
+#define USOCK_TCGET   11   /* a = fd (either end), b = struct os_termios * -> 0 */
+#define USOCK_TCSET   12   /* a = fd, b = const struct os_termios * -> 0 (the caller: Ctrl+C's target) */
+#define USOCK_WINSZ   13   /* a = fd, b = struct os_winsize * -> 0 */
+#define USOCK_SETWINSZ 14  /* a = fd, b = const struct os_winsize *: SIGWINCH to who set the mode -> 0 */
+#define PTY_ISIG    0x1
+#define PTY_ICANON  0x2
+#define PTY_ECHO    0x8
+#define PTY_VINTR   0      /* c_cc indices */
+#define PTY_VEOF    4
+
+struct os_termios {
+    unsigned int iflag, oflag, cflag, lflag;
+    unsigned char cc[32];
+};
+struct os_winsize { unsigned short rows, cols, xpixel, ypixel; };
 
 struct os_sockinfo {
     unsigned int available;    /* bytes waiting to be read */

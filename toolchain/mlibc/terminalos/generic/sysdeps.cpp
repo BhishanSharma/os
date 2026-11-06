@@ -23,6 +23,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/utsname.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -94,9 +95,25 @@ unsigned long path_hash(const char *p) {
 	return h ? h : 1;
 }
 
+// The program X.elf, when there is no X: "ls" names ls.elf (a name without
+// an extension only).
+bool program_file(const char *path, char *out, size_t size) {
+	size_t n = strlen(path);
+	const char *slash = strrchr(path, '/'), *name = slash ? slash + 1 : path;
+	if (!*name || strchr(name, '.') || n + 5 > size)
+		return false;
+	memcpy(out, path, n);
+	memcpy(out + n, ".elf", 5);
+	tos_stat ks;
+	return sc(TOS_STAT, (long)out, (long)&ks) == 0 && !ks.is_dir;
+}
+
 int fill_stat(const char *path, struct stat *st) {
 	tos_statx ks;
 	long r = sc(TOS_STATX, (long)path, (long)&ks);
+	char program[512];
+	if (r == TOS_ERR_NOENT && program_file(path, program, sizeof(program)))
+		r = sc(TOS_STATX, (long)program, (long)&ks);
 	if (r < 0)
 		return to_errno(r);
 	memset(st, 0, sizeof(*st));
@@ -515,7 +532,7 @@ int Sysdeps<Read>::operator()(int fd, void *buf, size_t count, ssize_t *bytes_re
 		return EISDIR;
 	long r = sc(TOS_READ, fd, (long)buf, (long)count);
 	if (r < 0)
-		return to_errno(r);
+		return r == TOS_ERR_TIMEOUT ? EINTR : to_errno(r);   // (a wait cut short by a signal)
 	*bytes_read = r;
 	return 0;
 }
@@ -620,6 +637,14 @@ int Sysdeps<Stat>::operator()(fsfd_target target, int fd, const char *path, int,
 		}
 		if (OpenDirectory *d = directory(fd))
 			return fill_stat(d->path, st);
+		if (tos::is_pty(fd)) {                     // a terminal
+			memset(st, 0, sizeof(*st));
+			st->st_mode = S_IFCHR | 0620;
+			st->st_nlink = 1;
+			st->st_blksize = 4096;
+			st->st_rdev = 0x8800 | (unsigned)fd;
+			return 0;
+		}
 		if (long fl = fd >= 0 && fd < tos::SOCK_BASE ? sc(TOS_FDINFO, fd) : -1; fl >= 0 && (fl & TOS_SOCK_LOCAL)) {
 			memset(st, 0, sizeof(*st));                 // a local socket
 			st->st_mode = S_IFSOCK | 0600;
@@ -652,9 +677,55 @@ int Sysdeps<Stat>::operator()(fsfd_target target, int fd, const char *path, int,
 }
 
 int Sysdeps<Isatty>::operator()(int fd) {
+	if (tos::is_pty(fd))
+		return 0;
 	if (fd >= 0 && fd <= 2 && !fd_path[fd])
 		return 0;
 	return ENOTTY;
+}
+
+// Terminal modes: a pseudo-terminal keeps them (the Terminal window: raw mode
+// for programs that read keys). The kernel's console has no modes: it says
+// cooked and takes any change without effect.
+int Sysdeps<Tcgetattr>::operator()(int fd, struct termios *attr) {
+	memset(attr, 0, sizeof(*attr));
+	if (tos::is_pty(fd)) {
+		tos_termios t;
+		long r = sc(TOS_USOCK, TOS_USOCK_TCGET, fd, (long)&t);
+		if (r < 0)
+			return ENOTTY;
+		attr->c_iflag = t.iflag;
+		attr->c_oflag = t.oflag;
+		attr->c_cflag = t.cflag;
+		attr->c_lflag = t.lflag;
+		memcpy(attr->c_cc, t.cc, sizeof(t.cc) < sizeof(attr->c_cc) ? sizeof(t.cc) : sizeof(attr->c_cc));
+	} else if (sysdep<Isatty>(fd) == 0) {
+		attr->c_iflag = ICRNL;
+		attr->c_oflag = OPOST | ONLCR;
+		attr->c_cflag = CS8 | CREAD;
+		attr->c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN;
+		attr->c_cc[VINTR] = 3;
+		attr->c_cc[VERASE] = 127;
+		attr->c_cc[VKILL] = 21;
+		attr->c_cc[VEOF] = 4;
+		attr->c_cc[VMIN] = 1;
+	} else {
+		return ENOTTY;
+	}
+	attr->c_ibaud = attr->c_obaud = B38400;
+	return 0;
+}
+
+int Sysdeps<Tcsetattr>::operator()(int fd, int, const struct termios *attr) {
+	if (!tos::is_pty(fd))
+		return sysdep<Isatty>(fd) == 0 ? 0 : ENOTTY;
+	tos_termios t;
+	t.iflag = attr->c_iflag;
+	t.oflag = attr->c_oflag;
+	t.cflag = attr->c_cflag;
+	t.lflag = attr->c_lflag;
+	memcpy(t.cc, attr->c_cc, sizeof(t.cc) < sizeof(attr->c_cc) ? sizeof(t.cc) : sizeof(attr->c_cc));
+	return sc(TOS_USOCK, TOS_USOCK_TCSET, fd, (long)&t) < 0 ? ENOTTY : 0;
 }
 
 int Sysdeps<OpenDir>::operator()(const char *path, int *handle) {
@@ -691,6 +762,9 @@ int Sysdeps<Access>::operator()(const char *path, int) {
 		return 0;
 	tos_stat ks;
 	long r = sc(TOS_STAT, (long)tos::redirect(path), (long)&ks);
+	char program[512];
+	if (r == TOS_ERR_NOENT && program_file(path, program, sizeof(program)))
+		r = 0;
 	return r < 0 ? to_errno(r) : 0;
 }
 

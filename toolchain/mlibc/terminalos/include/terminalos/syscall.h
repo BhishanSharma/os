@@ -75,6 +75,7 @@
 #define TOS_SOCK_LISTENING 16
 #define TOS_SOCK_LOCAL     32
 #define TOS_SOCK_SHM       64
+#define TOS_SOCK_PTY      128   /* a pseudo-terminal's end */
 
 #define TOS_SHMFD_NEW      0
 #define TOS_SHMFD_RESIZE   1
@@ -92,6 +93,11 @@
 #define TOS_USOCK_RECVFDS  7
 #define TOS_USOCK_NONBLOCK 8
 #define TOS_USOCK_NAME     9
+#define TOS_USOCK_PTY     10   /* int fds[2]: master, slave */
+#define TOS_USOCK_TCGET   11   /* fd, struct tos_termios * */
+#define TOS_USOCK_TCSET   12
+#define TOS_USOCK_WINSZ   13   /* fd, struct tos_winsize * */
+#define TOS_USOCK_SETWINSZ 14
 #define TOS_USOCK_MAX_FDS 16
 
 #define TOS_SYSTEM_CPUS 10
@@ -149,6 +155,9 @@ struct tos_statx {
 	unsigned long mtime;
 };
 struct tos_uname { char sysname[24]; char release[16]; char hostname[32]; };
+/* A pseudo-terminal's mode: Linux's termios flags and c_cc. */
+struct tos_termios { unsigned int iflag, oflag, cflag, lflag; unsigned char cc[32]; };
+struct tos_winsize { unsigned short rows, cols, xpixel, ypixel; };
 
 static inline long tos_syscall(long n, long a, long b, long c, long d) {
 	long ret;

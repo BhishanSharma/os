@@ -1,0 +1,3 @@
+*link:
+%{shared:-shared;:-static} -z max-page-size=4096 --eh-frame-hdr
+

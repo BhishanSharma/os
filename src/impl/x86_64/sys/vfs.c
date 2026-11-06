@@ -593,7 +593,7 @@ static int vfs_stat_unlocked(const char *path, vfs_stat_t *out) {
     if (r) return r;
     out->is_dir = (f.e.attributes & FAT_ATTR_DIRECTORY) != 0;
     out->size = out->is_dir ? 0 : f.e.file_size;
-    out->mode = out->is_dir ? 0755 : 0644;
+    out->mode = 0755;                       /* (FAT32 has no modes: anything may be run) */
     return 0;
 }
 

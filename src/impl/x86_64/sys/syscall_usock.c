@@ -38,7 +38,83 @@ void usock_closed(file_t *f) {
     if (--us->ends > 0) return;
     for (int s = 0; s < 2; s++)
         for (int i = 0; i < us->fdq_n[s]; i++) file_put(us->fdq[s][i]);
+    kfree(us->pty);
     kfree(us);
+}
+
+/* ---- Pseudo-terminals ---------------------------------------------------- */
+
+/* A connected pair, as USOCK_PAIR; with a pty, side 0 the master. */
+static int64_t new_pair(uint64_t fds, int pty) {
+    if (!user_range_ok(fds, 2 * sizeof(int), 1)) return SYSERR_FAULT;
+    usock_t *us = usock_new();
+    file_t *x = file_new(F_USOCK), *y = file_new(F_USOCK);
+    pty_t *t = pty ? kmalloc(sizeof(pty_t)) : 0;
+    if (!us || !x || !y || (pty && !t)) {
+        usock_free(us);
+        kfree(x);
+        kfree(y);
+        kfree(t);
+        return SYSERR_NOMEM;
+    }
+    if (t) {                                     /* cooked, echo, Ctrl+C; 80 x 25 */
+        memset(t, 0, sizeof(*t));
+        t->t.iflag = 0400;                       /* ICRNL */
+        t->t.oflag = 05;                         /* OPOST | ONLCR */
+        t->t.cflag = 0277;                       /* CS8 | CREAD | B38400 */
+        t->t.lflag = PTY_ISIG | PTY_ICANON | PTY_ECHO | 0x10 | 0x20 | 0x8000;   /* ECHOE ECHOK IEXTEN */
+        static const unsigned char cc[] = { 3, 28, 127, 21, 4, 0, 1, 0, 17, 19, 26, 0, 18, 15, 23, 22 };
+        memcpy(t->t.cc, cc, sizeof(cc));
+        t->ws.rows = 25;
+        t->ws.cols = 80;
+        us->pty = t;
+    }
+    x->us = y->us = us;
+    y->side = 1;
+    int64_t fx = install(x);
+    if (fx < 0) {
+        file_put(y);
+        return fx;
+    }
+    int64_t fy = install(y);
+    if (fy < 0) {
+        sys_close((uint64_t)fx);
+        return fy;
+    }
+    ((int *)fds)[0] = (int)fx;
+    ((int *)fds)[1] = (int)fy;
+    return 0;
+}
+
+static int64_t pty_op(uint64_t op, file_t *f, uint64_t b) {
+    pty_t *t = f->kind == F_USOCK && f->us ? f->us->pty : 0;
+    if (!t) return SYSERR_BADFD;                        /* (ENOTTY) */
+    switch (op) {
+    case USOCK_TCGET:
+        if (!user_range_ok(b, sizeof(struct os_termios), 1)) return SYSERR_FAULT;
+        memcpy((void *)b, &t->t, sizeof(t->t));
+        return 0;
+    case USOCK_TCSET:
+        if (!user_range_ok(b, sizeof(struct os_termios), 0)) return SYSERR_FAULT;
+        memcpy(&t->t, (const void *)b, sizeof(t->t));
+        t->fg = task_current()->pid;
+        io_event();                                     /* (the window looks at the mode) */
+        return 0;
+    case USOCK_WINSZ:
+        if (!user_range_ok(b, sizeof(struct os_winsize), 1)) return SYSERR_FAULT;
+        memcpy((void *)b, &t->ws, sizeof(t->ws));
+        return 0;
+    case USOCK_SETWINSZ: {
+        if (!user_range_ok(b, sizeof(struct os_winsize), 0)) return SYSERR_FAULT;
+        struct os_winsize ws;
+        memcpy(&ws, (const void *)b, sizeof(ws));
+        int changed = ws.rows != t->ws.rows || ws.cols != t->ws.cols;
+        t->ws = ws;
+        if (changed && t->fg && signal_handled(t->fg, SIGWINCH)) signal_send(t->fg, SIGWINCH);
+        return 0;
+    }
+    }
+    return SYSERR_BADCALL;
 }
 
 void listener_closed(file_t *f) {
@@ -61,34 +137,10 @@ int64_t sys_usock(uint64_t op, uint64_t a, uint64_t b, uint64_t c) {
         file_t *f = file_new(F_USOCK);
         return f ? install(f) : SYSERR_NOMEM;
     }
-    if (op == USOCK_PAIR) {
-        if (!user_range_ok(a, 2 * sizeof(int), 1)) return SYSERR_FAULT;
-        usock_t *us = usock_new();
-        file_t *x = file_new(F_USOCK), *y = file_new(F_USOCK);
-        if (!us || !x || !y) {
-            usock_free(us);
-            kfree(x);
-            kfree(y);
-            return SYSERR_NOMEM;
-        }
-        x->us = y->us = us;
-        y->side = 1;
-        int64_t fx = install(x);
-        if (fx < 0) {
-            file_put(y);
-            return fx;
-        }
-        int64_t fy = install(y);
-        if (fy < 0) {
-            sys_close((uint64_t)fx);
-            return fy;
-        }
-        ((int *)a)[0] = (int)fx;
-        ((int *)a)[1] = (int)fy;
-        return 0;
-    }
+    if (op == USOCK_PAIR || op == USOCK_PTY) return new_pair(a, op == USOCK_PTY);
     file_t *f = fd_get(a);
     if (!f) return SYSERR_BADFD;
+    if (op >= USOCK_TCGET && op <= USOCK_SETWINSZ) return pty_op(op, f, b);
     switch (op) {
     case USOCK_NONBLOCK:
         if (f->kind == F_FILE || f->kind == F_CONSOLE) return SYSERR_BADFD;

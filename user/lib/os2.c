@@ -99,6 +99,12 @@ int port_call(int port, const void *msg, size_t len, void *reply_buf, size_t max
 int pipe(int fds[2])                            { return (int)os_syscall(SYS_PIPE, (long)fds, 0, 0); }
 int dup(int fd)                                 { return (int)os_syscall(SYS_DUP, fd, 0, 0); }
 int dup2(int fd, int to)                        { return (int)os_syscall(SYS_DUP2, fd, to, 0); }
+int pty(int fds[2])                             { return (int)os_syscall(SYS_USOCK, USOCK_PTY, (long)fds, 0); }
+int pty_mode(int fd, struct os_termios *t)      { return (int)os_syscall(SYS_USOCK, USOCK_TCGET, fd, (long)t); }
+int pty_size(int fd, int cols, int rows) {
+    struct os_winsize w = { (unsigned short)rows, (unsigned short)cols, 0, 0 };
+    return (int)os_syscall(SYS_USOCK, USOCK_SETWINSZ, fd, (long)&w);
+}
 
 /* ---- Signals ---- */
 

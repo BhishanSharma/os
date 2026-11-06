@@ -174,6 +174,9 @@ if ($withBrowser) { $make += "LADYBIRD=build/ladybird" }
 $makeCommand = "make " + ($make -join " ")
 $buildImage = if ($haveLadybirdImage) { "myos-ladybird" } else { "myos-buildenv" }
 Step "Building Terminal OS ($makeCommand, in $buildImage)..."
+# The full toolchain also builds the ports first (toolchain/ports: Lua,
+# SQLite; downloaded once, rebuilt only when their recipe changes).
+if ($haveLadybirdImage) { $makeCommand = "sh toolchain/ports/build.sh && $makeCommand" }
 docker run --rm -v "${PWD}:/root/env" -w /root/env $buildImage sh -c $makeCommand
 if ($LASTEXITCODE -ne 0) { Fail "Build failed." }
 $what = if ($withBrowser) { " (with the Ladybird browser)" } else { "" }

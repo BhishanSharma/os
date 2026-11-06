@@ -143,6 +143,12 @@ int port_call(int port, const void *msg, size_t len, void *reply_buf, size_t max
 int pipe(int fds[2]);                        /* fds[0] reads, fds[1] writes */
 int dup(int fd);
 int dup2(int fd, int to);
+/* A pseudo-terminal (USOCK_PTY): fds[0] the master (the window's end),
+ * fds[1] the slave (the shell's 0-2). pty_mode: the slave's termios, for the
+ * window to see raw mode; pty_size tells the programs the window's size. */
+int pty(int fds[2]);
+int pty_mode(int fd, struct os_termios *t);
+int pty_size(int fd, int cols, int rows);
 
 /* Signals (SIGINT, SIGTERM, SIGUSR1, SIGCHLD, ...): a handler runs when the
  * program next makes a system call. */

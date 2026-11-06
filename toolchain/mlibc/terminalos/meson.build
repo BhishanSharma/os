@@ -8,10 +8,15 @@ sysdep_supported_options = {
 }
 
 if not headers_only
-	rtld_sources += files(
-		'generic/sysdeps.cpp',
-		'generic/net.cpp',
-	)
+	if get_option('default_library') == 'shared'
+		# ld.so, the dynamic linker: only the calls it makes itself.
+		rtld_sources += files('generic/rtld.cpp')
+	else
+		rtld_sources += files(
+			'generic/sysdeps.cpp',
+			'generic/net.cpp',
+		)
+	endif
 
 	libc_sources += files(
 		'generic/entry.cpp',

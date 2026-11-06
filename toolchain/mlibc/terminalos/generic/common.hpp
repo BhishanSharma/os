@@ -62,6 +62,11 @@ inline void set_cloexec(int fd, bool on) {
 		sc(TOS_FDFLAGS, fd, on ? 1 : 0);
 }
 bool is_vfile(int fd);
+// A pseudo-terminal's end (the Terminal window's shell and programs).
+inline bool is_pty(int fd) {
+	long fl = fd >= 0 && fd < SOCK_BASE ? sc(TOS_FDINFO, fd) : -1;
+	return fl >= 0 && (fl & TOS_SOCK_PTY);
+}
 
 // Sockets and built-in files (net.cpp).
 int special_read(int fd, void *buf, size_t count, ssize_t *done);

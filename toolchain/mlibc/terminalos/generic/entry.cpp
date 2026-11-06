@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "common.hpp"
+
 extern "C" void __dlapi_enter(uintptr_t *);
 
 extern char **environ;
@@ -10,6 +12,8 @@ extern char **environ;
 // crt1.S: the program starts here with the kernel's stack (argc, argv, envp, auxv).
 extern "C" void __mlibc_entry(int (*main_fn)(int argc, char *argv[], char *env[]), uintptr_t *entry_stack) {
 	__dlapi_enter(entry_stack);
+	if (!getenv("TERM") && tos::is_pty(0))             // the Terminal window: a VT100 screen
+		setenv("TERM", "xterm", 0);
 	auto result = main_fn(mlibc::entry_stack.argc, mlibc::entry_stack.argv, environ);
 	exit(result);
 }

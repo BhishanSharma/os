@@ -29,6 +29,8 @@ struct TerminalosSysdepTags :
 	Close,
 	Stat,
 	Isatty,
+	Tcgetattr,
+	Tcsetattr,
 	OpenDir,
 	ReadEntries,
 	Access,

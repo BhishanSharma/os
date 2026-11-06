@@ -24,8 +24,18 @@ enum { F_FILE, F_CONSOLE, F_PIPE_R, F_PIPE_W, F_USOCK, F_ULISTEN, F_SHM };
 
 /* A connected local socket: a pipe each way and the files passed each way.
  * End `side` reads pipe[side] and writes pipe[!side]. */
+/* A pseudo-terminal (USOCK_PTY): its mode and size, on a local socket pair
+ * whose side 0 is the master (the window), side 1 the slave. */
+typedef struct {
+    struct os_termios t;
+    struct os_winsize ws;
+    int fg;                           // who set the mode last: Ctrl+C's SIGINT goes there (raw mode)
+    int eof;                          // Ctrl+D typed: slave reads that return 0
+} pty_t;
+
 typedef struct usock {
     pipe_t *pipe[2];
+    pty_t *pty;                       // a pseudo-terminal (0: a plain local socket)
     struct kfile *fdq[2][USOCK_MAX_FDS];  // fdq[i]: files passed toward side i
     int fdq_n[2];
     int ends;                         // its file_t's: the last one frees it
@@ -108,6 +118,8 @@ int64_t file_put(file_t *f);              /* one less; the last closes it */
 file_t *fd_get(uint64_t fd);              /* the running program's descriptor, 0: none */
 int fd_free_slot(process_t *p, int from);
 int64_t install(file_t *f);               /* a descriptor for f (or drop it) */
+int64_t signal_send(int64_t pid, uint64_t sig);   /* as the sigsend call */
+int signal_handled(int pid, int sig);     /* 1 if that process has a handler for sig */
 int64_t sys_close(uint64_t fd);
 void ends_added(file_t *f);               /* pipe ends: one more reader or writer */
 void ends_closed(file_t *f);

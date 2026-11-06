@@ -104,6 +104,19 @@ ICU_DAT    := $(firstword $(wildcard $(TOS_SYSROOT)/usr/share/icu/*/icudt*l.dat)
 ifneq ($(ICU_DAT),)
 PORT_ELFS  += $(USER_BUILD)/ICUDT78L.DAT
 endif
+# The shared C library (toolchain/ladybird/Dockerfile): the dynamic linker
+# ld.so and libc.so, for programs linked with -specs=/opt/terminalos/dynamic.specs
+# (ports/NAME/LIBS). In the RAM disk's LIB folder (/SYS/LIB or /LIB).
+TOS_DYNLIB := $(TOS_SYSROOT)/usr/lib/dynamic
+ifneq ($(wildcard $(TOS_DYNLIB)/ld.so),)
+DYN_LIBS   := $(addprefix $(USER_BUILD)/dynlib/,ld.so libc.so libdl.so libm.so libpthread.so librt.so)
+# The ports (toolchain/ports: Lua, SQLite...), built by toolchain/ports/build.sh
+# (build.ps1 runs it): their programs, dynamically linked, on the RAM disk.
+PORTS_BIN  := $(wildcard $(BUILD)/ports/out/*/bin/*)
+else
+port_names := $(filter-out dyncheck,$(port_names))
+PORT_ELFS  := $(filter-out $(USER_BUILD)/dyncheck.elf,$(PORT_ELFS))
+endif
 # Fonts for programs that draw text with FreeType (third_party/fonts).
 ifneq ($(TOS_CXX),)
 PORT_ELFS  += $(USER_BUILD)/INTER.TTF
@@ -277,7 +290,7 @@ $(KERNEL_BIN): $(objects) $(BEARSSL_LIB) $(LINKER_LD)
 
 # ---- ISO ------------------------------------------------------------------
 
-$(RAMDISK_GZ): scripts/mkramdisk.sh scripts/mkdock.sh $(wildcard $(RAMDISK_DIR)/*) $(USER_ELFS) $(APP_ELFS) $(PORT_ELFS) \
+$(RAMDISK_GZ): scripts/mkramdisk.sh scripts/mkdock.sh $(wildcard $(RAMDISK_DIR)/*) $(USER_ELFS) $(APP_ELFS) $(PORT_ELFS) $(DYN_LIBS) $(PORTS_BIN) \
                $(wildcard apps/*/app.cfg) $(THIS_MAKEFILE) $(if $(LADYBIRD),$(LADYBIRD)/bin/Ladybird)
 	rm -rf $(RAMDISK_STAGE)
 	mkdir -p $(RAMDISK_STAGE)
@@ -286,6 +299,8 @@ $(RAMDISK_GZ): scripts/mkramdisk.sh scripts/mkdock.sh $(wildcard $(RAMDISK_DIR)/
 	{ sh scripts/mkdock.sh apps; $(if $(LADYBIRD),echo "2.5|Pointer|/ladybird/bin/Ladybird|browser|2F6FDE";) } | \
 	    sort -t '|' -k1,1n > $(RAMDISK_STAGE)/DOCK.CFG
 	$(if $(LADYBIRD),cp -r $(LADYBIRD) $(RAMDISK_STAGE)/ladybird)
+	$(if $(DYN_LIBS),mkdir -p $(RAMDISK_STAGE)/LIB && cp $(DYN_LIBS) $(RAMDISK_STAGE)/LIB/)
+	$(if $(PORTS_BIN),cp $(PORTS_BIN) $(RAMDISK_STAGE)/)
 	sh scripts/mkramdisk.sh $(RAMDISK_STAGE) $(RAMDISK_SIZE) $@
 
 
@@ -381,6 +396,10 @@ endef
 $(foreach p,$(port_names),$(eval $(call PORT_RULE,$(p))))
 
 $(USER_BUILD)/curl.elf: $(TOS_SYSROOT)/usr/bin/curl
+	@mkdir -p $(dir $@)
+	x86_64-pc-terminalos-strip -o $@ $<
+
+$(USER_BUILD)/dynlib/%.so: $(TOS_DYNLIB)/%.so
 	@mkdir -p $(dir $@)
 	x86_64-pc-terminalos-strip -o $@ $<
 

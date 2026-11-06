@@ -28,4 +28,11 @@ if ! grep -q "'terminalos'" meson.build; then
     } { print }' meson.build > meson.build.new
     mv meson.build.new meson.build
 fi
+# ld.so puts each library where mmap says (the kernel maps nothing fixed
+# below 4 GiB, where mlibc would otherwise put them).
+if ! grep -A1 "== 'terminalos'" meson.build | grep -q MLIBC_MMAP_ALLOCATE_DSO; then
+    awk '{ print } index($0, "elif host_machine.system() == '"'"'terminalos'"'"'") == 1 {
+        print "	internal_conf.set10('"'"'MLIBC_MMAP_ALLOCATE_DSO'"'"', true)" }' meson.build > meson.build.new
+    mv meson.build.new meson.build
+fi
 echo "setup-port: mlibc has sysdeps/terminalos"
