@@ -13,6 +13,10 @@
 // to it, the arrows as escape sequences, Ctrl+C through the pty (SIGINT).
 // The wheel, or Shift+Up/Down, scrolls back through older output; the green
 // button makes the window fill the screen and the programs are told its size.
+// Dragging selects text and copies it (the clipboard every program shares);
+// Ctrl+V pastes into the line being typed, a right click pastes in any mode.
+// Output is UTF-8: each cell holds a character (accents, Greek, Cyrillic,
+// box drawing...).
 // With a command, it is typed first (Files opens programs with `terminal x`).
 //
 // Built from views (view.h): the screen is one custom view that draws the
@@ -46,9 +50,16 @@ static int master, shell_pid;
 /* The output: a ring of lines, each with its cells' colours. The screen is
  * the newest `rows` of them; the cursor is line `cl` (an index from the
  * oldest), column `col`. */
-static char text[LINES][MAXC];
+static unsigned short text[LINES][MAXC];   /* characters (code points) */
 static unsigned char fgc[LINES][MAXC], bgc[LINES][MAXC];
 static int first, count = 1, col, cl;   /* first: the oldest line in the ring */
+static long dropped;                    /* lines that left the ring (absolute line = dropped + index) */
+static int utf_need;                    /* UTF-8: continuation bytes still to come */
+static unsigned utf_cp;
+
+/* The selection (absolute lines, columns), while dragging and after. */
+static long sel_l0, sel_l1;
+static int sel_c0, sel_c1, selecting, has_selection;
 static int cols = 80, rows = 25, back;  /* the window in characters; back: lines scrolled up */
 static int told_cols, told_rows;        /* the size the programs were told */
 
@@ -68,13 +79,15 @@ static int n_history, recall = -1;      /* recall: the entry Up/Down show, -1 th
 static char draft[256];                 /* the new line, kept while recalling */
 
 static int ring(int i) { return (first + i) % LINES; }
-static char *row_text(int i) { return text[ring(i)]; }
+static unsigned short *row_text(int i) { return text[ring(i)]; }
+
+static void spaces(unsigned short *t, int n) { for (int i = 0; i < n; i++) t[i] = ' '; }
 
 static void blank(int i, int from, int to) {          /* cells [from, to) of line i */
     if (to > MAXC) to = MAXC;
     if (from >= to) return;
     int r = ring(i);
-    memset(text[r] + from, ' ', (size_t)(to - from));
+    spaces(text[r] + from, to - from);
     memset(fgc[r] + from, DEF, (size_t)(to - from));
     memset(bgc[r] + from, pen_bg, (size_t)(to - from));
 }
@@ -82,12 +95,13 @@ static void blank(int i, int from, int to) {          /* cells [from, to) of lin
 static void new_line(void) {                          /* one more line at the bottom */
     if (count == LINES) {                             /* the oldest line goes */
         first = (first + 1) % LINES;
+        dropped++;
         if (alt_start > 0) alt_start--;
     } else {
         count++;
     }
     int r = ring(count - 1);
-    memset(text[r], ' ', MAXC);
+    spaces(text[r], MAXC);
     memset(fgc[r], DEF, MAXC);
     memset(bgc[r], DEF, MAXC);
     if (back) back++;                                  /* scrolled up: the view stays put */
@@ -103,7 +117,7 @@ static int region_bottom(void) { return bot_m < 0 || bot_m >= rows ? rows - 1 : 
 
 static void copy_line(int to, int from) {
     int a = ring(to), b = ring(from);
-    memcpy(text[a], text[b], MAXC);
+    memcpy(text[a], text[b], sizeof(text[0]));
     memcpy(fgc[a], fgc[b], MAXC);
     memcpy(bgc[a], bgc[b], MAXC);
 }
@@ -151,7 +165,7 @@ static void move_to(int y, int x) {                   /* screen coordinates */
     col = x;
 }
 
-static void glyph(char c) {
+static void glyph(unsigned c) {
     if (col >= cols || col >= MAXC) {                 /* (wraps before the next one) */
         col = 0;
         line_feed();
@@ -163,7 +177,7 @@ static void glyph(char c) {
         f = b == DEF ? 17 : b;
         b = t == DEF ? 7 : t;
     }
-    text[r][col] = c;
+    text[r][col] = (unsigned short)(c > 0xFFFF ? 0xFFFD : c);
     fgc[r][col] = (unsigned char)f;
     bgc[r][col] = (unsigned char)b;
     col++;
@@ -258,12 +272,12 @@ static void csi(char final) {
         if (n > MAXC - col) n = MAXC - col;
         int keep = MAXC - col - n;
         if (final == '@') {
-            memmove(text[r] + col + n, text[r] + col, (size_t)keep);
+            memmove(text[r] + col + n, text[r] + col, (size_t)keep * sizeof(text[0][0]));
             memmove(fgc[r] + col + n, fgc[r] + col, (size_t)keep);
             memmove(bgc[r] + col + n, bgc[r] + col, (size_t)keep);
             blank(cl, col, col + n);
         } else {
-            memmove(text[r] + col, text[r] + col + n, (size_t)keep);
+            memmove(text[r] + col, text[r] + col + n, (size_t)keep * sizeof(text[0][0]));
             memmove(fgc[r] + col, fgc[r] + col + n, (size_t)keep);
             memmove(bgc[r] + col, bgc[r] + col + n, (size_t)keep);
             blank(cl, MAXC - n, MAXC);
@@ -333,6 +347,17 @@ static void put(char c) {
         return;
     }
     if (esc == 4) { esc = 0; return; }
+    if (u >= 0x80) {                                   /* UTF-8 */
+        if ((u & 0xC0) == 0x80 && utf_need) {
+            utf_cp = utf_cp << 6 | (u & 0x3F);
+            if (--utf_need == 0) glyph(utf_cp);
+        } else if ((u & 0xE0) == 0xC0) { utf_cp = u & 0x1F; utf_need = 1; }
+        else if ((u & 0xF0) == 0xE0) { utf_cp = u & 0x0F; utf_need = 2; }
+        else if ((u & 0xF8) == 0xF0) { utf_cp = u & 0x07; utf_need = 3; }
+        else { utf_need = 0; glyph(u); }               /* (not UTF-8: as Latin-1) */
+        return;
+    }
+    utf_need = 0;
     if (c == 0x1b) esc = 1;
     else if (c == '\r') col = 0;
     else if (c == '\n') { col = 0; line_feed(); }      /* (a new line starts at the left, as before) */
@@ -382,8 +407,8 @@ static void draw_line(ui_canvas *c, int x0, int y, int i, int n) {
     for (int k = 0; k < n; k++) {
         int b = bgc[r][k];
         if (b != DEF) ui_fill(c, x0 + k * cw, y, cw, ch, colour(b, BG));
-        unsigned char g = (unsigned char)text[r][k];
-        if (g != ' ') ui_char(c, x0 + k * cw, y, g, colour(fgc[r][k], FG), S);
+        unsigned g = text[r][k];
+        if (g != ' ') ui_glyph(c, x0 + k * cw, y, g, colour(fgc[r][k], FG), S);
     }
 }
 
@@ -417,11 +442,22 @@ static void draw(view_t *v, ui_canvas *c) {
                     int rr = ring(count - 1);
                     if (bgc[rr][k] != DEF) ui_fill(c, ox + m + x * cw, y, cw, ch, colour(bgc[rr][k], BG));
                     if (text[rr][k] != ' ')
-                        ui_char(c, ox + m + x * cw, y, (unsigned char)text[rr][k], colour(fgc[rr][k], FG), S);
+                        ui_glyph(c, ox + m + x * cw, y, text[rr][k], colour(fgc[rr][k], FG), S);
                 } else if (k - col < typed) {
                     ui_char(c, ox + m + x * cw, y, (unsigned char)line[k - col], FG, S);
                 }
             }
+        }
+    }
+    if (has_selection || selecting) {                      /* the selection */
+        long a = sel_l0, b = sel_l1;
+        int ca = sel_c0, cb = sel_c1;
+        if (a > b || (a == b && ca > cb)) { long t = a; a = b; b = t; int u = ca; ca = cb; cb = u; }
+        for (int r = 0; r < rows; r++) {
+            long abs = dropped + bottom - rows + r;
+            if (abs < a || abs > b) continue;
+            int from = abs == a ? ca : 0, to = abs == b ? cb : cols;
+            if (to > from) ui_fill_a(c, ox + m + from * cw, oy + m + r * ch, (to - from) * cw, ch, CURSOR, 80);
         }
     }
     if (!back && cursor_on) {                              /* the cursor */
@@ -435,9 +471,9 @@ static void draw(view_t *v, ui_canvas *c) {
         if (r >= 0 && r < rows) {
             int x = ox + m + (at % cols) * cw, y = oy + m + r * ch;
             ui_fill(&win.c, x, y, cw, ch, CURSOR);
-            unsigned char under = !secret && cur < line_len ? (unsigned char)line[cur]
-                                : !at_end || !line_len ? (unsigned char)row_text(cl)[col < MAXC ? col : MAXC - 1] : ' ';
-            if (under != ' ') ui_char(&win.c, x, y, under, BG, S);
+            unsigned under = !secret && cur < line_len ? (unsigned char)line[cur]
+                           : !at_end || !line_len ? row_text(cl)[col < MAXC ? col : MAXC - 1] : ' ';
+            if (under != ' ') ui_glyph(&win.c, x, y, under, BG, S);
         }
     } else if (back) {                                     /* where the view is in the scrollback */
         int track = v->h - 2 * m, bar = track * rows / total;
@@ -446,6 +482,58 @@ static void draw(view_t *v, ui_canvas *c) {
         ui_round(&win.c, ox + v->w - 6 * S, oy + y, 3 * S, bar, S, 0x8A8A96);
     }
     mutex_unlock(&lock);
+}
+
+/* Where the pointer is: an absolute line and a column (draw's layout). */
+static void cell_at(int px, int py, long *line, int *c) {
+    int S = win.scale, m = 4 * S, typed = !secret ? line_len : 0;
+    int at_end = cl == count - 1, tail_rows = at_end ? (col + typed) / cols + 1 : 1;
+    int bottom = count - 1 + tail_rows - back, r = (py - m) / (16 * S);
+    if (r < 0) r = 0;
+    if (r >= rows) r = rows - 1;
+    long i = bottom - rows + r;
+    if (i < 0) i = 0;
+    if (i > count - 1) i = count - 1;
+    *line = dropped + i;
+    *c = (px - m + 4 * S) / (8 * S);
+    if (*c < 0) *c = 0;
+    if (*c > cols) *c = cols;
+}
+
+/* The selected text, UTF-8, lines without their trailing spaces, to the clipboard. */
+static void copy_selection(void) {
+    long a = sel_l0, b = sel_l1;
+    int ca = sel_c0, cb = sel_c1;
+    if (a > b || (a == b && ca > cb)) { long t = a; a = b; b = t; int u = ca; ca = cb; cb = u; }
+    static char out[WS_CLIP_MAX];
+    int n = 0;
+    for (long l = a; l <= b && n < WS_CLIP_MAX - 8; l++) {
+        long i = l - dropped;
+        if (i < 0 || i >= count) continue;
+        int from = l == a ? ca : 0, to = l == b ? cb : MAXC, end = to;
+        while (end > from && row_text((int)i)[end - 1] == ' ') end--;
+        for (int k = from; k < end && n < WS_CLIP_MAX - 8; k++) n += ui_utf8_put(out + n, row_text((int)i)[k]);
+        if (l < b) out[n++] = '\n';
+    }
+    if (n) ui_clip_set(out, n);
+}
+
+/* Paste: typed into the line (cooked), or sent as keys (raw). */
+static void paste(int raw) {
+    static char clip[4096];
+    int n = ui_clip_get(clip, sizeof(clip));
+    if (raw) {
+        write(master, clip, (size_t)n);
+        return;
+    }
+    for (int i = 0; i < n && line_len < (int)sizeof(line) - 1; i++) {
+        unsigned char ch = (unsigned char)clip[i];
+        if (ch == '\n' || ch == '\r') break;           /* (the first line) */
+        if (ch < ' ') continue;
+        memmove(line + cur + 1, line + cur, (size_t)(line_len - cur));
+        line[cur++] = (char)ch;
+        line_len++;
+    }
 }
 
 static void scroll_by(int n) {
@@ -540,6 +628,8 @@ static void key(int k) {
         if (interrupt() == 0) send_line("\x03");       /* a kernel command's question, or a new prompt */
     } else if (k == 4 && !line_len) {                   /* Ctrl+D: the end of what is typed */
         write(master, "\x04", 1);
+    } else if (k == 22) {                               /* Ctrl+V */
+        paste(0);
     } else if (k == '\n' || k == '\r') {
         line[line_len] = 0;
         if (!secret) {
@@ -583,8 +673,9 @@ static void key(int k) {
         }
     } else if (k >= ' ' && k < 127 && line_len < (int)sizeof(line) - 1) {
         if (!line_len) {                                /* after "Password: " it is not shown */
-            const char *now = row_text(cl);
-            secret = col >= 9 && !memcmp(now + col - 9, "assword: ", 9);
+            const unsigned short *now = row_text(cl);
+            secret = col >= 9;
+            for (int i = 0; secret && i < 9; i++) secret = now[col - 9 + i] == (unsigned char)"assword: "[i];
         }
         memmove(line + cur + 1, line + cur, (size_t)(line_len - cur));
         line[cur++] = (char)k;
@@ -594,10 +685,28 @@ static void key(int k) {
 
 /* Keys and the wheel, from the view. */
 static int screen_event(view_t *v, const struct ws_event *e) {
-    if (e->type != WS_EV_KEY && e->type != WS_EV_WHEEL) return 0;
     mutex_lock(&lock);
-    if (e->type == WS_EV_KEY) key(e->key);
-    else scroll_by(-e->key * 3);
+    if (e->type == WS_EV_KEY) {
+        key(e->key);
+    } else if (e->type == WS_EV_WHEEL) {
+        scroll_by(-e->key * 3);
+    } else if (e->type == WS_EV_DOWN && (e->buttons & 2)) {   /* a right click: paste */
+        paste(raw_mode());
+    } else if (e->type == WS_EV_DOWN) {
+        cell_at(e->x, e->y, &sel_l0, &sel_c0);
+        sel_l1 = sel_l0, sel_c1 = sel_c0;
+        selecting = 1;
+        has_selection = 0;
+    } else if (e->type == WS_EV_MOVE && selecting) {
+        cell_at(e->x, e->y, &sel_l1, &sel_c1);
+    } else if (e->type == WS_EV_UP && selecting) {
+        selecting = 0;
+        has_selection = sel_l0 != sel_l1 || sel_c0 != sel_c1;
+        if (has_selection) copy_selection();
+    } else {
+        mutex_unlock(&lock);
+        return 0;
+    }
     mutex_unlock(&lock);
     v_dirty(v);
     return 1;
@@ -621,7 +730,7 @@ int main(int argc, char **argv) {
     screen = v_custom(root, draw, screen_event);
     screen->focusable = 1;
     v_layout(&win, root);
-    memset(text[0], ' ', MAXC);
+    spaces(text[0], MAXC);
     memset(fgc[0], DEF, MAXC);
     memset(bgc[0], DEF, MAXC);
     if (start_shell() < 0) {

@@ -156,7 +156,7 @@ int signal(int sig, void (*handler)(int));   /* handler 0: the default */
 int sigsend(int pid, int sig);
 
 int registry(int index, struct os_regnode *node);   /* the device tree: 1, 0 past the end */
-int auth(const char *name, const char *password, struct os_user *u);   /* root only */
+int auth(const char *name, const char *password, struct os_user *u);   /* root; or your own name */
 
 /* The desktop's system menus (Wi-Fi, sound, battery, power) */
 int wifi_status(struct os_wifi *w);           /* 1 connected (w filled), 0 not, SYSERR_NOENT no card */

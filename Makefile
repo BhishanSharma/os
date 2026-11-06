@@ -342,6 +342,8 @@ $(USER_BUILD)/lib/stbimage.o: USER_CFLAGS := $(filter-out -mgeneral-regs-only,$(
 # never use floating point don't run any of it).
 $(USER_BUILD)/lib/libm.o $(USER_BUILD)/lib/libc2.o $(USER_BUILD)/lib/stdio.o: USER_CFLAGS := $(filter-out -mgeneral-regs-only,$(USER_CFLAGS)) -fno-math-errno
 $(USER_BUILD)/apps/music/%.o: USER_CFLAGS := $(filter-out -mgeneral-regs-only,$(USER_CFLAGS)) -I third_party/minimp3 -Wno-sign-compare -Wno-unused-function
+# Calculator counts in floating point (double).
+$(USER_BUILD)/apps/calculator/%.o: USER_CFLAGS := $(filter-out -mgeneral-regs-only,$(USER_CFLAGS)) -fno-math-errno
 
 $(USER_BUILD)/crt0.o: user/crt0.asm
 	@mkdir -p $(dir $@)

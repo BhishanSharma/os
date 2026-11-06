@@ -74,7 +74,12 @@ warning. By hand: `sh toolchain/ports/build.sh lua` in the image.
 | `lua` | Lua 5.4.7: `lua`, `luac` (C modules load with `require`, dlopen) |
 | `sqlite` | SQLite 3.47: `sqlite3` (no locking, no WAL: one user at a time) |
 | `bash` | GNU bash 5.2: `bash`, with readline (line editing, history); no job control |
+| `ncurses` | ncurses 6.5: the screen library (static; xterm and vt100 built in, no terminfo files) |
+| `nano` | GNU nano 8.2: `nano`, the editor (needs `ncurses`: `NEEDS=ncurses`) |
 
+A recipe may set `NEEDS` (ports built first; a library installs into its
+`$DEST` and the next port finds it under `$PORTS_OUT/NAME`). GCC 15 compiles
+C23 by default; older sources may want `CFLAGS=-std=gnu17` (ncurses, nano).
 For a configure-based port, `/tc/config.sub` knows `terminalos`, and
 `--host=$HOST` cross-compiles. The C library's gaps show up as configure
 answers to give (`bash`'s recipe has the usual ones). `stat` and `access`

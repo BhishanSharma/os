@@ -103,6 +103,24 @@ a VT100 screen, so bash's readline and full-screen programs work
 (docs/TOOLCHAIN.md). Cuts: no job control or process groups yet; no package
 download on the OS itself (ports are built with the OS).
 
+Desktop polish, lean: a clipboard every program shares (`ui_clip_set` /
+`ui_clip_get`: Ctrl+C, Ctrl+X, Ctrl+V in fields, TextEdit and Terminal);
+notifications (`ui_notify`, the `notify` command: banners at the top right,
+kept under the bell, a low battery says so); Unicode text (UTF-8 everywhere:
+UIFONT.BIN has 938 characters, Latin, Greek, Cyrillic, symbols, box
+drawing; Terminal decodes UTF-8); Calculator and Calendar (events, reminders);
+TextEdit with selection, undo/redo and find; a lock screen (the menu's Lock
+Screen, and after sleep when the account has a password); screenshots (Print
+Screen: a PNG in ~/Pictures); the Launcher's search finds files in the home
+folder; Accessibility: Larger Text (2x, from the next login) and full keyboard
+access (Tab between fields and buttons). Every Ctrl+letter reaches the apps.
+Cuts: no CJK or right-to-left text, no rich text, no drag and drop between
+apps, no notification settings per app.
+
+The big kernel lock, a first step: the clock (every clock_gettime) and getpid
+run without it on any core. Everything else still takes it; the allocators and
+the scheduler need their own locks before more calls can leave it.
+
 Each stage below is the *lean* version: the smallest design that gives the
 macOS-style structure, with the cuts written down. One stage per working
 session; it ends with `make test` + `make test-os` green, a USB stick, one

@@ -430,7 +430,7 @@ static void draw_view(view_t *v) {
     case V_BUTTON:
         ui_button_ex(c, v->x, v->y, v->w, v->h, v->text, S,
                      (v->flags & ~(V_SECRET | V_INSET | V_TOGGLED)) | (v->pressed || (v->flags & V_TOGGLED) ? UI_BTN_PRESSED : 0) |
-                     (v->hot ? UI_BTN_HOVER : 0));
+                     (v->hot ? UI_BTN_HOVER : 0) | (v == focus ? UI_BTN_FOCUSED : 0));
         break;
     case V_ICON:
         ui_icon(c, v->x, v->y, v->w, v->text, 255);
@@ -557,6 +557,18 @@ static int table_key(view_t *t, int key) {
     return 0;
 }
 
+/* Text that ends in the middle of a UTF-8 character: cut it there. */
+static void whole_chars(char *s, int n) {
+    int i = n;
+    while (i > 0 && ((unsigned char)s[i - 1] & 0xC0) == 0x80) i--;   /* to the last lead byte */
+    if (i > 0) {
+        unsigned char lead = (unsigned char)s[i - 1];
+        int need = lead < 0x80 ? 1 : (lead & 0xE0) == 0xC0 ? 2 : (lead & 0xF0) == 0xE0 ? 3 : 4;
+        if (n - (i - 1) < need) n = i - 1;
+    }
+    s[n] = 0;
+}
+
 static int field_key(view_t *f, int key) {
     int n = (int)strlen(f->text);
     if (key == '\n' || key == '\r') {
@@ -564,9 +576,27 @@ static int field_key(view_t *f, int key) {
         f->on_enter(f);
         return 1;
     }
-    if (key == '\b') {
+    if (key == 3 || key == 24) {                       /* Ctrl+C, Ctrl+X: the field's text */
+        if (f->flags & V_SECRET) return 1;             /* (never a password) */
+        ui_clip_set(f->text, n);
+        if (key == 3) return 1;
+        f->text[0] = 0;
+    } else if (key == 22) {                            /* Ctrl+V: the clipboard's first line */
+        char clip[sizeof(f->text)];
+        int m = ui_clip_get(clip, sizeof(clip));
+        for (int i = 0; i < m && n < (int)sizeof(f->text) - 1; i++) {
+            unsigned char ch = (unsigned char)clip[i];
+            if (ch == '\n' || ch == '\r') break;
+            if (ch < ' ' && ch != '\t') continue;
+            f->text[n++] = ch == '\t' ? ' ' : (char)ch;
+        }
+        whole_chars(f->text, n);
+    } else if (key == 21) {                            /* Ctrl+U: empty it */
+        f->text[0] = 0;
+    } else if (key == '\b') {
         if (!n) return 1;
-        f->text[n - 1] = 0;
+        do n--; while (n > 0 && ((unsigned char)f->text[n] & 0xC0) == 0x80);   /* a whole character */
+        f->text[n] = 0;
     } else if (key >= ' ' && key < 127) {
         if (n >= (int)sizeof(f->text) - 1) return 1;
         f->text[n] = (char)key;
@@ -579,8 +609,32 @@ static int field_key(view_t *f, int key) {
     return 1;
 }
 
+/* Full keyboard access: Tab moves the focus to the next field, table, button
+ * or focusable view (in the tree's order, round to the first). */
+static int tab_stop(view_t *v) { return takes_keys(v) || clickable(v); }
+
+static void tab_collect(view_t *v, view_t **out, int *n, int max) {
+    if (v->hidden) return;
+    if (tab_stop(v) && *n < max) out[(*n)++] = v;
+    for (view_t *c = v->first; c; c = c->next) tab_collect(c, out, n, max);
+}
+
+static void focus_next(view_t *root) {
+    view_t *stops[128];
+    int n = 0, at = -1;
+    tab_collect(root, stops, &n, 128);
+    if (!n) return;
+    for (int i = 0; i < n; i++)
+        if (stops[i] == focus) at = i;
+    v_focus(stops[(at + 1) % n]);
+}
+
 static void key(view_t *root, int k) {
     int used = 0;
+    if (focus && !focus->hidden && focus->kind == V_BUTTON && (k == ' ' || k == '\n' || k == '\r')) {
+        if (clickable(focus) && focus->on_click) focus->on_click(focus);   /* the focused button */
+        return;
+    }
     if (focus && !focus->hidden) {
         if (focus->kind == V_FIELD) used = field_key(focus, k);
         else if (focus->kind == V_TABLE) used = table_key(focus, k);
@@ -595,6 +649,7 @@ static void key(view_t *root, int k) {
         view_t *d = default_button(root);
         if (d && d->on_click) d->on_click(d);
     }
+    if (!used && k == '\t') focus_next(root);
 }
 
 static void handle(view_t *root, const struct ws_event *e) {

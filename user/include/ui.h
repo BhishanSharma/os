@@ -108,6 +108,24 @@ int ui_text_style(ui_canvas *c, int x, int y, const char *s, unsigned color, int
 int ui_text_width(const char *s, int scale);
 int ui_text_style_width(const char *s, int scale, int style);
 int ui_char(ui_canvas *c, int x, int y, unsigned char ch, unsigned color, int scale);  /* a mono 8x16 cell */
+/* Text is UTF-8: Latin (with accents), Greek, Cyrillic, punctuation, arrows,
+ * box drawing... (what UIFONT.BIN has; others show as '?'). ui_glyph draws one
+ * character (a code point) in a mono cell, as ui_char. */
+int ui_glyph(ui_canvas *c, int x, int y, unsigned cp, unsigned color, int scale);
+unsigned ui_utf8(const char **s);           /* the next character of a UTF-8 string, *s moved past it */
+int ui_utf8_len(const char *s);              /* how many characters */
+int ui_utf8_put(char *out, unsigned cp);     /* its UTF-8 bytes into out (up to 4) -> how many */
+
+/* The clipboard (shared by the user's programs): text copied with Ctrl+C or
+ * Ctrl+X, pasted with Ctrl+V. Fields and TextEdit use it; so can any program. */
+int ui_clip_set(const char *text, int len);  /* -> 0 */
+int ui_clip_get(char *buf, int max);         /* -> its length; buf gets up to max-1 bytes and a 0 */
+unsigned ui_clip_seq(void);                  /* changes whenever something is copied */
+
+/* A notification: a banner at the top right of the screen for a few seconds,
+ * then kept under the bell. The app's name is the window's title (or the
+ * program's name). Works with or without a window. */
+int ui_notify(const char *title, const char *body);
 /* Leading: 129% of the font size (22 for 17). ui_text_block wraps `s` (words and
  * '\n') into `width` pixels, one leading apart; -> its height. c = 0: measure only. */
 int ui_leading(int scale);

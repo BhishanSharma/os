@@ -539,10 +539,12 @@ def test_ports():
     m = Machine("ports", usb_stick())
     try:
         login(m)
-        out = m.run("lua -e \"print(string.format('lua %d', 6 * 7))\"", 60)
+        out = m.run("lua -e \"print('lua ' .. 6 * 7)\"", 60)   # (no %: the typing loses it)
         check("lua 42" in out, "lua", out)
         out = m.run("sqlite3 :memory: \"select 'sqlite ' || (6 * 7);\"", 60)
         check("sqlite 42" in out, "sqlite3", out)
+        out = m.run("nano --version", 60)
+        check("GNU nano" in out, "nano", out)
         out = m.run("bash -c 'echo bash $((6 * 7))'", 60)
         check("bash 42" in out, "bash", out)
         out = m.run("bash -c 'echo from-bash > /TMP/b.txt; cat /TMP/b.txt'", 60)   # PATH, fork, exec
@@ -704,6 +706,25 @@ def test_desktop():
         m.stop()
 
 
+def test_polish():
+    """The desktop's polish: a notification's banner, a screenshot (Print
+    Screen), Calculator and Calendar open."""
+    m = Machine("polish", usb_stick())
+    try:
+        login(m)
+        m.type("windowserver notify:Hello calculator calendar")
+        m.expect(r"windowserver: \d+x\d+", 30)
+        m.expect(r"notification from notify: Hello", 30)
+        time.sleep(3)
+        m.screenshot("polish")
+        m.keys("print")                              # Print Screen: a PNG in ~/Pictures
+        m.expect(r"notification from DOOR OS: Screenshot", 30)
+        m.keys("ctrl-q")
+        m.expect(PROMPT, 10)
+    finally:
+        m.stop()
+
+
 def test_gui():
     """All graphical: the boot screen, the Setup Assistant makes an account
     (a name only: no password until one is turned on in Settings) and opens
@@ -844,7 +865,7 @@ def test_logs():
 
 
 TESTS = [("boot", test_boot), ("files", test_files), ("fault", test_fault), ("panic", test_panic),
-         ("kernel", test_kernel), ("desktop", test_desktop), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("logs", test_logs), ("user", test_user), ("video", test_nvme_video), ("bundle", test_bundle), ("storage", test_storage), ("sleep", test_sleep), ("dynamic", test_dynamic), ("ports", test_ports), ("install", test_install), ("network", test_network),
+         ("kernel", test_kernel), ("desktop", test_desktop), ("polish", test_polish), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("logs", test_logs), ("user", test_user), ("video", test_nvme_video), ("bundle", test_bundle), ("storage", test_storage), ("sleep", test_sleep), ("dynamic", test_dynamic), ("ports", test_ports), ("install", test_install), ("network", test_network),
          ("bios", test_legacy_bios)]
 NEEDS_INTERNET = {"network"}
 # Tests of programs only the full toolchain builds (myos-ladybird: build.ps1).

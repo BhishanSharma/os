@@ -76,6 +76,36 @@ struct ws_settings {
     int dock_autohide, dock_dots, dock_bounce;
     int clock_24h, clock_date, clock_seconds;
     struct os_pointer pointer;             /* the mouse and the touchpad (the server passes it to the kernel) */
+    int large_text;                        /* Accessibility: everything twice as large (from the next login;
+                                              on a screen at least 1600 pixels wide) */
+};
+
+/* The clipboard: text every program of the user's session shares
+ * (shm_map(WS_CLIPBOARD "." uid)). Copy writes it under the lock and bumps
+ * `seq`; paste reads it. ui_clip_set / ui_clip_get (ui.h) do both. */
+#define WS_CLIPBOARD "ws.clip"
+#define WS_CLIP_MAX (64 * 1024)
+struct ws_clipboard {
+    volatile unsigned seq, len;
+    volatile int lock;
+    char text[WS_CLIP_MAX];
+};
+
+/* Notifications: any program posts one (ui_notify), the window server shows
+ * it as a banner at the top right and keeps it under the bell in the status
+ * pill. A ring the user's programs share (shm_map(WS_NOTIFY "." uid)):
+ * `seq` counts the posts, note seq % WS_NOTES is the newest. */
+#define WS_NOTIFY "ws.notify"
+#define WS_NOTES 16
+struct ws_note {
+    unsigned seq;
+    int pid;
+    char app[24], title[48], body[120];
+};
+struct ws_notify {
+    volatile unsigned seq;
+    volatile int lock;
+    struct ws_note n[WS_NOTES];
 };
 
 #define WS_EVENTS 64

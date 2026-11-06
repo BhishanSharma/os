@@ -390,6 +390,10 @@ static void build_appearance(view_t *p) {
     switch_row(p, "Increase contrast", &cfg->contrast);
     switch_row(p, "Reduce motion", &cfg->reduce_motion);
     switch_row(p, "Reduce transparency", &cfg->reduce_transp);
+    switch_row(p, "Larger text (from the next login)", &cfg->large_text);
+    view_t *note = v_text(p, "Tab moves between fields and buttons in every app; Space or Return "
+                             "presses the focused button.");
+    note->color = UI_C_SECONDARY;
 }
 
 static void set_picture(view_t *v) {

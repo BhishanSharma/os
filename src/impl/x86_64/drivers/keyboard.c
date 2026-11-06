@@ -101,6 +101,7 @@ void keyboard_scancode(uint8_t scancode) {
                 break;
             case 0x4B: key_buffer[buffer_index++] = KEY_LEFT_ARROW; break;
             case 0x4D: key_buffer[buffer_index++] = KEY_RIGHT_ARROW; break;
+            case 0x37: key_buffer[buffer_index++] = KEY_SCREENSHOT; break;   // Print Screen (E0 2A E0 37)
         }
         extended_scancode = 0;
     } else {
@@ -135,9 +136,18 @@ void keyboard_scancode(uint8_t scancode) {
                     keyboard_ctrl_c = 1;
                     break;
                 case 0x2F:                                                   // V: paste
-                    mouse_request_paste();
+                    if (print_graphics_mode() >= 2) {                        // the desktop: the app's
+                        key_buffer[buffer_index++] = 22;
+                        break;
+                    }
+                    mouse_request_paste();                                   // the console's clipboard
                     return;
-                default: return;
+                default: {                                                   // any other letter: its
+                    char c = kbdus[scancode];                                // control code (Ctrl+A = 1,
+                    if (c < 'a' || c > 'z') return;                          // Ctrl+Z = 26), for the apps'
+                    key_buffer[buffer_index++] = (char)(c - 'a' + 1);        // shortcuts
+                    break;
+                }
             }
         } else {
             // Normal key - apply shift or caps lock

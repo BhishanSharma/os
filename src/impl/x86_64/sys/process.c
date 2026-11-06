@@ -1176,8 +1176,19 @@ static int64_t sys_system(uint64_t op, uint64_t a, uint64_t b);
  * (keyboard, sleep) still gets timer and keyboard interrupts. */
 static void syscall_dispatch_locked(struct exc_frame *f);
 
-/* Every system call runs under the big kernel lock (sys/smp.h). */
+/* Every system call runs under the big kernel lock (sys/smp.h), except the
+ * ones that only read a counter or the caller's own task: the clock (every
+ * clock_gettime of the C library; a browser's event loop asks it all the
+ * time) and the process id. They run on any core at once. */
 void syscall_dispatch(struct exc_frame *f) {
+    if (f->rax == SYS_UPTIME) {
+        f->rax = timer_ms();
+        return;
+    }
+    if (f->rax == SYS_GETPID) {
+        f->rax = (uint64_t)task_current()->pid;
+        return;
+    }
     bkl_enter();
     user_access_begin();                              /* SMAP: the call may use the program's memory */
     syscall_dispatch_locked(f);
@@ -2589,11 +2600,14 @@ static int64_t sys_registry(uint64_t index, uint64_t ptr) {
 
 static int64_t sys_auth(uint64_t name_ptr, uint64_t pass_ptr, uint64_t out_ptr) {
     char name[32], password[64];
-    if (!user_is_root()) return SYSERR_PERM;
     if (copy_user_string(name, name_ptr, sizeof(name)) != 0 ||
         copy_user_string(password, pass_ptr, sizeof(password)) != 0 ||
         !user_range_ok(out_ptr, sizeof(struct os_user), 1))
         return SYSERR_FAULT;
+    /* Anyone may check their own password (the lock screen); others' only root.
+     * Not an app in a sandbox: it would only guess. */
+    if (P()->sandbox.on) return SYSERR_PERM;
+    if (!user_is_root() && strcmp(name, user_current()->name) != 0) return SYSERR_PERM;
     user_t u;
     int ok = users_check_password(name, password, &u) == 0;
     memset(password, 0, sizeof(password));

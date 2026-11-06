@@ -37,6 +37,7 @@
 #define MAX_WINDOWS 16
 #define MAX_DAMAGE 32
 #define KEY_QUIT 17                    /* Ctrl+Q */
+#define KEY_SCREENSHOT 1003            /* Print Screen (the keyboard driver) */
 #define KEY_CLOSE 23                   /* Ctrl+W */
 #define KEY_LAUNCH 12                  /* Ctrl+L */
 
@@ -366,7 +367,7 @@ static void reload_dock(void) {
 }
 
 enum { M_ABOUT = 1, M_SETTINGS, M_ACTIVITY, M_APPEARANCE, M_MOTION, M_TRANSP, M_TERMINAL,
-       M_CONTRAST, M_RESTART, M_SHUTDOWN, M_LOGOUT, M_SLEEP };
+       M_CONTRAST, M_RESTART, M_SHUTDOWN, M_LOGOUT, M_SLEEP, M_CLEAR_NOTES, M_NOTE, M_LOCK, M_SHOT };
 #define MI_SEP 1
 #define MI_OFF 2
 #define MI_MAX 24
@@ -568,7 +569,60 @@ static void pill_layout(void) {
 /* The Launcher panel: Apps (with a search field), Spaces (the open windows)
  * and Create share it. */
 enum { PM_APPS, PM_SPACES, PM_CREATE };
-enum { LK_APP, LK_WIN, LK_PANE };
+enum { LK_APP, LK_WIN, LK_PANE, LK_FILE };
+
+/* Files: the Launcher's search finds them by name in the home folder (three
+ * folders deep), indexed each time it opens. */
+#define FILES_MAX 600
+static struct { char path[160]; char name[48]; int dir; } findex[FILES_MAX];
+static int n_findex;
+
+static void index_folder(const char *dir, int depth) {
+    struct os_dirent *e = malloc(128 * sizeof(*e));
+    if (!e) return;
+    int n = listdir(dir, e, 128);
+    for (int i = 0; i < n && n_findex < FILES_MAX; i++) {
+        if (e[i].name[0] == '.') continue;
+        char path[160];
+        snprintf(path, sizeof(path), "%s/%s", dir, e[i].name);
+        snprintf(findex[n_findex].path, sizeof(findex[0].path), "%s", path);
+        snprintf(findex[n_findex].name, sizeof(findex[0].name), "%s", e[i].name);
+        findex[n_findex].dir = e[i].is_dir;
+        n_findex++;
+        if (e[i].is_dir && depth > 0 && strcmp(e[i].name, "Apps")) index_folder(path, depth - 1);
+    }
+    free(e);
+}
+
+static void index_files(void) {
+    struct os_user u;
+    n_findex = 0;
+    if (getuser(&u) == 0) index_folder(u.home, 2);
+}
+
+/* The kind of a file by its name: which icon, which app opens it. */
+static int ends_ci(const char *s, const char *ext) {
+    size_t a = strlen(s), b = strlen(ext);
+    if (a < b) return 0;
+    for (size_t i = 0; i < b; i++) {
+        char c = s[a - b + i];
+        if (c >= 'A' && c <= 'Z') c += 32;
+        if (c != ext[i]) return 0;
+    }
+    return 1;
+}
+static int file_kind(const char *name, int dir) {   /* 0 folder, 1 picture, 2 video, 3 song, 4 other */
+    if (dir) return 0;
+    static const char *pics[] = { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tga", ".psd" };
+    static const char *vids[] = { ".mp4", ".mkv", ".webm", ".mpg", ".mpeg", ".mov", ".avi" };
+    static const char *songs[] = { ".mp3", ".wav", ".mp2", ".flac", ".ogg" };
+    for (unsigned i = 0; i < sizeof(pics) / sizeof(pics[0]); i++) if (ends_ci(name, pics[i])) return 1;
+    for (unsigned i = 0; i < sizeof(vids) / sizeof(vids[0]); i++) if (ends_ci(name, vids[i])) return 2;
+    for (unsigned i = 0; i < sizeof(songs) / sizeof(songs[0]); i++) if (ends_ci(name, songs[i])) return 3;
+    return 4;
+}
+static const char *kind_icon[] = { "folder", "picture", "video", "music", "file" };
+static const char *kind_app[] = { "finder", "view", "video", "music", "textedit" };
 typedef struct { char label[48]; int kind, idx; } litem_t;
 static litem_t items[MAX_TILES];
 static int n_items, items_dirty;
@@ -632,6 +686,11 @@ static void build_items(void) {
         if (qlen)
             for (unsigned i = 0; i < sizeof(panes) / sizeof(panes[0]); i++)
                 if (has_ci(panes[i].label, query)) add_litem(LK_PANE, (int)i, panes[i].label);
+        for (int i = 0, found = 0; qlen >= 2 && i < n_findex && found < 8; i++)   /* files, by name */
+            if (has_ci(findex[i].name, query)) {
+                add_litem(LK_FILE, i, findex[i].name);
+                found++;
+            }
     } else if (panel_mode == PM_CREATE) {
         for (int i = 0; i < DOCK_APPS; i++)
             for (unsigned k = 0; k < sizeof(create_progs) / sizeof(create_progs[0]); k++)
@@ -672,6 +731,7 @@ static void close_menu(void);
 static void panel_show(int mode) {
     close_menu();
     if (!panel_open || panel_mode != mode) {
+        if (mode == PM_APPS) index_files();
         panel_mode = mode;
         qlen = 0;
         query[0] = 0;
@@ -898,6 +958,247 @@ static void add_item(const char *label, const char *key, int id, int flags) {
 }
 static void add_sep(void) { add_item("", 0, 0, MI_SEP); }
 
+static void fit_text(char *out, int n, const char *s, int maxw, int style);
+
+/* ---- The lock screen: the session stays, the password brings it back ---- */
+
+static int locked;                                 /* nothing of the session shows */
+static char lock_pass[64];
+static int lock_len;
+static char lock_msg[64];
+
+/* An account without a password: locking would only ask for Return. (Asked
+ * of the kernel directly: a wrong auth() would wait a second.) */
+static int has_password(void) {
+    return signin_on() == 1;
+}
+
+static void lock_screen(void) {
+    locked = 1;
+    lock_len = 0;
+    lock_pass[0] = 0;
+    lock_msg[0] = 0;
+    printf("windowserver: locked\n");                /* (for the tests) */
+    damage(0, 0, W, H);
+}
+
+static void lock_key(int key) {
+    if (key == '\n' || key == '\r') {
+        struct os_user u, out;
+        lock_pass[lock_len] = 0;
+        if (getuser(&u) == 0 && auth(u.name, lock_pass, &out) == 0) {
+            locked = 0;
+            printf("windowserver: unlocked\n");
+        } else {
+            snprintf(lock_msg, sizeof(lock_msg), "That password is not right.");
+        }
+        memset(lock_pass, 0, sizeof(lock_pass));
+        lock_len = 0;
+    } else if (key == '\b') {
+        if (lock_len) lock_pass[--lock_len] = 0;
+    } else if (key == 27) {
+        lock_len = 0;
+        lock_pass[0] = 0;
+    } else if (key >= ' ' && key < 127 && lock_len < (int)sizeof(lock_pass) - 1) {
+        lock_pass[lock_len++] = (char)key;
+        lock_msg[0] = 0;
+    }
+    damage(0, 0, W, H);
+}
+
+static void post_note(const char *title, const char *body);
+
+/* ---- Screenshots: Print Screen saves the screen as a PNG in ~/Pictures ---- */
+
+static int shot_pending;                           /* the next frame is drawn whole by the CPU, then saved */
+
+static unsigned crc_table[256];
+static unsigned crc32_of(unsigned crc, const unsigned char *p, unsigned long n) {
+    if (!crc_table[1])
+        for (unsigned i = 0; i < 256; i++) {
+            unsigned c = i;
+            for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            crc_table[i] = c;
+        }
+    crc = ~crc;
+    while (n--) crc = crc_table[(crc ^ *p++) & 255] ^ (crc >> 8);
+    return ~crc;
+}
+
+static void be32(unsigned char *p, unsigned v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v; }
+
+static int png_chunk(int fd, const char *type, const unsigned char *data, unsigned len) {
+    unsigned char head[8], tail[4];
+    be32(head, len);
+    memcpy(head + 4, type, 4);
+    unsigned crc = crc32_of(0, head + 4, 4);
+    crc = crc32_of(crc, data, len);
+    be32(tail, crc);
+    return write(fd, head, 8) == 8 && (len == 0 || write(fd, data, len) == (long)len) && write(fd, tail, 4) == 4;
+}
+
+/* A PNG of the screen: RGB, rows unfiltered, deflate's stored blocks (big
+ * but simple; any viewer reads it). -> 0 */
+static int save_png(const char *path, const unsigned *px, int w, int h, int stride) {
+    unsigned long raw = (unsigned long)h * (1 + (unsigned long)w * 3);
+    unsigned long blocks = (raw + 65534) / 65535;
+    unsigned long zlen = 2 + raw + blocks * 5 + 4;
+    unsigned char *z = mmap(zlen, PROT_READ | PROT_WRITE, -1);
+    if (!z) return -1;
+    unsigned long at = 0, adler_a = 1, adler_b = 0, left = raw, block_left = 0;
+    z[at++] = 0x78;
+    z[at++] = 0x01;
+    for (int y = 0; y < h; y++) {
+        for (int x = -1; x < w; x++) {
+            unsigned char bytes[3];
+            int nb;
+            if (x < 0) {
+                bytes[0] = 0;                          /* the row's filter: none */
+                nb = 1;
+            } else {
+                unsigned c = px[(long)y * stride + x];
+                bytes[0] = c >> 16, bytes[1] = c >> 8, bytes[2] = c;
+                nb = 3;
+            }
+            for (int i = 0; i < nb; i++) {
+                if (!block_left) {                     /* a stored block's header */
+                    block_left = left < 65535 ? left : 65535;
+                    left -= block_left;
+                    z[at++] = left ? 0 : 1;
+                    z[at++] = block_left & 255;
+                    z[at++] = block_left >> 8;
+                    z[at++] = ~block_left & 255;
+                    z[at++] = (~block_left >> 8) & 255;
+                }
+                z[at++] = bytes[i];
+                block_left--;
+                adler_a = (adler_a + bytes[i]) % 65521;
+                adler_b = (adler_b + adler_a) % 65521;
+            }
+        }
+    }
+    be32(z + at, (unsigned)(adler_b << 16 | adler_a));
+    at += 4;
+    int fd = open(path, OPEN_WRITE);
+    int ok = fd >= 0;
+    if (ok) {
+        static const unsigned char sig[8] = { 137, 'P', 'N', 'G', 13, 10, 26, 10 };
+        unsigned char ihdr[13];
+        be32(ihdr, (unsigned)w);
+        be32(ihdr + 4, (unsigned)h);
+        ihdr[8] = 8, ihdr[9] = 2, ihdr[10] = ihdr[11] = ihdr[12] = 0;   /* 8 bits, RGB */
+        ok = write(fd, sig, 8) == 8 && png_chunk(fd, "IHDR", ihdr, 13) &&
+             png_chunk(fd, "IDAT", z, (unsigned)at) && png_chunk(fd, "IEND", 0, 0);
+        close(fd);
+    }
+    munmap(z);
+    return ok ? 0 : -1;
+}
+
+static void take_screenshot(void) {
+    struct os_user u;
+    struct os_time t;
+    char dir[96], path[160], name[64];
+    if (getuser(&u) != 0 || gettime(&t) != 0) return;
+    snprintf(dir, sizeof(dir), "%s/Pictures", u.home);
+    mkdir(dir);
+    snprintf(name, sizeof(name), "Screenshot-%04d-%02d-%02d-%02d%02d%02d.png", t.year, t.month, t.day,
+             t.hour, t.minute, t.second);
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    if (save_png(path, scr.px, W, H, scr.stride) == 0) {
+        char body[120];
+        snprintf(body, sizeof(body), "Saved in Pictures as %s", name);
+        post_note("Screenshot", body);
+    } else {
+        post_note("Screenshot", "It could not be saved (is the disk full?)");
+    }
+}
+
+/* ---- Notifications (ws.h): banners at the top right, then under the bell ---- */
+
+static struct ws_notify *notes;                    /* the ring the user's programs post to */
+static unsigned notes_seen;
+#define NOTE_KEEP 12
+static struct ws_note kept[NOTE_KEEP];             /* newest first: the bell's menu */
+static int n_kept, unread;
+#define BANNERS 3
+#define BANNER_MS 6000
+static struct { struct ws_note n; unsigned long until; } banners[BANNERS];   /* newest first */
+static int n_banners;
+
+static int banner_w(void) { return 340 * S; }
+static int banner_h(void) { return 64 * S; }
+static int banner_x(void) { return W - banner_w() - 16 * S; }
+static int banner_y(int i) { return 12 * S + 48 * S + 10 * S + i * (banner_h() + 8 * S); }   /* below the pill */
+
+static void damage_banners(void) {
+    damage(banner_x() - SHADOW, banner_y(0) - SHADOW, banner_w() + 2 * SHADOW,
+                               BANNERS * (banner_h() + 8 * S) + 2 * SHADOW);
+}
+
+static void add_note(const struct ws_note *n) {
+    memmove(kept + 1, kept, (NOTE_KEEP - 1) * sizeof(kept[0]));
+    kept[0] = *n;
+    if (n_kept < NOTE_KEEP) n_kept++;
+    unread++;
+    memmove(banners + 1, banners, (BANNERS - 1) * sizeof(banners[0]));
+    banners[0].n = *n;
+    banners[0].until = uptime_ms() + BANNER_MS;
+    if (n_banners < BANNERS) n_banners++;
+    printf("windowserver: notification from %s: %s\n", n->app, n->title);   /* (for the tests) */
+    damage_banners();
+}
+
+/* The window server's own (a low battery). */
+static void post_note(const char *title, const char *body) {
+    struct ws_note n;
+    memset(&n, 0, sizeof(n));
+    snprintf(n.app, sizeof(n.app), "DOOR OS");
+    snprintf(n.title, sizeof(n.title), "%s", title);
+    snprintf(n.body, sizeof(n.body), "%s", body);
+    add_note(&n);
+}
+
+static void check_notes(void) {
+    if (!notes) {
+        struct os_user u;
+        char name[32];
+        if (getuser(&u) != 0) return;
+        snprintf(name, sizeof(name), "%s.%u", WS_NOTIFY, u.uid);
+        notes = shm_map(name, sizeof(*notes));
+        if (!notes) return;
+        notes_seen = notes->seq;                       /* (only what comes from now on) */
+    }
+    unsigned now = notes->seq;
+    if (now - notes_seen > WS_NOTES) notes_seen = now - WS_NOTES;
+    for (; notes_seen != now; ) {
+        notes_seen++;
+        struct ws_note n = notes->n[notes_seen % WS_NOTES];
+        if (n.seq != notes_seen) continue;             /* (overwritten meanwhile) */
+        n.app[sizeof(n.app) - 1] = n.title[sizeof(n.title) - 1] = n.body[sizeof(n.body) - 1] = 0;
+        add_note(&n);
+    }
+    int gone = 0;
+    for (int i = n_banners - 1; i >= 0; i--)
+        if (uptime_ms() >= banners[i].until) {
+            n_banners = i;                             /* (the oldest are at the end) */
+            gone = 1;
+        }
+    if (gone) damage_banners();
+}
+
+static int banner_hit(int x, int y) {
+    for (int i = 0; i < n_banners; i++)
+        if (ui_inside(x, y, banner_x(), banner_y(i), banner_w(), banner_h())) return i;
+    return -1;
+}
+
+static void dismiss_banner(int i) {
+    damage_banners();
+    memmove(banners + i, banners + i + 1, (size_t)(n_banners - i - 1) * sizeof(banners[0]));
+    n_banners--;
+}
+
 static void build_menu(int kind) {
     char text[44];
     n_mitems = 0;
@@ -917,13 +1218,16 @@ static void build_menu(int kind) {
         add_item(text, 0, M_CONTRAST, 0);
         add_sep();
         add_item("New Terminal", 0, M_TERMINAL, 0);
+        add_item("Take Screenshot", "PrtSc", M_SHOT, 0);
         add_sep();
         add_item("Sleep", 0, M_SLEEP, 0);
         add_item("Restart...", 0, M_RESTART, 0);
         add_item("Shut Down...", 0, M_SHUTDOWN, 0);
         add_sep();
+        add_item("Lock Screen", 0, M_LOCK, 0);
         add_item("Log Out", "Ctrl+Q", M_LOGOUT, 0);
     } else if (kind == 2) {
+        add_item("Lock Screen", 0, M_LOCK, 0);
         add_item("Sleep", 0, M_SLEEP, 0);
         add_item("Restart...", 0, M_RESTART, 0);
         add_item("Shut Down...", 0, M_SHUTDOWN, 0);
@@ -932,7 +1236,19 @@ static void build_menu(int kind) {
     } else {
         add_item("Notifications", 0, 0, MI_OFF);
         add_sep();
-        add_item("You're all caught up", 0, 0, MI_OFF);
+        if (!n_kept) add_item("You're all caught up", 0, 0, MI_OFF);
+        for (int i = 0; i < n_kept && n_mitems < MI_MAX - 2; i++) {
+            char t[200];
+            snprintf(t, sizeof(t), "%s: %s%s%s", kept[i].app, kept[i].title, kept[i].body[0] ? " - " : "", kept[i].body);
+            fit_text(text, sizeof(text), t, 320 * S, UI_REGULAR);
+            add_item(text, 0, M_NOTE, 0);
+        }
+        if (n_kept) {
+            add_sep();
+            add_item("Clear All", 0, M_CLEAR_NOTES, 0);
+        }
+        unread = 0;
+        damage_pill();
     }
     int maxl = 0, maxk = 0;
     for (int i = 0; i < n_mitems; i++) {
@@ -2298,7 +2614,10 @@ static void draw_pill(painter_t *p) {
         int gx = bx + (bw - 20 * S) / 2, gy = by + 10 * S + pr;
         switch (id) {
         case H_SEARCH: gl_draw(c, gx, gy, 20 * S, GL_SEARCH, fg, 255, -1); break;
-        case H_BELL: gl_draw(c, gx, gy, 20 * S, GL_BELL, fg, 255, -1); break;
+        case H_BELL:
+            gl_draw(c, gx, gy, 20 * S, GL_BELL, fg, 255, -1);
+            if (unread) ui_circle(c, gx + 17 * S, gy + 3 * S, 4 * S, TH.accent);   /* something new */
+            break;
         case H_WIFI: gl_draw(c, gx, gy, 20 * S, GL_WIFI, fg, wifi_on ? 255 : 110, -1); break;
         case H_SOUND: gl_draw(c, gx, gy, 20 * S, GL_SOUND, fg, vol_level ? 255 : 110, -1); break;
         case H_THEME: gl_draw(c, gx, gy, 20 * S, dark ? GL_MOON : GL_SUN, fg, 255, -1); break;
@@ -2337,6 +2656,8 @@ static void draw_tile(painter_t *p, int i, int cx, int cy, const panel_geo_t *g)
     const dock_app_t *a = 0;
     if (it->kind == LK_APP) a = &apps[it->idx];
     else if (it->kind == LK_PANE) gl = panes[it->idx].glyph;
+    else if (it->kind == LK_FILE)
+        ui_icon(c, tx + 8 * S, ty + 8 * S, 40 * S, kind_icon[file_kind(findex[it->idx].name, findex[it->idx].dir)], 255);
     else {
         gl = GL_APPS;
         for (int k = 0; k < DOCK_APPS; k++)
@@ -2409,6 +2730,71 @@ static void draw_launcher(painter_t *p) {
     gl_draw(c, bx + 10 * S, by + 10 * S + (press_id == H_POWER ? S : 0), 20 * S, GL_POWER, ui_fg(H_POWER), 255, -1);
     int hw = 36 * S, hx = x + g.w / 2 - hw / 2 + (total > g.rows ? (panel_scroll * 24 * S / total - 12 * S) : 0);
     ui_round_ex(c, hx, y + g.h - 16 * S, hw, 4 * S, 2 * S, TH.muted, 130, UI_ALL);
+}
+
+static int overlaps(int ax0, int ay0, int ax1, int ay1, int bx, int by, int bw, int bh);
+
+/* The banners: glass cards with the app's name, the title and the text. */
+static void draw_banners(painter_t *p) {
+    ui_canvas *c = &p->c;
+    for (int i = n_banners - 1; i >= 0; i--) {
+        const struct ws_note *n = &banners[i].n;
+        int x = banner_x(), y = banner_y(i), w = banner_w(), h = banner_h();
+        if (!overlaps(c->cx0, c->cy0, c->cx1, c->cy1, x - SHADOW, y - SHADOW, w + 2 * SHADOW, h + 2 * SHADOW)) continue;
+        glass(p, x, y, w, h, R_CARD * S, UI_ALL, 2, 0);
+        char t[64];
+        int tx = x + 14 * S, tw = w - 28 * S;
+        fit_text(t, sizeof(t), n->app[0] ? n->app : "Notification", tw, UI_REGULAR);
+        ui_text(c, tx, y + 6 * S, t, TH.secondary, S);
+        fit_text(t, sizeof(t), n->title, tw, UI_BOLD);
+        ui_text_bold(c, tx, y + 24 * S, t, TH.label, S);
+        fit_text(t, sizeof(t), n->body, tw, UI_REGULAR);
+        ui_text(c, tx, y + 42 * S, t, TH.secondary, S);
+    }
+}
+
+/* The lock screen over the wallpaper: the time, the user, the password's dots. */
+static void draw_lock(painter_t *p) {
+    ui_canvas *c = &p->c;
+    ui_fill_a(c, 0, 0, W, H, 0x000000, 90);
+    struct os_time t;
+    char big[16], date[48];
+    static const char *months[] = { "January", "February", "March", "April", "May", "June", "July",
+                                    "August", "September", "October", "November", "December" };
+    if (gettime(&t) == 0) {
+        snprintf(big, sizeof(big), "%d:%02d", t.hour, t.minute);
+        snprintf(date, sizeof(date), "%d %s", t.day, months[(t.month + 11) % 12]);
+    } else {
+        big[0] = date[0] = 0;
+    }
+    int scale = 4 * S, bw = ui_text_style_width(big, scale, UI_BOLD);
+    ui_text_style(c, (W - bw) / 2, H / 4, big, 0xFFFFFF, scale, UI_BOLD);
+    int dw = ui_text_width(date, S);
+    ui_text(c, (W - dw) / 2, H / 4 + 72 * S, date, 0xF0F0F0, S);
+    struct os_user u;
+    const char *name = getuser(&u) == 0 ? u.name : "";
+    int cy = H / 2 + 40 * S, fw = 260 * S, fh = 40 * S, fx = (W - fw) / 2;
+    ui_circle(c, W / 2, cy - 56 * S, 34 * S, 0xE8E8EE);
+    char initial[2] = { name[0] >= 'a' && name[0] <= 'z' ? (char)(name[0] - 32) : name[0], 0 };
+    int iw = ui_text_style_width(initial, 2 * S, UI_BOLD);
+    ui_text_style(c, W / 2 - iw / 2, cy - 56 * S - 16 * S, initial, 0x404048, 2 * S, UI_BOLD);
+    int nw = ui_text_style_width(name, S, UI_BOLD);
+    ui_text_bold(c, (W - nw) / 2, cy - 10 * S, name, 0xFFFFFF, S);
+    ui_round_ex(c, fx, cy + 16 * S, fw, fh, fh / 2, 0xFFFFFF, 60, UI_ALL);
+    if (lock_len) {
+        for (int i = 0; i < lock_len && i < 24; i++)
+            ui_circle(c, fx + 20 * S + i * 14 * S, cy + 16 * S + fh / 2, 4 * S, 0xFFFFFF);
+    } else {
+        const char *hint = "Enter your password";
+        ui_text(c, fx + 20 * S, cy + 16 * S + (fh - 16 * S) / 2, hint, 0xD8D8DE, S);
+    }
+    if (lock_msg[0]) {
+        int mw = ui_text_width(lock_msg, S);
+        ui_text(c, (W - mw) / 2, cy + 16 * S + fh + 14 * S, lock_msg, 0xFFD0D0, S);
+    }
+    const char *out = "Ctrl+Q logs out (what is not saved is lost)";
+    int ow = ui_text_width(out, S);
+    ui_text(c, (W - ow) / 2, H - 48 * S, out, 0xC8C8D0, S);
 }
 
 static void draw_menu(painter_t *p) {
@@ -2488,10 +2874,16 @@ static void paint(painter_t *p, int by0, int by1) {
         if (y1 <= y0) continue;
         ui_clip(&p->c, x0, y0, x1 - x0, y1 - y0);
         ui_copy(&p->c, x0, y0, wallpaper + (long)y0 * W + x0, x1 - x0, y1 - y0, W);
+        if (locked) {                                  /* only the lock screen: no window shows */
+            draw_lock(p);
+            if (!kernel_cursor) draw_cursor(p);
+            continue;
+        }
         for (int i = 0; i < norder; i++) draw_window(p, order[i], &wins[order[i]] == f);
         draw_rail(p);
         draw_pill(p);
         draw_launcher_faded(p);
+        if (n_banners) draw_banners(p);
         draw_menu_faded(p);
         if (veil > 0) ui_round_ex(&p->c, x0, y0, x1 - x0, y1 - y0, 0, 0xFFE6BE, veil, UI_ALL);
         if (!kernel_cursor) draw_cursor(p);
@@ -2536,7 +2928,7 @@ static void plan_gpu_copies(void) {
     static struct os_copy items[64];
     int n = 0;
     for (int k = 0; k < MAX_WINDOWS; k++) wins[k].gpu_body = 0;
-    if (!gpu_frames || !kernel_cursor || motion()) return;
+    if (!gpu_frames || !kernel_cursor || motion() || locked || shot_pending) return;
     int dock_top = H;
     pill_layout();
     for (int i = 0; i < norder; i++) {
@@ -2552,6 +2944,8 @@ static void plan_gpu_copies(void) {
         panel_geo(&pg);
         int covered = (menu_open && overlaps(x0, y0, x1, y1, menu_x() - SHADOW, menu_y() - SHADOW,
                                              menu_w() + 2 * SHADOW, menu_h() + 2 * SHADOW)) ||
+                      (n_banners && overlaps(x0, y0, x1, y1, banner_x() - SHADOW, banner_y(0) - SHADOW,
+                                             banner_w() + 2 * SHADOW, BANNERS * (banner_h() + 8 * S) + 2 * SHADOW)) ||
                       (panel_vis() && overlaps(x0, y0, x1, y1, pg.x - SHADOW, pg.y - SHADOW,
                                                pg.w + 2 * SHADOW, pg.h + 2 * SHADOW + 20 * S));
         for (int j = i + 1; j < norder && !covered; j++) {
@@ -2743,9 +3137,18 @@ static void menu_choose(int id) {
         power(id == M_RESTART);
     } else if (id == M_LOGOUT) {
         quit();
+    } else if (id == M_LOCK) {
+        lock_screen();
+    } else if (id == M_SHOT) {
+        shot_pending = 1;                             /* (the menu is gone in that frame) */
+        damage(0, 0, W, H);
     } else if (id == M_SLEEP) {
         power(2);                                     /* (this program stops until the wake-up) */
+        if (has_password()) lock_screen();            /* awake: the password first */
         damage(0, 0, W, H);
+    } else if (id == M_CLEAR_NOTES) {
+        n_kept = unread = 0;
+        damage_pill();
     }
 }
 
@@ -2784,6 +3187,8 @@ static void activate_item(int i) {
             restore_window(it.idx);
             raise(it.idx);
         }
+    } else if (it.kind == LK_FILE) {                  /* a file: the app that shows it */
+        run(kind_app[file_kind(findex[it.idx].name, findex[it.idx].dir)], findex[it.idx].path);
     } else {
         run("settings", panes[it.idx].pane);
     }
@@ -2875,6 +3280,12 @@ static void activate(int id) {
 
 static void press(void) {
     printf("windowserver: click at %d,%d\n", mouse_x, mouse_y);   /* (for the tests) */
+    if (locked) return;                                /* (the lock screen takes no clicks) */
+    int b = menu_open ? -1 : banner_hit(mouse_x, mouse_y);
+    if (b >= 0) {                                      /* a banner: put it away */
+        dismiss_banner(b);
+        return;
+    }
     if (menu_open) {                                   /* any click closes the menu */
         int i = menu_hit(mouse_x, mouse_y);
         int id = i >= 0 && !(mitems[i].flags & MI_OFF) ? mitems[i].id : 0;
@@ -3081,6 +3492,15 @@ static void tidy(void) {
         struct os_wifi w;
         int b = battery(), wf = wifi_status(&w), v = volume(-1);
         int nb = b < 0 ? -1 : b, nw = wf < 0 ? -1 : wf, nv = v < 0 ? -1 : v;
+        static int warned;                             /* a low battery: said once until it charges */
+        if (nb >= 0 && (nb & 0xFF) <= 10 && !(nb & 0x100) && !warned) {
+            char body[64];
+            snprintf(body, sizeof(body), "%d%% left: plug in the charger soon.", nb & 0xFF);
+            post_note("Low Battery", body);
+            warned = 1;
+        } else if (nb >= 0 && ((nb & 0x100) || (nb & 0xFF) > 15)) {
+            warned = 0;
+        }
         if (nb != bat || nw != wifi_on || nv != vol_level) {
             bat = nb;
             wifi_on = nw;
@@ -3127,7 +3547,7 @@ static const struct { const char *key; int off; } keys[] = {
 #define K(f) { #f, (int)__builtin_offsetof(struct ws_settings, f) }
     K(dark), K(contrast), K(reduce_motion), K(reduce_transp), K(accent), K(wall_kind), K(wall_gradient),
     K(dock_size), K(dock_magnify), K(dock_autohide), K(dock_dots), K(dock_bounce), K(clock_24h),
-    K(clock_date), K(clock_seconds),
+    K(clock_date), K(clock_seconds), K(large_text),
 #define P(f) { #f, (int)__builtin_offsetof(struct ws_settings, pointer.f) }
     P(mouse_speed), P(pad_speed), P(accel), P(natural), P(wheel_reverse), P(scroll_speed),
     P(tap_click), P(tap_right), P(tap_drag), P(swap_buttons),
@@ -3250,6 +3670,12 @@ int main(int argc, char **argv) {
     cfg = shm_map(WS_SETTINGS, sizeof(struct ws_settings));
     if (!cfg) cfg = &cfg_local;                        /* (no shared memory: the defaults, unshared) */
     load_settings();
+    if (cfg->large_text && W >= 1600 && S == 1) {     /* Larger Text: the whole desktop at 2x */
+        S = 2;
+        TITLE_H = 36 * S;
+        RADIUS = R_WINDOW * S;
+        SHADOW = 24 * S;
+    }
     cfg->magic = WS_SETTINGS_MAGIC;
     cfg_seen = cfg->seq;
     apply_settings(1);
@@ -3320,6 +3746,15 @@ int main(int argc, char **argv) {
         st_lock += tsc() - tl;
         st_loops++;
         check_settings();
+        check_notes();
+        if (locked) {                                  /* the lock screen's clock */
+            static int shown_minute = -1;
+            struct os_time lt_now;
+            if (gettime(&lt_now) == 0 && lt_now.minute != shown_minute) {
+                shown_minute = lt_now.minute;
+                damage(0, 0, W, H);
+            }
+        }
         unsigned long now = uptime_ms();
         int dt = (int)(now - last_frame);
         if (dt > 50) dt = 50;
@@ -3327,7 +3762,17 @@ int main(int argc, char **argv) {
         handle_mouse();
         int key;
         while ((key = getkey()) != 0) {
+            if (locked) {                              /* every key is the password's, */
+                if (key == KEY_QUIT) quit();           /* but Ctrl+Q: log out (no way in without it) */
+                lock_key(key);
+                continue;
+            }
             if (key == KEY_QUIT) quit();
+            if (key == KEY_SCREENSHOT) {
+                shot_pending = 1;
+                damage(0, 0, W, H);
+                continue;
+            }
             if (key == KEY_LAUNCH) {
                 panel_toggle(PM_APPS);
                 continue;
@@ -3391,6 +3836,10 @@ int main(int argc, char **argv) {
         unsigned long t0 = tsc();
         int fresh = compose(), paced = 0, read = 0;
         unsigned long t1 = tsc();
+        if (shot_pending && fresh) {                  /* the whole screen, drawn by the CPU: save it */
+            shot_pending = 0;
+            take_screenshot();
+        }
         for (int k = 0; k < MAX_WINDOWS; k++)          /* the windows this frame was made from */
             if (wins[k].used && wins[k].drawn != wins[k].seen) {
                 wins[k].drawn = wins[k].seen;

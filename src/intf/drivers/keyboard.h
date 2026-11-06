@@ -19,6 +19,7 @@
 #define KEY_CTRL_C  3
 #define KEY_SCROLL_UP    1001   /* Shift+Up: show older output */
 #define KEY_SCROLL_DOWN  1002   /* Shift+Down */
+#define KEY_SCREENSHOT   1003   /* Print Screen: the desktop saves a picture of the screen */
 
 void keyboard_handler(void);
 /* Feed one byte of PS/2 scan code set 1 (0xE0 prefix, 0x80 = release), as

@@ -1,7 +1,8 @@
 // ui.c - drawing, widgets, and windows from the window server (see ui.h)
 //
 // Text comes from UIFONT.BIN (scripts/gen-uifont.py): glyphs pre-rendered
-// with anti-aliasing at each scale, blended onto the pixels. Shapes have
+// with anti-aliasing at each scale, blended onto the pixels; strings are
+// UTF-8 (the file has ASCII and a list of other characters). Shapes have
 // anti-aliased round corners (4x4 samples per edge pixel). Without the font
 // file, the console's 8x16 font is used.
 #include <string.h>
@@ -310,6 +311,8 @@ typedef struct __attribute__((packed)) {
 
 static const unsigned char *font;
 static int font_faces, font_tried;
+static const unsigned *font_extra;          /* UIF2: the characters after ASCII, sorted */
+static int font_n_extra;
 
 /* A file of the system (RAM disk: /SYS when a disk is mounted at /), mapped
  * read-only; 0 if missing or without the 4-byte `magic`. */
@@ -328,11 +331,22 @@ static const unsigned char *system_file(const char *name, const char *magic) {
     return 0;
 }
 
+/* UIF1: ASCII only. UIF2: then u32 n_extra after the face count, the faces,
+ * and n_extra sorted code points; each face's table has 96 + n_extra glyphs. */
 static void load_font(void) {
     font_tried = 1;
+    font = system_file("UIFONT.BIN", "UIF2");
+    if (font) {
+        font_faces = *(const int *)(font + 4);
+        font_n_extra = *(const int *)(font + 8);
+        font_extra = (const unsigned *)(font + 12 + font_faces * 12);
+        return;
+    }
     font = system_file("UIFONT.BIN", "UIF1");
     if (font) font_faces = *(const int *)(font + 4);
 }
+
+static int faces_at(void) { return font_extra || font_n_extra ? 12 : 8; }
 
 /* The face for `style` at `scale`, or the largest smaller one; 0: none. */
 static const face_t *find_face(int style, int scale) {
@@ -340,7 +354,7 @@ static const face_t *find_face(int style, int scale) {
     if (!font) return 0;
     const face_t *best = 0;
     for (int i = 0; i < font_faces; i++) {
-        const face_t *f = (const face_t *)(font + 8 + i * sizeof(face_t));
+        const face_t *f = (const face_t *)(font + faces_at() + i * sizeof(face_t));
         if (f->style != style) continue;
         if (f->scale == scale) return f;
         if (f->scale < scale && (!best || f->scale > best->scale)) best = f;
@@ -349,9 +363,70 @@ static const face_t *find_face(int style, int scale) {
     return best;
 }
 
-static const glyph_t *glyph(const face_t *f, unsigned char ch) {
-    if (ch < 32 || ch > 127) ch = '?';
-    return (const glyph_t *)(font + f->glyphs + (ch - 32) * sizeof(glyph_t));
+/* The glyph of code point cp ('?' when the font has none). */
+static const glyph_t *glyph(const face_t *f, unsigned cp) {
+    int index = '?' - 32;
+    if (cp >= 32 && cp < 128) {
+        index = (int)cp - 32;
+    } else if (cp == 0xA0) {                          /* (a no-break space is a space) */
+        index = 0;
+    } else if (font_n_extra) {
+        int lo = 0, hi = font_n_extra - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2;
+            if (font_extra[mid] == cp) { index = 96 + mid; break; }
+            if (font_extra[mid] < cp) lo = mid + 1; else hi = mid - 1;
+        }
+    }
+    return (const glyph_t *)(font + f->glyphs + index * sizeof(glyph_t));
+}
+
+/* ---- UTF-8 ---- */
+
+unsigned ui_utf8(const char **sp) {
+    const unsigned char *s = (const unsigned char *)*sp;
+    unsigned c = *s;
+    if (!c) return 0;
+    int n = c < 0x80 ? 0 : (c & 0xE0) == 0xC0 ? 1 : (c & 0xF0) == 0xE0 ? 2 : (c & 0xF8) == 0xF0 ? 3 : -1;
+    if (n < 0) {                                       /* not UTF-8: the byte as Latin-1 */
+        *sp += 1;
+        return c;
+    }
+    unsigned cp = n == 0 ? c : n == 1 ? c & 0x1F : n == 2 ? c & 0x0F : c & 0x07;
+    for (int i = 1; i <= n; i++) {
+        if ((s[i] & 0xC0) != 0x80) {                   /* cut short: the lead byte alone */
+            *sp += 1;
+            return c;
+        }
+        cp = cp << 6 | (s[i] & 0x3F);
+    }
+    *sp += n + 1;
+    return cp;
+}
+
+int ui_utf8_len(const char *s) {
+    int n = 0;
+    while (*s) {
+        ui_utf8(&s);
+        n++;
+    }
+    return n;
+}
+
+int ui_utf8_put(char *out, unsigned cp) {
+    if (cp < 0x80) { out[0] = (char)cp; return 1; }
+    if (cp < 0x800) { out[0] = (char)(0xC0 | cp >> 6); out[1] = (char)(0x80 | (cp & 63)); return 2; }
+    if (cp < 0x10000) {
+        out[0] = (char)(0xE0 | cp >> 12);
+        out[1] = (char)(0x80 | (cp >> 6 & 63));
+        out[2] = (char)(0x80 | (cp & 63));
+        return 3;
+    }
+    out[0] = (char)(0xF0 | cp >> 18);
+    out[1] = (char)(0x80 | (cp >> 12 & 63));
+    out[2] = (char)(0x80 | (cp >> 6 & 63));
+    out[3] = (char)(0x80 | (cp & 63));
+    return 4;
 }
 
 /* One glyph with its pen at 1/64 pixel x64, line box top y. */
@@ -408,20 +483,23 @@ int ui_text_style(ui_canvas *c, int x, int y, const char *s, unsigned color, int
     y += (16 * scale - f->line_h) / 2;            /* a smaller face: centred */
     int trk = tracking64(f);
     long x64 = (long)x * 64;
-    for (; *s; s++) {
-        const glyph_t *g = glyph(f, (unsigned char)*s);
+    while (*s) {
+        const glyph_t *g = glyph(f, ui_utf8(&s));
         draw_glyph(c, f, g, x64, y, color);
-        x64 += g->advance + (s[1] ? trk : 0);      /* none after the last letter */
+        x64 += g->advance + (*s ? trk : 0);        /* none after the last letter */
     }
     return (int)((x64 + 32) >> 6) - x;
 }
 
 int ui_text_style_width(const char *s, int scale, int style) {
     const face_t *f = find_face(style, scale);
-    if (!f) return (int)strlen(s) * 8 * scale;
+    if (!f) return ui_utf8_len(s) * 8 * scale;
     int trk = tracking64(f);
     long x64 = 0;
-    for (; *s; s++) x64 += glyph(f, (unsigned char)*s)->advance + (s[1] ? trk : 0);
+    while (*s) {
+        unsigned cp = ui_utf8(&s);
+        x64 += glyph(f, cp)->advance + (*s ? trk : 0);
+    }
     return (int)((x64 + 32) >> 6);
 }
 
@@ -448,8 +526,10 @@ int ui_text_block(ui_canvas *c, int x, int y, int width, const char *s, unsigned
                     p -= n - last_space;
                     n = last_space;
                 } else {
-                    p--;
-                    n--;
+                    do {                               /* back by one character */
+                        p--;
+                        n--;
+                    } while (n > 1 && ((unsigned char)line[n] & 0xC0) == 0x80);
                 }
                 break;
             }
@@ -475,12 +555,102 @@ int ui_text_width(const char *s, int scale) { return ui_text_style_width(s, scal
 
 /* A character cell of the monospaced font (Terminal): 8 x 16 times scale. */
 int ui_char(ui_canvas *c, int x, int y, unsigned char ch, unsigned color, int scale) {
+    return ui_glyph(c, x, y, ch, color, scale);
+}
+
+int ui_glyph(ui_canvas *c, int x, int y, unsigned cp, unsigned color, int scale) {
     const face_t *f = find_face(UI_MONO, scale);
-    if (!f || f->scale != scale) return bitmap_char(c, x, y, ch, color, scale);
-    const glyph_t *g = glyph(f, ch);
+    if (!f || f->scale != scale) return bitmap_char(c, x, y, cp < 256 ? (unsigned char)cp : '?', color, scale);
+    const glyph_t *g = glyph(f, cp);
     long x64 = (long)x * 64 + ((long)8 * scale * 64 - g->advance) / 2;   /* centred in the cell */
     draw_glyph(c, f, g, x64, y, color);
     return 8 * scale;
+}
+
+/* ---- The clipboard and notifications (shared memory, ws.h) ---------------- */
+
+static void *session_shm(const char *what, unsigned long size) {
+    struct os_user u;
+    char name[32];
+    if (getuser(&u) != 0) u.uid = 0;
+    snprintf(name, sizeof(name), "%s.%u", what, u.uid);
+    return shm_map(name, size);
+}
+
+/* Held for a copy at most; one held for half a second belongs to a program
+ * that ended holding it (a bad pointer to ui_clip_set): taken over. */
+static void spin_lock(volatile int *l) {
+    unsigned long t0 = 0;
+    for (int i = 0; __atomic_exchange_n(l, 1, __ATOMIC_ACQUIRE); i++) {
+        if (i < 100) continue;
+        if (!t0) t0 = uptime_ms();
+        else if (uptime_ms() - t0 > 500) return;
+        yield();
+    }
+}
+static void spin_unlock(volatile int *l) { __atomic_store_n(l, 0, __ATOMIC_RELEASE); }
+
+static struct ws_clipboard *clipboard(void) {
+    static struct ws_clipboard *c;
+    if (!c) c = session_shm(WS_CLIPBOARD, sizeof(*c));
+    return c;
+}
+
+int ui_clip_set(const char *text, int len) {
+    struct ws_clipboard *c = clipboard();
+    if (!c) return SYSERR_NOMEM;
+    if (len < 0) len = (int)strlen(text);
+    if (len > WS_CLIP_MAX) len = WS_CLIP_MAX;
+    spin_lock(&c->lock);
+    memcpy(c->text, text, (size_t)len);
+    c->len = (unsigned)len;
+    c->seq++;
+    spin_unlock(&c->lock);
+    return 0;
+}
+
+int ui_clip_get(char *buf, int max) {
+    struct ws_clipboard *c = clipboard();
+    if (!c || max <= 0) return 0;
+    spin_lock(&c->lock);
+    int n = (int)c->len < max - 1 ? (int)c->len : max - 1;
+    memcpy(buf, c->text, (size_t)n);
+    buf[n] = 0;
+    spin_unlock(&c->lock);
+    return n;
+}
+
+unsigned ui_clip_seq(void) {
+    struct ws_clipboard *c = clipboard();
+    return c ? c->seq : 0;
+}
+
+static char app_name[24];                       /* ui_open's title */
+
+int ui_notify(const char *title, const char *body) {
+    static struct ws_notify *q;
+    if (!q) q = session_shm(WS_NOTIFY, sizeof(*q));
+    if (!q) return SYSERR_NOMEM;
+    if (!app_name[0]) {                          /* no window: the program's name */
+        struct os_task t;
+        int me = getpid();
+        for (int i = 0, used; (used = taskinfo(i, &t)) >= 0; i++)
+            if (used && t.pid == me) {
+                snprintf(app_name, sizeof(app_name), "%s", t.name);
+                break;
+            }
+    }
+    spin_lock(&q->lock);
+    unsigned seq = q->seq + 1;
+    struct ws_note *n = &q->n[seq % WS_NOTES];
+    n->pid = getpid();
+    snprintf(n->app, sizeof(n->app), "%s", app_name);
+    snprintf(n->title, sizeof(n->title), "%s", title ? title : "");
+    snprintf(n->body, sizeof(n->body), "%s", body ? body : "");
+    n->seq = seq;
+    q->seq = seq;
+    spin_unlock(&q->lock);
+    return 0;
 }
 
 /* ---- Icons (ICONS.BIN: scripts/gen-icons.py) ------------------------------ */
@@ -803,7 +973,10 @@ int ui_desktop(void) {
 int ui_scale(void) {
     struct os_gfx_info g;
     if (gfx_info(&g) < 0) return 1;
-    return g.cell_w >= 16 ? 2 : 1;
+    if (g.cell_w >= 16) return 2;
+    static struct ws_settings *cfg;                   /* Larger Text (Accessibility) */
+    if (!cfg) cfg = shm_map(WS_SETTINGS, sizeof(*cfg));
+    return cfg && cfg->magic == WS_SETTINGS_MAGIC && cfg->large_text && g.width >= 1600 ? 2 : 1;
 }
 
 int ui_open(ui_window *w, const char *title, int width, int height) {
@@ -817,6 +990,7 @@ int ui_open(ui_window *w, const char *title, int width, int height) {
     q.h = height;
     q.pid = getpid();
     snprintf(q.title, sizeof(q.title), "%s", title);
+    if (!app_name[0]) snprintf(app_name, sizeof(app_name), "%s", title);
     struct ws_reply r;
     int n = port_call(server, &q, sizeof(q), &r, sizeof(r), 5000);
     port_close(server);
