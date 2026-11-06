@@ -21,6 +21,7 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/sysinfo.h>
 #include <sys/time.h>
 #include <sys/utsname.h>
 #include <termios.h>
@@ -785,6 +786,43 @@ int Sysdeps<Chdir>::operator()(const char *path) {
 	return r < 0 ? to_errno(r) : 0;
 }
 
+// A terminal's name: the Terminal window's pseudo-terminal, or the console.
+int Sysdeps<Ttyname>::operator()(int fd, char *buf, size_t size) {
+	if (sysdep<Isatty>(fd))
+		return ENOTTY;
+	const char *name = tos::is_pty(fd) ? "/dev/pts/0" : "/dev/console";
+	if (strlen(name) + 1 > size)
+		return ERANGE;
+	strcpy(buf, name);
+	return 0;
+}
+
+// The folder of a directory handle (opendir, or open of a folder).
+int Sysdeps<Fchdir>::operator()(int fd) {
+	if (OpenDirectory *d = directory(fd))
+		return sysdep<Chdir>(d->path);
+	if (fd >= 0 && fd < MAX_FDS && fd_path[fd])
+		return sysdep<Chdir>(fd_path[fd]);
+	return EBADF;
+}
+
+// Writes reach the disk as they are made (FAT32, and ext3's journal at
+// each call): nothing waits in a cache for these to push out.
+int Sysdeps<Fsync>::operator()(int) { return 0; }
+int Sysdeps<Fdatasync>::operator()(int) { return 0; }
+void Sysdeps<Sync>::operator()() {}
+
+// One program at a time writes a file (no locks between programs).
+int Sysdeps<Flock>::operator()(int, int) { return 0; }
+
+// The mask is the program's own: new files get the kernel's modes anyway.
+mode_t file_mask = 022;
+int Sysdeps<Umask>::operator()(mode_t mode, mode_t *old) {
+	*old = file_mask;
+	file_mask = mode & 0777;
+	return 0;
+}
+
 int Sysdeps<Mkdir>::operator()(const char *path, mode_t) {
 	tos_stat ks;
 	if (sc(TOS_STAT, (long)path, (long)&ks) == 0)
@@ -953,7 +991,37 @@ void Sysdeps<Yield>::operator()() {
 
 pid_t Sysdeps<GetPid>::operator()() { return (pid_t)sc(TOS_GETPID); }
 pid_t Sysdeps<GetTid>::operator()() { return (pid_t)sc(TOS_GETPID); }
-pid_t Sysdeps<GetPpid>::operator()() { return 1; }
+pid_t Sysdeps<GetPpid>::operator()() { return (pid_t)sc(TOS_JOB, TOS_JOB_GETPPID); }
+
+// Job control: process groups and sessions are the kernel's (SYS_JOB).
+int Sysdeps<GetPgid>::operator()(pid_t pid, pid_t *pgid) {
+	long r = sc(TOS_JOB, TOS_JOB_GETPGID, pid);
+	if (r < 0)
+		return to_errno(r);
+	*pgid = (pid_t)r;
+	return 0;
+}
+
+int Sysdeps<SetPgid>::operator()(pid_t pid, pid_t pgid) {
+	long r = sc(TOS_JOB, TOS_JOB_SETPGID, pid, pgid);
+	return r < 0 ? to_errno(r) : 0;
+}
+
+int Sysdeps<GetSid>::operator()(pid_t pid, pid_t *sid) {
+	long r = sc(TOS_JOB, TOS_JOB_GETSID, pid);
+	if (r < 0)
+		return to_errno(r);
+	*sid = (pid_t)r;
+	return 0;
+}
+
+int Sysdeps<SetSid>::operator()(pid_t *sid) {
+	long r = sc(TOS_JOB, TOS_JOB_SETSID);
+	if (r < 0)
+		return to_errno(r);
+	*sid = (pid_t)r;
+	return 0;
+}
 
 uid_t Sysdeps<GetUid>::operator()() {
 	tos_user u;
@@ -978,10 +1046,16 @@ int Sysdeps<Execve>::operator()(const char *path, char *const argv[], char *cons
 
 int Sysdeps<Waitpid>::operator()(pid_t pid, int *status, int flags, struct rusage *, pid_t *ret_pid) {
 	int code = 0;
-	long r = sc(TOS_WAIT, pid, (long)&code, flags & WNOHANG ? TOS_WAIT_NOHANG : 0);
+	long kflags = (flags & WNOHANG ? TOS_WAIT_NOHANG : 0) | (flags & WUNTRACED ? TOS_WAIT_UNTRACED : 0) |
+	              (flags & WCONTINUED ? TOS_WAIT_CONTINUED : 0);
+	long r = sc(TOS_WAIT, pid, (long)&code, kflags);
 	if (r < 0)
 		return to_errno(r);
-	if (status)
+	if (status && r > 0 && (code & TOS_WAIT_STOPPED))
+		*status = 0x7f | (code & 0xff) << 8;        // stopped by that signal (WIFSTOPPED)
+	else if (status && r > 0 && code == TOS_WAIT_WENT_ON)
+		*status = 0xffff;                           // went on (WIFCONTINUED)
+	else if (status)
 		*status = (code & 0xff) << 8;               // as exited normally
 	*ret_pid = (pid_t)r;
 	return 0;
@@ -1008,6 +1082,26 @@ int Sysdeps<Sigaction>::operator()(int sig, const struct sigaction *__restrict a
 	long handler = act->sa_handler == SIG_DFL ? 0 : 1;   // the trampoline calls the real one
 	long r = sc(TOS_SIGNAL, sig, handler, (long)signal_trampoline);
 	return r < 0 ? to_errno(r) : 0;
+}
+
+// No other stack for handlers: they run on the program's (as without one).
+int Sysdeps<Sigaltstack>::operator()(const stack_t *, stack_t *oss) {
+	if (oss) {
+		memset(oss, 0, sizeof(*oss));
+		oss->ss_flags = SS_DISABLE;
+	}
+	return 0;
+}
+
+int Sysdeps<Sysinfo>::operator()(struct sysinfo *info) {
+	memset(info, 0, sizeof(*info));
+	info->uptime = sc(TOS_UPTIME) / 1000;
+	long total = sc(TOS_SYSTEM, TOS_SYSTEM_PAGES, 0), avail = sc(TOS_SYSTEM, TOS_SYSTEM_PAGES, 1);
+	info->totalram = total > 0 ? (unsigned long)total : 0;
+	info->freeram = avail > 0 ? (unsigned long)avail : 0;
+	info->mem_unit = 4096;
+	info->procs = 1;
+	return 0;
 }
 
 int Sysdeps<Sigprocmask>::operator()(int, const sigset_t *__restrict, sigset_t *__restrict retrieve) {
@@ -1091,6 +1185,19 @@ int Sysdeps<Sysconf>::operator()(int num, long *ret) {
 	case _SC_PAGESIZE:
 		*ret = 4096;
 		return 0;
+	case _SC_CHILD_MAX:                             // (the kernel's task table)
+		*ret = 256;
+		return 0;
+#ifdef _SC_SIGSTKSZ
+	case _SC_SIGSTKSZ:
+		*ret = 16384;
+		return 0;
+#endif
+#ifdef _SC_MINSIGSTKSZ
+	case _SC_MINSIGSTKSZ:
+		*ret = 4096;
+		return 0;
+#endif
 	case _SC_PHYS_PAGES:
 	case _SC_AVPHYS_PAGES: {
 		long n = sc(TOS_SYSTEM, TOS_SYSTEM_PAGES, num == _SC_AVPHYS_PAGES);

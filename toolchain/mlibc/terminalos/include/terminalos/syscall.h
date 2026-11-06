@@ -98,6 +98,8 @@
 #define TOS_USOCK_TCSET   12
 #define TOS_USOCK_WINSZ   13   /* fd, struct tos_winsize * */
 #define TOS_USOCK_SETWINSZ 14
+#define TOS_USOCK_TCGETPGRP 15 /* fd -> the foreground process group */
+#define TOS_USOCK_TCSETPGRP 16 /* fd, group */
 #define TOS_USOCK_MAX_FDS 16
 
 #define TOS_SYSTEM_CPUS 10
@@ -107,6 +109,18 @@
 #define TOS_OPEN_WRITE  1
 #define TOS_OPEN_APPEND 2
 #define TOS_WAIT_NOHANG 1
+#define TOS_WAIT_UNTRACED 4         /* also a stopped child: status TOS_WAIT_STOPPED | signal */
+#define TOS_WAIT_STOPPED 0x40000000
+#define TOS_WAIT_CONTINUED 8        /* also a child that went on: status TOS_WAIT_WENT_ON */
+#define TOS_WAIT_WENT_ON 0x20000000
+
+// job(op, a, b): process groups and sessions (kernel SYS_JOB).
+#define TOS_JOB        79
+#define TOS_JOB_GETPGID 0           /* pid (0: me) -> group */
+#define TOS_JOB_SETPGID 1           /* pid, group */
+#define TOS_JOB_GETSID  2           /* pid -> session */
+#define TOS_JOB_SETSID  3           /* -> the new session */
+#define TOS_JOB_GETPPID 4
 #define TOS_FUTEX_WAIT  0
 #define TOS_FUTEX_WAKE  1
 

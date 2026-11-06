@@ -73,18 +73,22 @@ warning. By hand: `sh toolchain/ports/build.sh lua` in the image.
 | --- | --- |
 | `lua` | Lua 5.4.7: `lua`, `luac` (C modules load with `require`, dlopen) |
 | `sqlite` | SQLite 3.47: `sqlite3` (no locking, no WAL: one user at a time) |
-| `bash` | GNU bash 5.2: `bash`, with readline (line editing, history); no job control |
+| `bash` | GNU bash 5.2: `bash`, with readline (line editing, history) and job control (Ctrl+Z, `jobs`, `fg`, `bg`) |
 | `ncurses` | ncurses 6.5: the screen library (static; xterm and vt100 built in, no terminfo files) |
 | `nano` | GNU nano 8.2: `nano`, the editor (needs `ncurses`: `NEEDS=ncurses`) |
+| `vim` | Vim 9.1: `vim` (normal features, no runtime folder: `/SYS/vimrc.def` has its settings, `:help` has no pages) |
 
 A recipe may set `NEEDS` (ports built first; a library installs into its
 `$DEST` and the next port finds it under `$PORTS_OUT/NAME`). GCC 15 compiles
 C23 by default; older sources may want `CFLAGS=-std=gnu17` (ncurses, nano).
 For a configure-based port, `/tc/config.sub` knows `terminalos`, and
 `--host=$HOST` cross-compiles. The C library's gaps show up as configure
-answers to give (`bash`'s recipe has the usual ones). `stat` and `access`
-of `X` find the program `X.elf`, so shells that search `PATH` find the OS's
-own programs. System test `ports` runs them.
+answers to give (`bash`'s recipe has the usual ones). At run time a missing
+one prints mlibc's "missing sysdep" line: Vim's needed `fsync` (else `:w`
+fails), `umask`, `flock`, `fchdir`, `sigaltstack`, `sysinfo` and `ttyname`,
+now there (`fsync` returns at once: writes reach the disk as they are made).
+`stat` and `access` of `X` find the program `X.elf`, so shells that search
+`PATH` find the OS's own programs. System test `ports` runs them.
 
 ## Terminals: pseudo-terminals and termios
 
@@ -96,12 +100,24 @@ to `xterm` (a built-in `/etc/termcap` describes the window). In the cooked
 mode the window edits the line (and keeps the history) and sends it whole;
 Ctrl+D is an end of file. In raw mode (readline, an editor) every key goes
 straight to the program, the arrows as escape sequences; Ctrl+C is SIGINT
-for the program that set the mode. The window is a VT100 screen: cursor
+for the job in front. The window is a VT100 screen: cursor
 movement, erasing, 16 colours, scroll regions, the alternate screen.
 `ptytest` checks the kernel's side (system test `kernel`).
 
-Cuts: no process groups or job control (Ctrl+Z), no UTF-8 on the screen
-(bytes are the font's characters), 256 and true colours are approximated.
+Job control: a program started with `spawn` leads a process group and a
+session of its own; `fork` keeps the parent's (`setpgid`, `getpgid`,
+`setsid`, `getsid`: `SYS_JOB`). A shell gives the terminal to the job in
+front (`tcsetpgrp`: `USOCK_TCSETPGRP`; until one does, the first program to
+ask has it). Ctrl+C and Ctrl+Z (SIGINT, SIGTSTP; Ctrl+\ SIGQUIT in raw mode)
+go to that group, from the window in either mode. SIGSTOP, and SIGTSTP,
+SIGTTIN and SIGTTOU without a handler, stop a program: its tasks wait at
+their next system call or tick until SIGCONT, and a call they were waiting
+in goes on. `waitpid` with WUNTRACED tells of a stop, with WCONTINUED of
+going on; a parent that waits without them has its stopped child go on.
+`kill(-g, sig)` and `kill(0, sig)` signal a whole group.
+
+Cuts: no SIGTTIN when a background job reads the terminal (it reads what
+is typed), 256 and true colours are approximated.
 The kernel's text console has no modes: `tcsetattr` there does nothing.
 
 ## What is in `toolchain/`

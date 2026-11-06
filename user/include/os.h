@@ -149,6 +149,9 @@ int dup2(int fd, int to);
 int pty(int fds[2]);
 int pty_mode(int fd, struct os_termios *t);
 int pty_size(int fd, int cols, int rows);
+/* The window's Ctrl+C or Ctrl+Z (SIGINT, SIGTSTP) for the job in front: the
+ * process group a shell gave the terminal -> how many got it (0: none). */
+int pty_signal(int master, int sig);
 
 /* Signals (SIGINT, SIGTERM, SIGUSR1, SIGCHLD, ...): a handler runs when the
  * program next makes a system call. */

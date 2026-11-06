@@ -52,7 +52,7 @@ DISK_IMG   ?= disk.img
 
 # FAT32 image GRUB loads into RAM at boot (files for PCs without an IDE disk).
 RAMDISK_DIR := targets/x86_64/ramdisk
-RAMDISK_MB  ?= 96
+RAMDISK_MB  ?= 112
 RAMDISK_GZ  := $(BUILD)/ramdisk.img.gz
 RAMDISK_STAGE := $(BUILD)/ramdisk-files
 # Ladybird, laid out by toolchain/ladybird/install.sh: make LADYBIRD=build/ladybird

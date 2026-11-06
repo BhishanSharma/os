@@ -967,8 +967,20 @@ int Sysdeps<Ioctl>::operator()(int fd, unsigned long request, void *arg, int *re
 	if (request == TIOCGPGRP || request == TIOCSPGRP || request == TIOCSCTTY || request == TIOCNOTTY) {
 		if (sysdep<Isatty>(fd))
 			return ENOTTY;
-		if (request == TIOCGPGRP)                   // (no process groups: the caller leads its own)
-			*(pid_t *)arg = (pid_t)sc(TOS_GETPID);
+		if (!tos::is_pty(fd)) {                     // the console: the caller's group is in front
+			if (request == TIOCGPGRP)
+				*(pid_t *)arg = (pid_t)sc(TOS_JOB, TOS_JOB_GETPGID, 0);
+			return 0;
+		}
+		if (request == TIOCGPGRP) {                 // a pseudo-terminal: the job in front
+			long r = sc(TOS_USOCK, TOS_USOCK_TCGETPGRP, fd);
+			if (r < 0)
+				return ENOTTY;
+			*(pid_t *)arg = (pid_t)r;
+		} else if (request == TIOCSPGRP) {
+			if (sc(TOS_USOCK, TOS_USOCK_TCSETPGRP, fd, *(const pid_t *)arg) < 0)
+				return EINVAL;
+		}
 		return 0;
 	}
 	if (request == TIOCGWINSZ && fd >= 0 && fd <= 2) {

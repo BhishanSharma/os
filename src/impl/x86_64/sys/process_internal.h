@@ -30,6 +30,7 @@ typedef struct {
     struct os_termios t;
     struct os_winsize ws;
     int fg;                           // who set the mode last: Ctrl+C's SIGINT goes there (raw mode)
+    int pgrp;                         // the foreground process group (tcsetpgrp; 0: none set): Ctrl+C, Ctrl+Z
     int eof;                          // Ctrl+D typed: slave reads that return 0
 } pty_t;
 
@@ -90,6 +91,10 @@ typedef struct {
     char cwd[256];                    // its own current directory
     sandbox_t sandbox, sandbox_next;  // what it may use (on: sandboxed); for the next program it starts
     int ctrlc_mode;                   // CTRLC_END / CTRLC_KEY
+    int pgid, sid;                    // its process group and session (0: its own pid)
+    int stop_sig;                     // stopped by this signal (SIGTSTP...): its tasks wait for SIGCONT
+    int stop_reported;                // the parent's wait() has been told of that stop
+    int went_on;                      // SIGCONT after a stop, not yet told to wait(WAIT_CONTINUED)
     pipe_t *tap_out, *tap_in;         // a kernel command run from a Terminal window: its pipes
     char tap_buf[128];
     int tap_len;
@@ -118,7 +123,10 @@ int64_t file_put(file_t *f);              /* one less; the last closes it */
 file_t *fd_get(uint64_t fd);              /* the running program's descriptor, 0: none */
 int fd_free_slot(process_t *p, int from);
 int64_t install(file_t *f);               /* a descriptor for f (or drop it) */
-int64_t signal_send(int64_t pid, uint64_t sig);   /* as the sigsend call */
+int64_t signal_send(int64_t pid, uint64_t sig);   /* as the sigsend call (pid -g: group g) */
+int process_pgid(task_t *t);              /* t's process group (a user program's) */
+int pgrp_alive(int pgid);                 /* 1 if a program of that group is running */
+int signal_group(int g, uint64_t sig);    /* to every program of group g -> how many */
 int signal_handled(int pid, int sig);     /* 1 if that process has a handler for sig */
 int64_t sys_close(uint64_t fd);
 void ends_added(file_t *f);               /* pipe ends: one more reader or writer */

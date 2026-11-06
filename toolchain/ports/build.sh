@@ -47,8 +47,8 @@ for name in $names; do
         log=$root/build/ports/$name.log
         echo "ports: building $name"
         (cd "$work"/*/ && build) > "$log" 2>&1 || { tail -n 40 "$log"; echo "ports: $name failed ($log)" >&2; exit 1; }
-        for f in "$DEST"/bin/*; do
-            if [ -f "$f" ]; then x86_64-pc-terminalos-strip "$f"; fi
+        for f in "$DEST"/bin/*; do                          # (programs; a settings file stays as it is)
+            if [ -f "$f" ] && [ "$(head -c 4 "$f")" = "$(printf '\177ELF')" ]; then x86_64-pc-terminalos-strip "$f"; fi
         done
         rm -rf "$work"
         touch "$DEST/.built"

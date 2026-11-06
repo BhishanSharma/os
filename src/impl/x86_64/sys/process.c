@@ -460,7 +460,8 @@ static int64_t stream_write(file_t *f, pipe_t *pp, const char *src, uint64_t len
 /* ---- Pseudo-terminals (USOCK_PTY; the modes: syscall_usock.c) ---- */
 
 /* The window types (writes to the master): into what the slave reads. In
- * raw mode with ISIG, Ctrl+C is SIGINT for the program that set the mode;
+ * raw mode with ISIG, Ctrl+C is SIGINT (Ctrl+Z SIGTSTP, Ctrl+\ SIGQUIT) for
+ * the foreground process group, or without one the program that set the mode;
  * with ECHO the keys come back to the window. In the cooked mode the window
  * has edited the line (and shown it); Ctrl+D there is an end of file. */
 static int64_t pty_type(file_t *f, const char *src, uint64_t len) {
@@ -470,7 +471,10 @@ static int64_t pty_type(file_t *f, const char *src, uint64_t len) {
     uint64_t from = 0;
     for (uint64_t i = 0; i <= len; i++) {
         unsigned char c = i < len ? (unsigned char)src[i] : 0;
-        int intr = i < len && raw && (t->t.lflag & PTY_ISIG) && c && c == t->t.cc[PTY_VINTR];
+        int sig = !(i < len && raw && (t->t.lflag & PTY_ISIG) && c) ? 0
+                  : c == t->t.cc[PTY_VINTR] ? SIGINT : c == t->t.cc[PTY_VSUSP] ? SIGTSTP
+                  : c == t->t.cc[PTY_VQUIT] ? SIGQUIT : 0;
+        int intr = sig != 0;
         int eof = i < len && !raw && c && c == t->t.cc[PTY_VEOF];
         if (i < len && !intr && !eof) continue;
         if (i > from) {                                   /* the plain bytes before it */
@@ -479,7 +483,8 @@ static int64_t pty_type(file_t *f, const char *src, uint64_t len) {
             if (raw && (t->t.lflag & PTY_ECHO)) pipe_write(to_window, src + from, i - from);
         }
         from = i + 1;
-        if (intr && t->fg) signal_send(t->fg, SIGINT);
+        if (intr && t->pgrp && pgrp_alive(t->pgrp)) signal_group(t->pgrp, (uint64_t)sig);   /* the job in front */
+        else if (intr && t->fg) signal_send(t->fg, (uint64_t)sig);
         if (eof) {
             t->eof++;
             io_event();
@@ -651,8 +656,11 @@ void process_fault(uint64_t vector, const char *name, uint64_t rip, uint64_t add
 
 /* Timer interrupt that arrived in user mode (irq.asm): stop the program if it
  * was asked to, otherwise switch if its time slice is used up. */
+static void stop_point(void);
 void user_check_interrupt(void) {
     bkl_enter();
+    check_killed();
+    stop_point();
     check_killed();
     task_preempt();
     task_freeze_point();
@@ -1166,6 +1174,8 @@ static int64_t sys_shmmap(uint64_t name_ptr, uint64_t size);
 static int64_t sys_port(struct exc_frame *f);
 static int64_t sys_signal(uint64_t sig, uint64_t handler, uint64_t tramp);
 static int64_t sys_sigsend(int64_t pid, uint64_t sig);
+static int64_t sys_job(uint64_t op, int64_t a, int64_t b);
+static int process_sid(task_t *t);
 static void sys_sigreturn(struct exc_frame *f, uint64_t ptr);
 static void deliver_signals(struct exc_frame *f);
 static int64_t sys_registry(uint64_t index, uint64_t ptr);
@@ -1192,6 +1202,7 @@ void syscall_dispatch(struct exc_frame *f) {
     bkl_enter();
     user_access_begin();                              /* SMAP: the call may use the program's memory */
     syscall_dispatch_locked(f);
+    stop_point();                                     /* stopped (Ctrl+Z): wait here for SIGCONT */
     task_freeze_point();                              /* the computer sleeps: wait here */
     user_access_end();
     bkl_leave();
@@ -1275,6 +1286,7 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
         case SYS_CHOWN:   r = sys_chown(f->rdi, f->rsi, f->rdx); break;
         case SYS_RENAME:  r = sys_rename(f->rdi, f->rsi); break;
         case SYS_SANDBOX: r = sys_sandbox(f->rdi, f->rsi, f->rdx); break;
+        case SYS_JOB:     r = sys_job(f->rdi, (int64_t)f->rsi, (int64_t)f->rdx); break;
         case SYS_LISTDIR: r = sys_listdir(f->rdi, f->rsi, f->rdx); break;
         case SYS_MEMINFO: r = sys_meminfo(f->rdi); break;
         case SYS_MMAP:    r = sys_mmap(f->rdi, f->rsi, (int64_t)f->rdx); break;
@@ -1589,6 +1601,7 @@ static int spawn_as(const uint8_t *data, uint32_t size, const char *path, int ar
     }
     t->process = p;
     t->user = *user;
+    p->pgid = p->sid = t->pid;                         /* a group and session of its own (job control) */
     __asm__ volatile("sti");
     return t->pid;
 }
@@ -1617,6 +1630,8 @@ static int wait_for(task_t *t, int foreground) {
     /* A thread can be freed by someone else (process_reap_orphans): stop then. */
 #define GONE(t) ((t)->state == TASK_FREE || (t)->pid != pid)
     while (t->state != TASK_ZOMBIE && !GONE(t)) {
+        if (t->is_user && t->process && ((process_t *)t->process)->stop_sig)   /* a waiter without job control: */
+            sys_sigsend(pid, SIGCONT);                          /* its child goes on */
         if (keyboard_ctrl_c && foreground_pid == pid && !takes_ctrl_c(t)) {
             keyboard_ctrl_c = 0;
             t->kill_code = EXIT_INTERRUPTED;
@@ -1820,8 +1835,9 @@ static int64_t sys_wait(int64_t pid, uint64_t status_ptr, uint64_t flags) {
     if (status_ptr && !user_range_ok(status_ptr, sizeof(int), 1)) return SYSERR_FAULT;
     if (pid == -1 && (flags & WAIT_FOREGROUND)) return SYSERR_BADCALL;
     task_t *me = task_current();
+    if (pid == 0 || pid < -1) pid = -1;                 /* (a group of children: any child) */
     while (1) {
-        task_t *child = 0, *ended = 0;
+        task_t *child = 0, *ended = 0, *stopped = 0;
         for (int i = 0; i < MAX_TASKS; i++) {
             task_t *t = task_at(i);
             if (t->state == TASK_FREE || !t->is_user || t->parent != me->pid) continue;
@@ -1829,9 +1845,22 @@ static int64_t sys_wait(int64_t pid, uint64_t status_ptr, uint64_t flags) {
             if (pid == -1 && t->is_thread) continue;
             child = t;
             if (t->state == TASK_ZOMBIE) { ended = t; break; }
+            process_t *q = t->process;
+            if (q && q->stop_sig && !q->stop_reported && (flags & WAIT_UNTRACED)) { stopped = t; break; }
+            if (q && q->went_on && (flags & WAIT_CONTINUED)) {   /* went on after a stop: told once */
+                q->went_on = 0;
+                if (status_ptr) *(int *)status_ptr = WAIT_WENT_ON;
+                return t->pid;
+            }
         }
         if (!child) return SYSERR_CHILD;
-        if (pid != -1 && !(flags & WAIT_NOHANG)) ended = child;   // wait for this one
+        if (stopped) {                                  /* stopped (Ctrl+Z): told once */
+            process_t *sq = stopped->process;
+            sq->stop_reported = 1;
+            if (status_ptr) *(int *)status_ptr = WAIT_STOPPED | sq->stop_sig;
+            return stopped->pid;
+        }
+        if (pid != -1 && !(flags & (WAIT_NOHANG | WAIT_UNTRACED | WAIT_CONTINUED))) ended = child;   // wait for this one
         if (ended) {
             int ended_pid = ended->pid;
             int code = wait_for(ended, (flags & WAIT_FOREGROUND) != 0);
@@ -2336,6 +2365,9 @@ static int64_t sys_fork(struct exc_frame *f) {
     t->process = c;
     t->user = me->user;
     t->fs_base = me->fs_base;
+    c->pgid = process_pgid(me);                         /* the parent's group and session */
+    c->sid = process_sid(me);
+    c->stop_sig = c->stop_reported = c->went_on = 0;
     return t->pid;
 }
 
@@ -2535,17 +2567,133 @@ int signal_handled(int pid, int sig) {
     return q && sig > 0 && sig < 32 && q->sig_handler[sig] != 0;
 }
 
+/* ---- Job control: process groups, stopping and going on ---------------------------- */
+
+int process_pgid(task_t *t) {
+    process_t *p = t && t->is_user ? t->process : 0;
+    return p ? (p->pgid ? p->pgid : t->pid) : 0;
+}
+
+static int process_sid(task_t *t) {
+    process_t *p = t && t->is_user ? t->process : 0;
+    return p ? (p->sid ? p->sid : t->pid) : 0;
+}
+
+/* A running program (not one of its threads), by pid. */
+static task_t *program_by_pid(int pid) {
+    task_t *t = task_by_pid(pid);
+    return t && t->is_user && !t->is_thread && t->state != TASK_ZOMBIE && t->process ? t : 0;
+}
+
+static int is_program(task_t *t) {
+    return t->state != TASK_FREE && t->state != TASK_ZOMBIE && t->is_user && !t->is_thread && t->process;
+}
+
+int pgrp_alive(int pgid) {
+    for (int i = 0; pgid > 0 && i < MAX_TASKS; i++)
+        if (is_program(task_at(i)) && process_pgid(task_at(i)) == pgid) return 1;
+    return 0;
+}
+
+/* Every program of group g gets the signal -> how many did. */
+int signal_group(int g, uint64_t sig) {
+    int n = 0;
+    for (int i = 0; g > 0 && i < MAX_TASKS; i++) {
+        task_t *t = task_at(i);
+        if (is_program(t) && process_pgid(t) == g && sys_sigsend(t->pid, sig) == 0) n++;
+    }
+    return n;
+}
+
+/* A stopped program waits here, between its system calls (and at a tick in
+ * user mode), until SIGCONT; what it was waiting for in a call goes on. */
+static void stop_point(void) {
+    task_t *t = task_current();
+    process_t *p = t->is_user ? t->process : 0;
+    while (p && p->stop_sig && !t->kill_code) task_sleep(10);
+}
+
+/* The parent hears of a child's stop: SIGCHLD, if it asked for it. */
+static void tell_parent(task_t *t) {
+    task_t *parent = task_by_pid(t->parent);
+    process_t *pp = parent && parent->is_user ? parent->process : 0;
+    if (pp && pp->sig_handler[SIGCHLD]) {
+        pp->sig_pending |= 1u << SIGCHLD;
+        task_interrupt(parent);
+    }
+}
+
+static int64_t sys_job(uint64_t op, int64_t a, int64_t b) {
+    task_t *me = task_current();
+    switch (op) {
+    case JOB_GETPGID:
+    case JOB_GETSID: {
+        task_t *t = a ? program_by_pid((int)a) : me;
+        if (!t || !t->process) return SYSERR_SRCH;
+        return op == JOB_GETPGID ? process_pgid(t) : process_sid(t);
+    }
+    case JOB_SETPGID: {
+        task_t *t = a ? program_by_pid((int)a) : me;
+        if (!t || (t != me && t->parent != me->pid)) return SYSERR_SRCH;   /* itself or a child */
+        if (b < 0) return SYSERR_BADCALL;
+        int g = b ? (int)b : t->pid, sid = process_sid(me);
+        if (process_pgid(t) == g) return 0;                                  /* (already) */
+        if (process_sid(t) != sid || sid == t->pid) return SYSERR_PERM;     /* (a session leader stays) */
+        if (g != t->pid) {                                                   /* into a group of the session */
+            int found = 0;
+            for (int i = 0; i < MAX_TASKS && !found; i++)
+                found = is_program(task_at(i)) && process_pgid(task_at(i)) == g && process_sid(task_at(i)) == sid;
+            task_t *leader = task_by_pid(g);                                 /* a pipeline's first, ended already */
+            if (leader && leader->state != TASK_FREE && (leader->parent == me->pid || leader->parent == me->parent))
+                found = 1;
+            if (!found) return SYSERR_PERM;
+        }
+        ((process_t *)t->process)->pgid = g;
+        return 0;
+    }
+    case JOB_SETSID:
+        if (process_pgid(me) == me->pid) return SYSERR_PERM;                 /* a group leader cannot */
+        P()->pgid = P()->sid = me->pid;
+        return me->pid;
+    case JOB_GETPPID:
+        return me->parent;
+    }
+    return SYSERR_BADCALL;
+}
+
+/* pid > 0: that program; 0: the caller's group; -g: group g. SIGSTOP (and
+ * SIGTSTP, SIGTTIN, SIGTTOU without a handler) stop it, SIGCONT has it go
+ * on; SIGCHLD, SIGCONT and SIGWINCH are nothing to a program without a
+ * handler; anything else without one ends it. */
 static int64_t sys_sigsend(int64_t pid, uint64_t sig) {
+    if (pid == 0 || pid < -1) {
+        if (sig >= 32) return SYSERR_BADCALL;
+        return signal_group(pid ? (int)-pid : process_pgid(task_current()), sig) ? 0 : SYSERR_SRCH;
+    }
     task_t *t = task_by_pid((int)pid);
     if (!t || t->state == TASK_ZOMBIE || !t->is_user) return SYSERR_SRCH;
     if (sig == 0) return 0;                             /* only: is it still running? */
     if (sig < 1 || sig >= 32) return SYSERR_BADCALL;
     if (!user_is_root() && t->user.uid != user_current()->uid) return SYSERR_PERM;
     process_t *q = t->process;
+    if (q && sig == SIGCONT) {
+        if (q->stop_sig) q->went_on = 1;
+        q->stop_sig = q->stop_reported = 0;             /* (its tasks see it within 10 ms) */
+        if (!q->sig_handler[SIGCONT]) return 0;
+    } else if (q && (sig == SIGSTOP || ((sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU) && !q->sig_handler[sig]))) {
+        if (!q->stop_sig) {
+            q->stop_sig = (int)sig;
+            q->stop_reported = 0;
+            tell_parent(t);
+        }
+        return 0;
+    }
     if (sig != SIGKILL && q && q->sig_handler[sig]) {
         q->sig_pending |= 1u << sig;
-    } else if (sig != SIGCHLD) {                         /* the default: it ends */
+    } else if (sig != SIGCHLD && sig != SIGCONT && sig != SIGWINCH) {   /* the default: it ends */
         t->kill_code = sig == SIGKILL ? EXIT_KILLED : sig == SIGINT ? EXIT_INTERRUPTED : 128 + (int)sig;
+    } else {
+        return 0;
     }
     task_interrupt(t);
     return 0;

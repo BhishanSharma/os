@@ -535,7 +535,7 @@ def test_dynamic():
 
 
 def test_ports():
-    """The ports (toolchain/ports): Lua and SQLite run, dynamically linked."""
+    """The ports (toolchain/ports): Lua, SQLite, nano, Vim and bash run, dynamically linked."""
     m = Machine("ports", usb_stick())
     try:
         login(m)
@@ -545,10 +545,20 @@ def test_ports():
         check("sqlite 42" in out, "sqlite3", out)
         out = m.run("nano --version", 60)
         check("GNU nano" in out, "nano", out)
+        out = m.run("vim --version", 60)
+        check("VIM - Vi IMproved 9.1" in out, "vim", out)
+        m.run("vim -es -c \"normal ivim-edit\" -c wq /TMP/v.txt", 60)   # Ex mode: no screen
+        out = m.run("cat /TMP/v.txt")
+        check("vim-edit" in out, "vim edits and saves a file", out)
         out = m.run("bash -c 'echo bash $((6 * 7))'", 60)
         check("bash 42" in out, "bash", out)
         out = m.run("bash -c 'echo from-bash > /TMP/b.txt; cat /TMP/b.txt'", 60)   # PATH, fork, exec
         check("from-bash" in out.replace("echo from-bash", ""), "bash runs the OS's programs", out)
+        # Job control: a stopped job, then going on in the background (process groups, SIGSTOP, SIGCONT).
+        out = m.run("bash -c 'set -m; sleep 20 & sleep 1; kill -STOP $!; sleep 1; jobs; bg; sleep 1; jobs; "
+                    "kill $!; echo jc-done'", 90)
+        check(re.search(r"Stopped\s+sleep 20", out) and re.search(r"Running\s+sleep 20", out) and
+              "jc-done" in out.replace("echo jc-done", ""), "bash job control (jobs, bg)", out)
     finally:
         m.stop()
 

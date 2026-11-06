@@ -109,6 +109,17 @@
 #define SYS_SANDBOX   78 /* sandbox(op, dirs, network), op SANDBOX_* -> 0 */
 #define SANDBOX_NEXT  0  /* for the next program this one starts (the window server, for an app) */
 #define SANDBOX_SELF  1  /* for this program, from now on */
+
+/* Job control: process groups and sessions, as POSIX has them. A program
+ * starts in its parent's group and session; a shell puts each job in a
+ * group of its own and gives the terminal to the one in the foreground
+ * (USOCK_TCSETPGRP), whose Ctrl+C and Ctrl+Z it gets. */
+#define SYS_JOB       79 /* job(op, a, b), op JOB_* */
+#define JOB_GETPGID   0  /* a = pid (0: the caller) -> its process group */
+#define JOB_SETPGID   1  /* a = pid (0: the caller, or its child), b = group (0: = that pid) -> 0 */
+#define JOB_GETSID    2  /* a = pid (0: the caller) -> its session */
+#define JOB_SETSID    3  /* -> the new session: the caller leads it and a new group (SYSERR_PERM: it leads a group) */
+#define JOB_GETPPID   4  /* -> the parent's pid */
 #define SYS_POLLWAIT  67 /* pollwait(gen, ms, net): gen -1 -> the I/O counter; else sleep until it is
                             not gen (a pipe or local socket changed), the next interrupt (net = 1:
                             TCP sockets are watched too) or ms pass -> the counter */
@@ -163,13 +174,20 @@ struct os_wifi {
 #define FUTEX_WAIT  0
 #define FUTEX_WAKE  1
 
+#define SIGHUP    1
 #define SIGINT    2
+#define SIGQUIT   3
 #define SIGKILL   9
 #define SIGUSR1  10
 #define SIGSEGV  11
 #define SIGPIPE  13
 #define SIGTERM  15
 #define SIGCHLD  17
+#define SIGCONT  18   /* go on after a stop (and its handler, if it has one) */
+#define SIGSTOP  19   /* stop: no handler takes it */
+#define SIGTSTP  20   /* Ctrl+Z: stop, unless it has a handler */
+#define SIGTTIN  21   /* a background job read its terminal: stop */
+#define SIGTTOU  22
 #define SIGWINCH 28
 
 /* seek() whence */
@@ -194,6 +212,10 @@ struct os_wifi {
 /* wait() flags */
 #define WAIT_NOHANG     1   /* return 0 at once if it has not ended */
 #define WAIT_FOREGROUND 2   /* give it the keyboard (and Ctrl+C) until it ends */
+#define WAIT_UNTRACED   4   /* also a child that stopped: *status = WAIT_STOPPED | the signal */
+#define WAIT_STOPPED    0x40000000
+#define WAIT_CONTINUED  8   /* also a child that went on after a stop: *status = WAIT_WENT_ON */
+#define WAIT_WENT_ON    0x20000000
 
 /* ctrlc() modes */
 #define CTRLC_END    0   /* default: Ctrl+C ends the program (exit code 130) */
@@ -467,7 +489,8 @@ struct os_regnode {
  * types into the slave end (the shell and its programs, as 0-2). In the
  * cooked mode (PTY_ICANON) the window edits the line and sends it whole; in
  * raw mode every key goes through as it is typed, with PTY_ISIG Ctrl+C is
- * SIGINT for the program that set the mode, with PTY_ECHO it is echoed.
+ * SIGINT (Ctrl+Z SIGTSTP) for the foreground process group (USOCK_TCSETPGRP),
+ * without one for the program that set the mode; with PTY_ECHO it is echoed.
  * Ctrl+D in the cooked mode: the slave's next read returns 0 (end of file).
  * The modes are Linux's termios (flags and c_cc indices). */
 #define USOCK_PTY     10   /* a = int fds[2]: [0] the master, [1] the slave -> 0 */
@@ -475,11 +498,16 @@ struct os_regnode {
 #define USOCK_TCSET   12   /* a = fd, b = const struct os_termios * -> 0 (the caller: Ctrl+C's target) */
 #define USOCK_WINSZ   13   /* a = fd, b = struct os_winsize * -> 0 */
 #define USOCK_SETWINSZ 14  /* a = fd, b = const struct os_winsize *: SIGWINCH to who set the mode -> 0 */
+#define USOCK_TCGETPGRP 15 /* a = fd -> the foreground process group (none set yet: the caller's) */
+#define USOCK_TCSETPGRP 16 /* a = fd, b = group -> 0 (Ctrl+C, Ctrl+Z and the reads are that group's) */
+#define USOCK_PTYSIG   17  /* a = the master, b = signal: to the foreground group -> how many got it (0: none) */
 #define PTY_ISIG    0x1
 #define PTY_ICANON  0x2
 #define PTY_ECHO    0x8
 #define PTY_VINTR   0      /* c_cc indices */
+#define PTY_VQUIT   1
 #define PTY_VEOF    4
+#define PTY_VSUSP   10
 
 struct os_termios {
     unsigned int iflag, oflag, cflag, lflag;

@@ -111,8 +111,20 @@ static int64_t pty_op(uint64_t op, file_t *f, uint64_t b) {
         int changed = ws.rows != t->ws.rows || ws.cols != t->ws.cols;
         t->ws = ws;
         if (changed && t->fg && signal_handled(t->fg, SIGWINCH)) signal_send(t->fg, SIGWINCH);
+        if (changed && t->pgrp && pgrp_alive(t->pgrp)) signal_group(t->pgrp, SIGWINCH);
         return 0;
     }
+    case USOCK_TCGETPGRP:                               /* none set (or it ended): the first who asks */
+        if (!t->pgrp || !pgrp_alive(t->pgrp)) t->pgrp = process_pgid(task_current());
+        return t->pgrp;
+    case USOCK_TCSETPGRP:
+        if ((int64_t)b <= 0) return SYSERR_BADCALL;
+        t->pgrp = (int)b;
+        return 0;
+    case USOCK_PTYSIG:                                  /* the window: Ctrl+C, Ctrl+Z in the cooked mode */
+        if (f->side != 0) return SYSERR_PERM;
+        if (!t->pgrp || !pgrp_alive(t->pgrp)) return 0;
+        return signal_group(t->pgrp, b);
     }
     return SYSERR_BADCALL;
 }
@@ -140,7 +152,7 @@ int64_t sys_usock(uint64_t op, uint64_t a, uint64_t b, uint64_t c) {
     if (op == USOCK_PAIR || op == USOCK_PTY) return new_pair(a, op == USOCK_PTY);
     file_t *f = fd_get(a);
     if (!f) return SYSERR_BADFD;
-    if (op >= USOCK_TCGET && op <= USOCK_SETWINSZ) return pty_op(op, f, b);
+    if (op >= USOCK_TCGET && op <= USOCK_PTYSIG) return pty_op(op, f, b);
     switch (op) {
     case USOCK_NONBLOCK:
         if (f->kind == F_FILE || f->kind == F_CONSOLE) return SYSERR_BADFD;

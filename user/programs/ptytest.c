@@ -1,5 +1,7 @@
 // ptytest - checks the pseudo-terminals (USOCK_PTY): a cooked line, Ctrl+D
-// as an end of file, raw mode with echo, Ctrl+C as SIGINT, the window size.
+// as an end of file, raw mode with echo, Ctrl+C as SIGINT, the window size,
+// and job control: a child's group in front, the window's Ctrl+Z stopping
+// it, wait() telling of the stop and of SIGCONT, Ctrl+C ending it.
 // Prints "ptytest: all ok" (system test `kernel`).
 #include <stdio.h>
 #include <string.h>
@@ -53,6 +55,35 @@ int main(void) {
     struct os_winsize w;
     os_syscall(SYS_USOCK, USOCK_WINSZ, s, (long)&w);
     check("window size", w.cols == 132 && w.rows == 43);
+
+    /* Job control. A new program leads a group of its own; the first to ask
+     * has the terminal; a child in a group of its own gets it, then the
+     * window's Ctrl+Z (pty_signal) stops it and Ctrl+C ends it. */
+    int me = (int)os_syscall(SYS_JOB, JOB_GETPGID, 0, 0);
+    check("own process group", me == getpid());
+    check("the terminal: mine", os_syscall(SYS_USOCK, USOCK_TCGETPGRP, s, 0) == me);
+    fflush(stdout);                                    /* (the child would print it again) */
+    int child = fork();
+    if (child == 0) {
+        signal(SIGINT, 0);                             /* Ctrl+C ends it (not our handler) */
+        os_syscall(SYS_JOB, JOB_SETPGID, 0, 0);
+        for (;;) sleep_ms(10);
+    }
+    os_syscall(SYS_JOB, JOB_SETPGID, child, child);   /* (both, as a shell does) */
+    check("a child's group", os_syscall(SYS_JOB, JOB_GETPGID, child, 0) == child);
+    os_syscall(SYS_USOCK, USOCK_TCSETPGRP, s, child);
+    check("Ctrl+Z: the job", pty_signal(m, SIGTSTP) == 1);
+    int st = 0;
+    int got = wait(child, &st, WAIT_UNTRACED);
+    check("wait: stopped", got == child && st == (WAIT_STOPPED | SIGTSTP));
+    sigsend(child, SIGCONT);
+    got = wait(child, &st, WAIT_CONTINUED);
+    check("wait: went on", got == child && st == WAIT_WENT_ON);
+    check("Ctrl+C: the job", pty_signal(m, SIGINT) == 1);
+    got = wait(child, &st, 0);
+    check("it ended", got == child && st == 130);
+    check("no job: nobody", pty_signal(m, SIGINT) == 0);
+    os_syscall(SYS_USOCK, USOCK_TCSETPGRP, s, me);
 
     close(m);
     check("master closed: eof", read(s, buf, sizeof(buf)) == 0);

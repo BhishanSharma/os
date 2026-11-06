@@ -100,8 +100,12 @@ recipes (a checked source, a build function) for Lua, SQLite and bash, built
 before the OS and put on the RAM disk; the Terminal window runs its shell on
 a pseudo-terminal with termios (raw mode, Ctrl+C, the window size) and draws
 a VT100 screen, so bash's readline and full-screen programs work
-(docs/TOOLCHAIN.md). Cuts: no job control or process groups yet; no package
-download on the OS itself (ports are built with the OS).
+(docs/TOOLCHAIN.md). Since then: ncurses, nano and Vim, and job control
+(process groups and sessions, SIGTSTP/SIGSTOP/SIGCONT, `waitpid` with
+WUNTRACED and WCONTINUED, the terminal's foreground group): bash's Ctrl+Z,
+`jobs`, `fg` and `bg` work. Cuts: no SIGTTIN for a background job that reads
+the terminal; no package download on the OS itself (ports are built with
+the OS).
 
 Desktop polish, lean: a clipboard every program shares (`ui_clip_set` /
 `ui_clip_get`: Ctrl+C, Ctrl+X, Ctrl+V in fields, TextEdit and Terminal);
@@ -193,8 +197,8 @@ laptop check, and a commit. Every stage adds its own system test to
 * Signals: SIGINT (Ctrl+C), SIGTERM, SIGKILL, SIGCHLD, SIGSEGV; `signal()`
   handlers run on the user stack; `kill(pid, sig)`.
 * `fork` with copy-on-write (stage 1), `exec` (replace image), `waitpid`.
-* Cut: no job control (process groups) beyond today's fg/bg; permissions stay
-  the home-folder rule until stage 9.
+* Cut: no job control (process groups) beyond today's fg/bg (it came later,
+  with the ports); permissions stay the home-folder rule until stage 9.
 * Test `pipes`: `ls | wc`, `echo hi > f; cat < f`, fork/exec/wait, Ctrl+C.
 
 ## 5. Device registry (IOKit-lite)

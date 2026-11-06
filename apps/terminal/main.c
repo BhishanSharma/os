@@ -625,7 +625,16 @@ static void key(int k) {
         put('\n');
         line_len = cur = secret = 0;
         recall = -1;
+        if (pty_signal(master, SIGINT) > 0) return;     /* the job in front (bash gave it the terminal) */
         if (interrupt() == 0) send_line("\x03");       /* a kernel command's question, or a new prompt */
+    } else if (k == 26) {                               /* Ctrl+Z: stop the job in front (bash: fg, bg) */
+        if (pty_signal(master, SIGTSTP) > 0) {
+            put('^');
+            put('Z');
+            put('\n');
+            line_len = cur = secret = 0;
+            recall = -1;
+        }
     } else if (k == 4 && !line_len) {                   /* Ctrl+D: the end of what is typed */
         write(master, "\x04", 1);
     } else if (k == 22) {                               /* Ctrl+V */
