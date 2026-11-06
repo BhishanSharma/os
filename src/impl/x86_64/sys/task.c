@@ -22,10 +22,12 @@ extern void task_start_frame(void);
 
 int bkl_depth_get(void);                  // sys/smp.c
 void bkl_depth_set(int depth);
+void bkl_switched(void);
 
 #define KSTACK_SIZE (64 * 1024)   // kernel commands run on it too (kcommand: TLS, FAT32)
 
 static task_t tasks[MAX_TASKS];
+static volatile int task_hi;              /* slots in use are below it: the scans stop there */
 static task_t *cur[MAX_CPUS];
 static task_t *idle_of[MAX_CPUS];
 static int slice_left[MAX_CPUS];
@@ -48,7 +50,7 @@ uint64_t task_root_on(int cpu) { return cur[cpu] ? cur[cpu]->root : 0; }
 task_t *task_at(int index) { return index >= 0 && index < MAX_TASKS ? &tasks[index] : 0; }
 
 task_t *task_by_pid(int pid) {
-    for (int i = 0; i < MAX_TASKS; i++)
+    for (int i = 0; i < task_hi; i++)
         if (tasks[i].state != TASK_FREE && tasks[i].pid == pid) return &tasks[i];
     return 0;
 }
@@ -58,6 +60,7 @@ static task_t *alloc_task(const char *name) {
         if (tasks[i].state != TASK_FREE) continue;
         task_t *t = &tasks[i];
         memset(t, 0, sizeof(*t));
+        if (i >= task_hi) task_hi = i + 1;
         k_snprintf(t->name, sizeof(t->name), "%s", name);
         t->root = paging_kernel_root();
         t->start_tick = get_tick();
@@ -90,9 +93,36 @@ static int alloc_stack(task_t *t) {
     return 0;
 }
 
+static volatile int freezing;
+
+/* Without the lock (a peek: schedule() looks again under it): a task this
+ * core could run, or a sleeper whose time has come. */
+static int work_for(int me) {
+    uint32_t now = timer_ms();
+    for (int i = 0, n = task_hi; i < n; i++) {
+        task_t *t = &tasks[i];
+        int s = *(volatile task_state_t *)&t->state;
+        if (s == TASK_READY) {
+            if (t == cur[me] || t->is_idle || t->running_on >= 0 || (t->frozen && freezing)) continue;
+            if (t->is_user || t->pinned == me) return 1;
+        } else if ((s == TASK_SLEEPING || (s == TASK_BLOCKED && t->has_deadline)) &&
+                   (int32_t)(now - t->wake_tick) >= 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* An idle core waits outside the kernel lock and takes it only when there
+ * is something to run: it looked for work under the lock at every interrupt
+ * (a thousand a second), the cores with programs waiting behind it. */
 static void idle_loop(void) {
     for (;;) {
-        cpu_wait();
+        if (!work_for(cpu_index())) {
+            int depth = bkl_drop();
+            while (!work_for(cpu_index())) __asm__ volatile("sti; hlt");   /* (an interrupt a millisecond) */
+            bkl_take(depth);
+        }
         task_yield();
     }
 }
@@ -203,7 +233,7 @@ int task_block(const void *chan, uint32_t timeout_ms) {
 
 void task_wakeup(const void *chan) {
     uint64_t flags = irq_save();
-    for (int i = 0; i < MAX_TASKS; i++)
+    for (int i = 0; i < task_hi; i++)
         if (tasks[i].state == TASK_BLOCKED && tasks[i].wait_chan == chan) {
             tasks[i].wait_chan = 0;
             tasks[i].state = TASK_READY;
@@ -238,9 +268,8 @@ void kmutex_unlock(kmutex_t *m) {
     }
 }
 
-static volatile int freezing;
-
 void task_freeze(int on) { freezing = on; }
+int task_freezing(void) { return freezing; }
 
 void task_freeze_point(void) {
     task_t *me = task_current();
@@ -260,7 +289,8 @@ static void schedule(void) {
     int me = cpu_index();
     task_t *prev = cur[me];
     uint32_t now = timer_ms();
-    for (int i = 0; i < MAX_TASKS; i++)
+    int n = task_hi;
+    for (int i = 0; i < n; i++)
         if ((tasks[i].state == TASK_SLEEPING || (tasks[i].state == TASK_BLOCKED && tasks[i].has_deadline))
             && (int32_t)(now - tasks[i].wake_tick) >= 0)
             tasks[i].state = TASK_READY;
@@ -269,8 +299,8 @@ static void schedule(void) {
     // nothing else can run (the task running now may go on: it is "ours").
     int start = (int)(prev - tasks);
     task_t *next = 0;
-    for (int i = 1; i <= MAX_TASKS; i++) {
-        task_t *t = &tasks[(start + i) % MAX_TASKS];
+    for (int i = 1; i <= n; i++) {
+        task_t *t = &tasks[(start + i) % n];
         if (t == prev ? (t->state == TASK_READY && !t->is_idle && !(t->frozen && freezing)) : may_run_here(t, me)) {
             next = t;
             break;
@@ -294,6 +324,7 @@ static void schedule(void) {
         __asm__ volatile("wrmsr" : : "c"(0xC0000100u), "a"((uint32_t)next->fs_base),
                          "d"((uint32_t)(next->fs_base >> 32)));
         task_switch(&prev->rsp, next->rsp);
+        bkl_switched();                                  /* (bklstat: the lock is held for prev now) */
         /* Back in prev: EFLAGS.AC (SMAP) does not travel with the task. */
         if (flags & (1u << 18)) user_access_begin();
         else user_access_end();
@@ -338,6 +369,7 @@ void task_reap(task_t *t) {
     kfree(t->kstack);
     t->kstack = 0;
     t->state = TASK_FREE;
+    while (task_hi > 0 && tasks[task_hi - 1].state == TASK_FREE) task_hi--;
     irq_restore(flags);
 }
 
@@ -349,4 +381,18 @@ void task_tick(void) {
 void task_preempt(void) {
     int me = cpu_index();
     if (cur[me] && --slice_left[me] <= 0) schedule();
+}
+
+/* A tick of a user program (no lock): 1 if its slice ends and another task
+ * waits for a core, so task_preempt (under the lock) switches; otherwise
+ * the slice goes on, or a new one starts when nobody else wants the core. */
+int task_slice_over(void) {
+    int me = cpu_index();
+    if (slice_left[me] > 1) {
+        slice_left[me]--;
+        return 0;
+    }
+    if (work_for(me)) return 1;
+    slice_left[me] = TASK_SLICE;
+    return 0;
 }

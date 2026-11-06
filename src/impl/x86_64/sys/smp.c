@@ -49,34 +49,169 @@ int cpu_index(void) {
 }
 
 /* ---- The big kernel lock ---------------------------------------------------------- */
-
 static volatile int bkl_owner = -1;
 static volatile int bkl_depth;
-
 static void tlb_catch_up(int me);
+
+/* Statistics (`bklstat`): each core's waits; the time it was held, by
+ * what the task running on the holder was doing: a system call (0-79), a
+ * user program outside any (its page faults, its timer ticks), an idle core,
+ * a kernel task (the shell, logd), or before tasks. The scheduler moves the
+ * time to the next task at each switch. Only the owner writes st_since and
+ * st_slot. */
+#define SL_USER  96                        /* (after the system calls' numbers) */
+#define SL_IDLE  97
+#define SL_KTASK 98
+#define SL_BOOT  99
+#define BKL_SLOTS 100
+static uint64_t st_held[BKL_SLOTS], st_takes[BKL_SLOTS], st_wait[BKL_SLOTS];
+static uint64_t st_spin[MAX_CPUS], st_waits[MAX_CPUS], st_got[MAX_CPUS];
+static uint64_t st_since, st_tsc0;
+static uint32_t st_ms0;
+static int st_slot;
+
+static inline uint64_t tsc_now(void) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return (uint64_t)hi << 32 | lo;
+}
+
+static int holder_slot(void) {
+    task_t *t = task_current();
+    if (!t) return SL_BOOT;
+    if (t->is_idle) return SL_IDLE;
+    if (!t->is_user) return SL_KTASK;
+    int n = t->sysno - 1;
+    return n >= 0 && n < SL_USER ? n : SL_USER;
+}
+
+/* Taking, leaving and dropping the lock change the owner and the depth in two
+ * steps, and an interrupt on this core takes the lock too (isr.c, the timer):
+ * between the steps it saw the lock as its own at depth 0, took it "again",
+ * let go of it, and the second step then cleared the owner under another
+ * core that had just taken it (two cores in the kernel). So: interrupts off. */
+static inline uint64_t bkl_irq_off(void) {
+    uint64_t flags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+    return flags;
+}
+
+static inline void bkl_irq_on(uint64_t flags) {
+    if (flags & (1u << 9)) __asm__ volatile("sti" ::: "memory");
+}
 
 /* Spins with interrupts off, so it also answers TLB shootdowns (below):
  * the lock's owner may be waiting for this core to flush. */
 static void bkl_acquire(int me) {
-    while (__sync_val_compare_and_swap(&bkl_owner, -1, me) != -1) {
-        tlb_catch_up(me);
-        __asm__ volatile("pause");
+    if (__sync_val_compare_and_swap(&bkl_owner, -1, me) != -1) {
+        uint64_t t0 = tsc_now();
+        while (__sync_val_compare_and_swap(&bkl_owner, -1, me) != -1) {
+            tlb_catch_up(me);
+            __asm__ volatile("pause");
+        }
+        uint64_t spun = tsc_now() - t0;
+        st_spin[me] += spun;
+        st_waits[me]++;
+        st_wait[holder_slot()] += spun;
     }
+    st_got[me]++;
+    st_since = tsc_now();
+    st_slot = holder_slot();
 }
 
 static void bkl_release(void) {
+    st_held[st_slot] += tsc_now() - st_since;
+    st_takes[st_slot]++;
     __atomic_store_n(&bkl_owner, -1, __ATOMIC_RELEASE);
+}
+
+/* The scheduler switched tasks with the lock held: from now on it is held
+ * for the task that runs. */
+void bkl_switched(void) {
+    if (!smp_on || bkl_owner != cpu_index()) return;
+    uint64_t now = tsc_now();
+    st_held[st_slot] += now - st_since;
+    st_since = now;
+    st_slot = holder_slot();
+}
+
+static const char *slot_name(int i) {
+    static const char *const extra[] = { "[user: faults, ticks]", "[idle cores]", "[kernel tasks]", "[boot]" };
+    extern const char *const bkl_sys_names[];
+    return i >= SL_USER ? extra[i - SL_USER] : bkl_sys_names[i] ? bkl_sys_names[i] : "?";
+}
+
+static void top_slots(const uint64_t *v, const uint64_t *count, uint64_t per_ms, uint32_t ms, int rows) {
+    int shown[BKL_SLOTS] = { 0 };
+    for (int k = 0; k < rows; k++) {
+        int best = -1;
+        for (int i = 0; i < BKL_SLOTS; i++)
+            if (!shown[i] && v[i] && (best < 0 || v[i] > v[best])) best = i;
+        if (best < 0) break;
+        shown[best] = 1;
+        uint64_t t = v[best] / per_ms;
+        kprintf("    %-22s %6lu ms %3lu%%", slot_name(best), t, ms ? t * 100 / ms : 0);
+        if (count) kprintf("  %8lu times, %lu us each", count[best], count[best] ? v[best] * 1000 / per_ms / count[best] : 0);
+        kprintf("\n");
+    }
+}
+
+const char *const bkl_sys_names[SL_USER] = {
+    [0] = "exit", [1] = "write", [2] = "read", [3] = "open", [4] = "close", [5] = "sbrk",
+    [6] = "sleep", [7] = "uptime", [8] = "time", [9] = "getkey", [10] = "console", [11] = "readdir",
+    [12] = "unlink", [13] = "getuser", [14] = "getpid", [15] = "yield", [16] = "spawn",
+    [17] = "wait", [18] = "kill", [19] = "taskinfo", [20] = "chdir", [21] = "getcwd",
+    [22] = "kcommand", [23] = "ctrlc", [24] = "uname", [25] = "mouse", [26] = "gfx",
+    [27] = "resolve", [28] = "connect", [29] = "listen", [30] = "accept", [31] = "send",
+    [32] = "recv", [33] = "sockclose", [34] = "seek", [35] = "sound", [36] = "mkdir", [37] = "stat",
+    [38] = "listdir", [39] = "meminfo", [40] = "mmap", [41] = "munmap", [42] = "shmmap",
+    [43] = "fork", [44] = "exec", [45] = "thread", [46] = "thread_exit", [47] = "futex",
+    [48] = "port_create", [49] = "port_send", [50] = "port_receive", [51] = "port_register",
+    [52] = "port_lookup", [53] = "port_close", [54] = "pipe", [55] = "dup", [56] = "dup2",
+    [57] = "signal", [58] = "sigsend", [59] = "sigreturn", [60] = "registry", [61] = "auth",
+    [62] = "system", [63] = "tcb_set", [64] = "sockinfo", [65] = "fdinfo", [66] = "usock",
+    [67] = "pollwait", [68] = "shmfd", [69] = "mmap2", [70] = "fdflags", [71] = "exepath",
+    [72] = "mmapat", [73] = "fdpath", [74] = "statx", [75] = "chmod", [76] = "chown",
+    [77] = "rename", [78] = "sandbox", [79] = "job", [80] = "poll"
+};
+
+void bkl_stats_print(int reset) {
+    uint32_t ms = timer_ms() - st_ms0;
+    uint64_t cycles = tsc_now() - st_tsc0;
+    uint64_t per_ms = ms ? cycles / ms : 1;
+    if (!per_ms) per_ms = 1;
+    kprintf("The big kernel lock over %u.%u s, %d core%s:\n", ms / 1000, ms % 1000 / 100, ncpus, ncpus == 1 ? "" : "s");
+    for (int i = 0; i < ncpus; i++) {
+        uint64_t w = st_spin[i] / per_ms;
+        kprintf("  core %d: waited %lu ms (%lu.%lu%%) in %lu waits; took it %lu times\n", i, w,
+                ms ? w * 100 / ms : 0, ms ? w * 1000 / ms % 10 : 0, st_waits[i], st_got[i]);
+    }
+    kprintf("  held, by what the task on that core was doing:\n");
+    top_slots(st_held, st_takes, per_ms, ms, 14);
+    kprintf("  waited for, by what the waiting task was doing:\n");
+    top_slots(st_wait, 0, per_ms, ms, 10);
+    if (reset) {
+        __asm__ volatile("cli");
+        for (int i = 0; i < BKL_SLOTS; i++) st_held[i] = st_takes[i] = st_wait[i] = 0;
+        for (int i = 0; i < MAX_CPUS; i++) st_spin[i] = st_waits[i] = st_got[i] = 0;
+        st_tsc0 = tsc_now();
+        st_ms0 = timer_ms();
+        __asm__ volatile("sti");
+        kprintf("  (counting again from now)\n");
+    }
 }
 
 void bkl_enter(void) {
     if (!smp_on) return;
+    uint64_t flags = bkl_irq_off();
     int me = cpu_index();
     if (bkl_owner == me) {
         bkl_depth++;
-        return;
+    } else {
+        bkl_acquire(me);
+        bkl_depth = 1;
     }
-    bkl_acquire(me);
-    bkl_depth = 1;
+    bkl_irq_on(flags);
 }
 
 int bkl_try_enter(void) {
@@ -88,18 +223,25 @@ int bkl_try_enter(void) {
 }
 
 void bkl_leave(void) {
-    if (!smp_on || bkl_owner != cpu_index()) return;
-    if (--bkl_depth <= 0) {
+    if (!smp_on) return;
+    uint64_t flags = bkl_irq_off();
+    if (bkl_owner == cpu_index() && --bkl_depth <= 0) {
         bkl_depth = 0;
         bkl_release();
     }
+    bkl_irq_on(flags);
 }
 
 int bkl_drop(void) {
-    if (!smp_on || bkl_owner != cpu_index()) return 0;
-    int depth = bkl_depth;
-    bkl_depth = 0;
-    bkl_release();
+    if (!smp_on) return 0;
+    uint64_t flags = bkl_irq_off();                 /* (as cpu_wait) */
+    int depth = 0;
+    if (bkl_owner == cpu_index()) {
+        depth = bkl_depth;
+        bkl_depth = 0;
+        bkl_release();
+    }
+    bkl_irq_on(flags);
     return depth;
 }
 
@@ -199,10 +341,8 @@ void ap_timer_interrupt(uint64_t cs) {
     int me = cpu_index();
     if (++ap_sub[me] < TIMER_HW_FREQ / TIMER_FREQ) return;
     ap_sub[me] = 0;
-    bkl_enter();
-    task_tick();
-    if (cs & 3) user_check_interrupt();
-    bkl_leave();
+    task_tick();                                    /* (its task's own count: no lock) */
+    if (cs & 3) user_check_interrupt();             /* (the lock only if there is work for it) */
 }
 
 /* A core arrives here from the trampoline: interrupts off, on its own stack. */

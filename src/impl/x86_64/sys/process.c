@@ -515,6 +515,64 @@ static int64_t pty_read(file_t *f, char *dst, uint64_t len) {
     }
 }
 
+/* What poll() needs of a pipe, local socket, file or the console: SOCK_*. */
+static int64_t fd_flags(file_t *fl) {
+    int64_t r;
+    if (fl->kind == F_PIPE_R || fl->kind == F_PIPE_W) {
+        uint32_t waiting, room;
+        int no_writers, no_readers;
+        pipe_state(fl->pipe, &waiting, &room, &no_writers, &no_readers);
+        if (fl->kind == F_PIPE_R)
+            r = (waiting || no_writers ? SOCK_READABLE : 0) | (no_writers ? SOCK_HANGUP : 0);
+        else
+            r = (room || no_readers ? SOCK_WRITABLE : 0) | (no_readers ? SOCK_HANGUP : 0);
+    } else if (fl->kind == F_USOCK) {
+        r = fl->us && fl->us->pty ? SOCK_PTY : SOCK_LOCAL;
+        if (!fl->us) return r | SOCK_HANGUP;
+        if (fl->us->pty && fl->side == 1 && fl->us->pty->eof) r |= SOCK_READABLE;
+        uint32_t waiting, room;
+        int no_writers, no_readers;
+        pipe_state(fl->us->pipe[fl->side], &waiting, &room, &no_writers, &no_readers);
+        if (waiting || no_writers || fl->us->fdq_n[fl->side]) r |= SOCK_READABLE;
+        if (no_writers) r |= SOCK_HANGUP;
+        pipe_state(fl->us->pipe[!fl->side], &waiting, &room, &no_writers, &no_readers);
+        if (room || no_readers) r |= SOCK_WRITABLE;
+    } else if (fl->kind == F_SHM) {
+        r = SOCK_READABLE | SOCK_WRITABLE | SOCK_SHM;
+    } else if (fl->kind == F_ULISTEN) {
+        r = SOCK_LOCAL | SOCK_LISTENING | (fl->ul->n ? SOCK_READABLE : 0);
+    } else if (fl->kind == F_CONSOLE) {
+        r = SOCK_WRITABLE;                                /* (the keyboard: read() waits) */
+    } else {
+        r = SOCK_READABLE | SOCK_WRITABLE;                /* files never wait */
+    }
+    return r;
+}
+
+/* poll() of the kernel's descriptors in one call (SYS_POLL): a browser's
+ * event loop asked fdinfo of each, then pollwait, every time round. */
+static int64_t sys_poll(uint64_t ptr, uint64_t n, int64_t ms) {
+    if (n > POLL_MAX || !user_range_ok(ptr, n * sizeof(struct os_pollfd), 1)) return SYSERR_FAULT;
+    struct os_pollfd *fds = (struct os_pollfd *)ptr;
+    uint32_t start = timer_ms();
+    for (;;) {
+        uint64_t gen = io_generation();
+        int ready = 0;
+        for (uint64_t i = 0; i < n; i++) {
+            int fd = fds[i].fd;
+            file_t *fl = fd >= 0 ? fd_get((uint64_t)fd) : 0;
+            int64_t got = fd < 0 ? 0 : fl ? fd_flags(fl) : -1;
+            fds[i].got = (int)got;
+            if (got < 0 || (got & (fds[i].events | SOCK_HANGUP))) ready++;
+        }
+        uint32_t spent = timer_ms() - start;
+        if (ready || ms == 0 || (ms > 0 && spent >= (uint64_t)ms)) return ready;
+        io_wait(gen, ms < 0 ? NO_LIMIT_MS : (uint32_t)(ms - spent));
+        check_killed();
+        if (P()->sig_pending) return 0;                 /* (the handler runs; the caller asks again) */
+    }
+}
+
 /* poll()'s wait: until a pipe or local socket changes, ms pass, or (net) the
  * next interrupt, since a packet may have come. */
 static int64_t sys_pollwait(int64_t gen, uint64_t ms, uint64_t net) {
@@ -671,6 +729,9 @@ void process_fault(uint64_t vector, const char *name, uint64_t rip, uint64_t add
  * was asked to, otherwise switch if its time slice is used up. */
 static void stop_point(void);
 void user_check_interrupt(void) {
+    task_t *t = task_current();                       /* nothing for the kernel: no lock */
+    process_t *p = t && t->is_user ? t->process : 0;
+    if (p && !t->kill_code && !p->stop_sig && !task_freezing() && !task_slice_over()) return;
     bkl_enter();
     check_killed();
     stop_point();
@@ -1212,12 +1273,15 @@ void syscall_dispatch(struct exc_frame *f) {
         f->rax = (uint64_t)task_current()->pid;
         return;
     }
+    task_t *self = task_current();
+    self->sysno = (int)f->rax + 1;                    /* (bklstat: who holds the lock for what) */
     bkl_enter();
     user_access_begin();                              /* SMAP: the call may use the program's memory */
     syscall_dispatch_locked(f);
     stop_point();                                     /* stopped (Ctrl+Z): wait here for SIGCONT */
     task_freeze_point();                              /* the computer sleeps: wait here */
     user_access_end();
+    self->sysno = 0;
     bkl_leave();
 }
 
@@ -1259,37 +1323,10 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
             break;
         case SYS_FDINFO: {                                /* what poll() needs of a pipe, file or console */
             file_t *fl = fd_get(f->rdi);
-            if (!fl) { r = SYSERR_BADFD; break; }
-            if (fl->kind == F_PIPE_R || fl->kind == F_PIPE_W) {
-                uint32_t waiting, room;
-                int no_writers, no_readers;
-                pipe_state(fl->pipe, &waiting, &room, &no_writers, &no_readers);
-                if (fl->kind == F_PIPE_R)
-                    r = (waiting || no_writers ? SOCK_READABLE : 0) | (no_writers ? SOCK_HANGUP : 0);
-                else
-                    r = (room || no_readers ? SOCK_WRITABLE : 0) | (no_readers ? SOCK_HANGUP : 0);
-            } else if (fl->kind == F_USOCK) {
-                r = fl->us && fl->us->pty ? SOCK_PTY : SOCK_LOCAL;
-                if (!fl->us) { r |= SOCK_HANGUP; break; }
-                if (fl->us->pty && fl->side == 1 && fl->us->pty->eof) r |= SOCK_READABLE;
-                uint32_t waiting, room;
-                int no_writers, no_readers;
-                pipe_state(fl->us->pipe[fl->side], &waiting, &room, &no_writers, &no_readers);
-                if (waiting || no_writers || fl->us->fdq_n[fl->side]) r |= SOCK_READABLE;
-                if (no_writers) r |= SOCK_HANGUP;
-                pipe_state(fl->us->pipe[!fl->side], &waiting, &room, &no_writers, &no_readers);
-                if (room || no_readers) r |= SOCK_WRITABLE;
-            } else if (fl->kind == F_SHM) {
-                r = SOCK_READABLE | SOCK_WRITABLE | SOCK_SHM;
-            } else if (fl->kind == F_ULISTEN) {
-                r = SOCK_LOCAL | SOCK_LISTENING | (fl->ul->n ? SOCK_READABLE : 0);
-            } else if (fl->kind == F_CONSOLE) {
-                r = SOCK_WRITABLE;                        /* (the keyboard: read() waits) */
-            } else {
-                r = SOCK_READABLE | SOCK_WRITABLE;        /* files never wait */
-            }
+            r = fl ? fd_flags(fl) : SYSERR_BADFD;
             break;
         }
+        case SYS_POLL:    r = sys_poll(f->rdi, f->rsi, (int64_t)f->rdx); break;
         case SYS_SEEK:    r = sys_seek(f->rdi, (int64_t)f->rsi, f->rdx); break;
         case SYS_SOUND:   r = sys_sound(f->rdi, f->rsi, f->rdx); break;
         case SYS_MKDIR:   r = sys_mkdir(f->rdi); break;

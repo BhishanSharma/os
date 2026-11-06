@@ -153,7 +153,12 @@ class Machine:
                 return m
             for bad in ("System halted", "KERNEL PANIC"):
                 if bad in out[start:] and bad not in pattern:
-                    raise TestError("the kernel crashed:\n" + tail(out[start:]))
+                    for _ in range(20):                    # the rest of the panic screen
+                        if "System halted" in out[start:]:
+                            break
+                        time.sleep(0.25)
+                        out = self.text()
+                    raise TestError("the kernel crashed:\n" + tail(out[start:], 40))
             if self.proc.poll() is not None:
                 raise TestError("QEMU ended (%s)" % self.proc.stderr.read().decode(errors="replace").strip())
             if time.time() > end:

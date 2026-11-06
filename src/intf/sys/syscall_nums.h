@@ -120,6 +120,14 @@
 #define JOB_GETSID    2  /* a = pid (0: the caller) -> its session */
 #define JOB_SETSID    3  /* -> the new session: the caller leads it and a new group (SYSERR_PERM: it leads a group) */
 #define JOB_GETPPID   4  /* -> the parent's pid */
+
+/* poll() of the kernel's own descriptors (pipes, local sockets, files, the
+ * console) in one call: each entry's state (SOCK_* as fdinfo, -1: not open),
+ * waiting until one has what it wants (events, or SOCK_HANGUP), `ms` pass
+ * (-1: no limit) or a signal comes (then 0, as if the time had passed). */
+#define SYS_POLL      80 /* poll(struct os_pollfd *, n, ms) -> how many are ready */
+#define POLL_MAX      256
+struct os_pollfd { int fd, events, got; };
 #define SYS_POLLWAIT  67 /* pollwait(gen, ms, net): gen -1 -> the I/O counter; else sleep until it is
                             not gen (a pipe or local socket changed), the next interrupt (net = 1:
                             TCP sockets are watched too) or ms pass -> the counter */

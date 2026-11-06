@@ -41,9 +41,15 @@ typedef struct task {
     int is_idle;
     int frozen;               /* stopped at its return to user mode while the computer sleeps */
     int bkl_depth;            /* its kernel-lock nesting while switched out */
+    int sysno;                /* the system call it is in, + 1 (0: none): `bklstat` */
     uint64_t fs_base;         /* user programs: the thread pointer (thread-local storage) */
     uint8_t fpu[512] __attribute__((aligned(16)));   /* x87/SSE registers (fxsave) */
 } task_t;
+
+/* Without the kernel lock, at a user program's tick: is the computer going
+ * to sleep; is its slice over with another task waiting for the core. */
+int task_freezing(void);
+int task_slice_over(void);
 
 /* The boot context becomes task 1 ("shell"); also starts the idle task (pid 0). */
 void task_init(void);

@@ -313,7 +313,58 @@ short ready(int fd, short events) {
 	return (short)(r & (events | POLLHUP | POLLERR | POLLNVAL));
 }
 
+// Only the kernel's descriptors (pipes, local sockets, files: a browser's
+// IPC): one system call each time round, not fdinfo for each and pollwait.
+int poll_kernel(struct pollfd *fds, nfds_t count, long timeout, int *num) {
+	tos_pollfd k[64];
+	for (nfds_t i = 0; i < count; i++) {
+		k[i].fd = fds[i].fd;
+		k[i].events = (fds[i].events & (POLLIN | POLLPRI) ? TOS_SOCK_READABLE : 0) |
+		              (fds[i].events & POLLOUT ? TOS_SOCK_WRITABLE : 0);
+		k[i].got = 0;
+	}
+	long start = now_ms();
+	for (;;) {
+		long left = timeout < 0 ? -1 : timeout - (now_ms() - start);
+		if (timeout >= 0 && left < 0)
+			left = 0;
+		long r = sc(TOS_POLL, (long)k, (long)count, left);
+		if (r < 0)
+			return to_errno(r);
+		if (r == 0 && (timeout < 0 || now_ms() - start < timeout))
+			continue;                               // a signal came: its handler has run
+		int n = 0;
+		for (nfds_t i = 0; i < count; i++) {
+			short re = 0;
+			if (fds[i].fd >= 0) {
+				int got = k[i].got;
+				if (got < 0) {
+					re = POLLNVAL;
+				} else {
+					if (got & TOS_SOCK_READABLE) re |= POLLIN;
+					if (got & TOS_SOCK_WRITABLE) re |= POLLOUT;
+					if (got & TOS_SOCK_HANGUP) re |= POLLHUP;
+					re &= fds[i].events | POLLHUP | POLLERR | POLLNVAL;
+				}
+			}
+			fds[i].revents = re;
+			if (re)
+				n++;
+		}
+		*num = n;
+		return 0;
+	}
+}
+
 int poll_ms(struct pollfd *fds, nfds_t count, long timeout, int *num) {
+	bool kernel_only = count > 0 && count <= 64;
+	for (nfds_t i = 0; i < count && kernel_only; i++) {
+		int fd = fds[i].fd;
+		if (fd >= 0 && (fd >= SOCK_BASE || fd >= DIR_BASE || sock(fd) || vfile(fd)))
+			kernel_only = false;
+	}
+	if (kernel_only)
+		return poll_kernel(fds, count, timeout, num);
 	long start = now_ms();
 	bool net = false;                               // TCP: packets come without waking anyone
 	for (nfds_t i = 0; i < count; i++)

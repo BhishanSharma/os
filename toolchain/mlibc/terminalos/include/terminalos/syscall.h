@@ -121,6 +121,12 @@
 #define TOS_JOB_GETSID  2           /* pid -> session */
 #define TOS_JOB_SETSID  3           /* -> the new session */
 #define TOS_JOB_GETPPID 4
+
+// poll(struct tos_pollfd *, n, ms) of the kernel's descriptors in one call
+// (kernel SYS_POLL): got = SOCK_* flags (-1: not open) -> how many are ready.
+#define TOS_POLL       80
+#define TOS_POLL_MAX   256
+struct tos_pollfd { int fd, events, got; };
 #define TOS_FUTEX_WAIT  0
 #define TOS_FUTEX_WAKE  1
 

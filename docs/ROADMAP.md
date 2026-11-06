@@ -121,9 +121,19 @@ access (Tab between fields and buttons). Every Ctrl+letter reaches the apps.
 Cuts: no CJK or right-to-left text, no rich text, no drag and drop between
 apps, no notification settings per app.
 
-The big kernel lock, a first step: the clock (every clock_gettime) and getpid
-run without it on any core. Everything else still takes it; the allocators and
-the scheduler need their own locks before more calls can leave it.
+The big kernel lock, first steps, measured with `bklstat` (who holds it, who
+waits) under the browser in QEMU: the clock and getpid run without it; an idle
+core halts outside it and takes it only when the task table (peeked at without
+it) has work for it; a user program's tick takes it only when the program must
+end, stop or give up its core; the scheduler's scans stop at the highest slot
+in use; and `poll()` of the kernel's descriptors is one call (`SYS_POLL`), not
+fdinfo for each and pollwait. With the browser starting, the lock is taken 40%
+less often and each core waits for it about 14% of the time (was 15-22%).
+What is left holds it because the scheduler does: switching tasks, futex,
+page faults. The scheduler and the allocators need their own locks next.
+Taking and leaving the lock now happen with interrupts off: an interrupt on
+the same core (which takes the lock too) between setting the owner and the
+depth could free it under another core and let two cores into the kernel.
 
 Each stage below is the *lean* version: the smallest design that gives the
 macOS-style structure, with the cuts written down. One stage per working

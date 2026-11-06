@@ -37,6 +37,10 @@ int bkl_try_enter(void);
 int bkl_drop(void);
 void bkl_take(int depth);
 
+/* `bklstat`: how long each core waited for the lock, and who held it how
+ * long (by the system call its task was in). reset: start counting again. */
+void bkl_stats_print(int reset);
+
 /* Wait for an interrupt, letting other cores into the kernel meanwhile.
  * Use instead of `hlt` in kernel code. Turns interrupts on. */
 void cpu_wait(void);

@@ -86,6 +86,7 @@ disk the accounts last until reboot.
 | `help`                     | List every command                                       |
 | `sysinfo` / `neofetch`     | OS, boot mode (UEFI/BIOS), CPU model, memory, display, network, disk, theme, time |
 | `dmesg`                    | The full boot log, including the driver messages hidden at boot |
+| `bklstat` [`reset`]        | The big kernel lock: how long each core waited for it, and who held it how long (by system call); `reset` counts again from now |
 | `lspci`                    | Every device on the PCI bus: address, IDs, kind, maker, and the driver of this OS that runs it |
 | `lsusb`                    | The USB controller and what is plugged into each port (keyboards and mice are used; plug-in and removal are noticed) |
 | `touchpad`                 | Find the laptop's I2C touchpad: controllers, addresses that answer, its report layout, then 8 seconds of raw reports |

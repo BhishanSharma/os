@@ -1,4 +1,5 @@
 #include "sys/shell.h"
+#include "sys/smp.h"
 #include "lib/print.h"
 #include "drivers/keyboard.h"
 #include "lib/string.h"
@@ -33,7 +34,6 @@
 #include "core/multiboot2.h"
 #include "net/tcp.h"
 #include "drivers/msi.h"
-#include "sys/smp.h"
 #include "drivers/display.h"
 #include "lib/fbcon.h"
 #include "drivers/power.h"
@@ -491,6 +491,10 @@ static int kernel_command(const char *line, int run_programs) {
     else if (strcmp(line, "sysinfo") == 0 || strcmp(line, "neofetch") == 0)
     {
         sysinfo_print();
+    }
+    else if (strcmp(line, "bklstat") == 0 || strcmp(line, "bklstat reset") == 0)
+    {
+        bkl_stats_print(line[7] != 0);                  // the big kernel lock: waits, holders
     }
     else if (strcmp(line, "dmesg") == 0)
     {
