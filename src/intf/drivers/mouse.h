@@ -29,6 +29,8 @@ void mouse_init_vbox(void);
  * from the user). The first one turns the pointer on even without a PS/2
  * mouse. */
 void mouse_report(const char *source, int buttons, int dx, int dy, int wheel);
+/* The same from a tablet or touchscreen: where (0..65535 across and down the screen). */
+void mouse_report_abs(const char *source, int buttons, int x, int y, int wheel);
 
 int mouse_present(void);
 const char *mouse_description(void);   /* "PS/2, wheel" */

@@ -15,7 +15,9 @@ to build/test/qemu/.
 """
 import os
 import re
+import json
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -76,6 +78,61 @@ def kernel_symbols():
             if len(parts) == 3 and parts[1] in "tT":
                 _symbols[int(parts[0], 16)] = parts[2]
     return _symbols
+
+
+class QMP:
+    """QEMU's QMP socket: absolute pointer events for a usb-tablet (pixel-exact clicks)."""
+    def __init__(self, port, tries=60):
+        for _ in range(tries):
+            try:
+                self.s = socket.create_connection(("127.0.0.1", port), timeout=5)
+                break
+            except OSError:
+                time.sleep(0.5)
+        self.f = self.s.makefile("rwb")
+        self.f.readline()                                   # greeting
+        self.cmd("qmp_capabilities")
+
+    def cmd(self, name, **args):
+        self.f.write((json.dumps({"execute": name, "arguments": args}) + "\n").encode())
+        self.f.flush()
+        while True:
+            r = json.loads(self.f.readline())
+            if "return" in r or "error" in r:
+                return r
+
+    def move(self, x, y, w, h):
+        """To pixel (x, y) of a w x h screen."""
+        self.cmd("input-send-event", events=[
+            {"type": "abs", "data": {"axis": "x", "value": int(x * 32767 / (w - 1))}},
+            {"type": "abs", "data": {"axis": "y", "value": int(y * 32767 / (h - 1))}}])
+
+    def button(self, down, which="left"):
+        self.cmd("input-send-event", events=[{"type": "btn", "data": {"down": down, "button": which}}])
+
+    def click(self, x, y, w, h, which="left"):
+        self.move(x, y, w, h)
+        time.sleep(0.15)
+        self.button(True, which)
+        time.sleep(0.12)
+        self.button(False, which)
+        time.sleep(0.2)
+
+    def drag(self, x0, y0, x1, y1, w, h, steps=8):
+        self.move(x0, y0, w, h)
+        time.sleep(0.15)
+        self.button(True)
+        for i in range(1, steps + 1):
+            self.move(x0 + (x1 - x0) * i // steps, y0 + (y1 - y0) * i // steps, w, h)
+            time.sleep(0.05)
+        self.button(False)
+        time.sleep(0.2)
+
+    def wheel(self, up, n=1):
+        for _ in range(n):
+            b = "wheel-up" if up else "wheel-down"
+            self.button(True, b)
+            self.button(False, b)
 
 
 class Machine:
@@ -654,7 +711,7 @@ def test_hub():
         check(re.search(r"port %s\.2 .* keyboard \(in use\)" % h, out), "lsusb: the keyboard behind the hub", out)
         check(re.search(r"port %s\.3 .* storage \(in use\)" % h, out), "lsusb: the stick behind the hub", out)
         check(re.search(r"port %s\.4 .* hub \(\d+ ports\)" % h, out), "lsusb: the hub behind the hub", out)
-        check(re.search(r"port %s\.4\.1 .* HID device" % h, out), "lsusb: the tablet two hubs down", out)
+        check(re.search(r"port %s\.4\.1 .* tablet or touchscreen \(in use\)" % h, out), "lsusb: the tablet two hubs down", out)
         m.monitor("device_add usb-kbd,bus=xhci.0,port=2.5,id=kbd2")
         time.sleep(3)
         out = m.run("lsusb")
@@ -665,6 +722,33 @@ def test_hub():
         check(not re.search(r"port %s\.5 " % h, out) and re.search(r"port %s\.2 .* keyboard" % h, out),
               "the keyboard unplugged from the hub", out)
         check("still here" in m.run("echo still here"), "typing after the hubs")
+    finally:
+        m.stop()
+
+
+def test_tablet():
+    """A USB tablet (absolute pointer, HID report protocol): the pointer goes
+    where it says, a click lands on the pixel and presses a button."""
+    m = Machine("tablet", usb_stick() + ["-device", "usb-tablet,bus=xhci.0",
+                                         "-qmp", "tcp:127.0.0.1:4446,server=on,wait=off"])
+    try:
+        q = QMP(4446)
+        login(m)
+        out = m.run("lsusb")
+        check(re.search(r"tablet or touchscreen \(in use\)", out), "lsusb: the tablet", out)
+        m.type("windowserver about")
+        ws = m.expect(r"windowserver: (\d+)x(\d+), scale (\d), cells (\d+)x(\d+)", 30)
+        w, h = int(ws.group(1)), int(ws.group(2))
+        button = m.expect(r"about: OK button at (\d+),(\d+)", 30)
+        time.sleep(1)
+        q.click(300, 200, w, h)
+        m.expect(r"click at 300,200", 10)
+        m.keys("esc")                                       # (that click may open a menu)
+        time.sleep(0.3)
+        q.click(int(button.group(1)), int(button.group(2)), w, h)
+        m.expect(r"about: OK clicked", 10)
+        m.keys("ctrl-q")
+        m.expect(PROMPT, 10)
     finally:
         m.stop()
 
@@ -993,7 +1077,7 @@ def test_logs():
 
 
 TESTS = [("boot", test_boot), ("files", test_files), ("fault", test_fault), ("panic", test_panic),
-         ("kernel", test_kernel), ("desktop", test_desktop), ("polish", test_polish), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("logs", test_logs), ("user", test_user), ("video", test_nvme_video), ("bundle", test_bundle), ("storage", test_storage), ("sleep", test_sleep), ("dynamic", test_dynamic), ("ports", test_ports), ("install", test_install), ("sata", test_sata), ("hub", test_hub), ("usbnet", test_usbnet), ("network", test_network),
+         ("kernel", test_kernel), ("desktop", test_desktop), ("polish", test_polish), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("logs", test_logs), ("user", test_user), ("video", test_nvme_video), ("bundle", test_bundle), ("storage", test_storage), ("sleep", test_sleep), ("dynamic", test_dynamic), ("ports", test_ports), ("install", test_install), ("sata", test_sata), ("hub", test_hub), ("tablet", test_tablet), ("usbnet", test_usbnet), ("network", test_network),
          ("bios", test_legacy_bios)]
 NEEDS_INTERNET = {"network"}
 # Tests of programs only the full toolchain builds (myos-ladybird: build.ps1).

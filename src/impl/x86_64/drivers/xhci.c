@@ -133,12 +133,26 @@ typedef struct {
 #define MAX_TIERS   5               /* hubs below the root port (USB allows 5) */
 #define HID_KEYBOARD 1              /* = the boot interface protocol numbers */
 #define HID_MOUSE    2
+#define HID_POINTER  3              /* a tablet, touchscreen or mouse in the report protocol */
 
-/* One boot-protocol HID interface (a device such as a wireless receiver can
- * have a keyboard and a mouse) and its interrupt IN endpoint. */
+/* Where a value is in a report (HID report protocol): bit offset, size. */
+typedef struct {
+    uint16_t off;
+    uint8_t size, abs;
+    int32_t min, max;
+} hfield_t;
+
+/* One HID interface (a device such as a wireless receiver can have a
+ * keyboard and a mouse) and its interrupt IN endpoint. Boot protocol for
+ * keyboards and mice; a pointer's report is read with its descriptor. */
 #define MAX_HID 3
 typedef struct {
-    int kind;                       /* HID_MOUSE or HID_KEYBOARD */
+    int kind;                       /* HID_MOUSE, HID_KEYBOARD, HID_POINTER; 0: not used */
+    uint16_t rdesc_len;             /* HID_POINTER: the report descriptor's length */
+    uint8_t report_id;              /* 0: the reports have no ID byte */
+    hfield_t x, y, wheel;
+    uint16_t btn_off;
+    uint8_t btn_count;
     uint8_t iface;
     int dci;                        /* device context index of the endpoint */
     int len;
@@ -426,6 +440,128 @@ static void queue_report(usb_device_t *d, hid_t *h) {
     ring_doorbell(d->slot, h->dci);
 }
 
+/* ---- HID report descriptors (HID 1.11 6.2.2) --------------------------------------
+ * Enough of one to find a pointer: X and Y (generic desktop), the buttons
+ * (or a touchscreen's tip switch) and the wheel, in the first report that has
+ * X and Y; where each is, how big, absolute or relative, and its range. */
+
+static uint8_t *rdesc_buf;
+
+static int parse_pointer(usb_device_t *d, hid_t *h) {
+    uint16_t len = h->rdesc_len > 1024 ? 1024 : h->rdesc_len;
+    if (!rdesc_buf && !(rdesc_buf = dma_alloc(1024, 64))) return -1;
+    if (control(d, 0x81, 6, 0x2200, h->iface, rdesc_buf, len) != 0) return -1;
+    const uint8_t *p = rdesc_buf;
+    uint32_t page = 0, rsize = 0, rcount = 0, rid = 0;
+    int32_t lmin = 0, lmax = 0;
+    uint32_t usages[16], nusage = 0, umin = 0, umax = 0, have_range = 0;
+    struct { uint8_t id; uint16_t pos; } pos[16];
+    int npos = 0, found = 0;
+    hfield_t fx = { 0 }, fy = { 0 }, fw = { 0 };
+    uint16_t boff = 0;
+    uint8_t bcount = 0, bid = 0, xid = 0, wid = 0;
+    int have_x = 0, have_y = 0, have_b = 0, have_w = 0;
+    for (uint32_t i = 0; i < len;) {
+        uint8_t b = p[i];
+        if (b == 0xFE) {                                    /* a long item */
+            if (i + 1 >= len) break;
+            i += 3u + p[i + 1];
+            continue;
+        }
+        uint32_t size = (b & 3) == 3 ? 4 : (b & 3), type = (b >> 2) & 3, tag = b >> 4;
+        if (i + 1 + size > len) break;
+        uint32_t u = 0;
+        for (uint32_t k = 0; k < size; k++) u |= (uint32_t)p[i + 1 + k] << (8 * k);
+        int32_t s = size == 1 ? (int8_t)u : size == 2 ? (int16_t)u : (int32_t)u;
+        i += 1 + size;
+        if (type == 1) {                                    /* global */
+            if (tag == 0) page = u;
+            else if (tag == 1) lmin = s;
+            else if (tag == 2) lmax = lmin < 0 ? s : (int32_t)u;
+            else if (tag == 7) rsize = u;
+            else if (tag == 8) rid = u;
+            else if (tag == 9) rcount = u;
+        } else if (type == 2) {                             /* local */
+            uint32_t full = size == 4 ? u : (page << 16 | u);
+            if (tag == 0 && nusage < 16) usages[nusage++] = full;
+            else if (tag == 1) { umin = full; have_range = 1; }
+            else if (tag == 2) umax = full;
+        } else if (type == 0) {                             /* main */
+            if (tag == 8) {                                 /* Input */
+                int k = 0;
+                while (k < npos && pos[k].id != rid) k++;
+                if (k == npos && npos < 16) {
+                    pos[npos].id = (uint8_t)rid;
+                    pos[npos].pos = rid ? 8 : 0;            /* (the ID byte comes first) */
+                    npos++;
+                }
+                uint16_t at = k < 16 ? pos[k].pos : 0;
+                if (!(u & 1)) {                             /* (constant: padding) */
+                    for (uint32_t f = 0; f < rcount; f++) {
+                        uint32_t use = f < nusage ? usages[f] : have_range ? umin + f : nusage ? usages[nusage - 1] : 0;
+                        if (have_range && umax && use > umax) use = umax;
+                        uint16_t off = (uint16_t)(at + f * rsize);
+                        hfield_t fld = { off, (uint8_t)rsize, (uint8_t)!(u & 4), lmin, lmax };
+                        if (use == 0x10030 && !have_x) { fx = fld; have_x = 1; xid = (uint8_t)rid; }
+                        else if (use == 0x10031 && !have_y && have_x && rid == xid) { fy = fld; have_y = 1; }
+                        else if (use == 0x10038 && !have_w) { fw = fld; have_w = 1; wid = (uint8_t)rid; }
+                        else if (((use >> 16) == 9 || use == 0xD0042) && !have_b) {   /* buttons; a touch's tip */
+                            boff = off;
+                            bcount = (uint8_t)(use == 0xD0042 ? 1 : rcount - f > 3 ? 3 : rcount - f);
+                            bid = (uint8_t)rid;
+                            have_b = 1;
+                        }
+                    }
+                }
+                if (k < 16) pos[k].pos = (uint16_t)(at + rcount * rsize);
+            }
+            nusage = 0;
+            have_range = 0;
+            umin = umax = 0;
+        }
+        (void)found;
+    }
+    if (!have_x || !have_y || fx.size > 32 || fy.size > 32) return -1;
+    h->report_id = xid;
+    h->x = fx;
+    h->y = fy;
+    if (have_w && wid == xid) h->wheel = fw;
+    if (have_b && bid == xid) {
+        h->btn_off = boff;
+        h->btn_count = bcount;
+    }
+    return 0;
+}
+
+/* A field's value out of a report (little-endian bits), sign-extended if its range is. */
+static int32_t field(const uint8_t *r, int got, const hfield_t *f) {
+    if (!f->size || (int)((f->off + f->size + 7) / 8) > got) return 0;
+    uint64_t v = 0;
+    for (int k = 0; k < (f->size + (f->off & 7) + 7) / 8 && k < 8; k++) v |= (uint64_t)r[f->off / 8 + k] << (8 * k);
+    v = (v >> (f->off & 7)) & ((1ull << f->size) - 1);
+    if (f->min < 0 && (v >> (f->size - 1)) & 1) return (int32_t)(v | ~((1ull << f->size) - 1));
+    return (int32_t)v;
+}
+
+static void pointer_report(hid_t *h, const uint8_t *r, int got) {
+    if (h->report_id) {
+        if (got < 1 || r[0] != h->report_id) return;
+    }
+    int buttons = 0;
+    for (int b = 0; b < h->btn_count; b++)
+        if (h->btn_off + b < got * 8 && (r[(h->btn_off + b) / 8] >> ((h->btn_off + b) & 7)) & 1) buttons |= 1 << b;
+    int wheel = h->wheel.size ? field(r, got, &h->wheel) : 0;
+    int32_t x = field(r, got, &h->x), y = field(r, got, &h->y);
+    if (h->x.abs && h->y.abs) {
+        int32_t wx = h->x.max - h->x.min, wy = h->y.max - h->y.min;
+        if (wx <= 0 || wy <= 0) return;
+        mouse_report_abs("USB tablet", buttons, (int)((int64_t)(x - h->x.min) * 65535 / wx),
+                         (int)((int64_t)(y - h->y.min) * 65535 / wy), wheel);
+    } else {
+        mouse_report("USB", buttons, x, y, wheel);
+    }
+}
+
 /* Set up the endpoints of the HID interfaces found, select the
  * configuration, and switch each interface to the boot protocol. */
 static int setup_hid(usb_device_t *d, uint8_t config_value, const uint16_t *mps, const uint8_t *b_interval) {
@@ -456,10 +592,17 @@ static int setup_hid(usb_device_t *d, uint8_t config_value, const uint16_t *mps,
     if (control(d, 0x00, 9, config_value, 0, 0, 0) != 0) { d->note = "SET_CONFIGURATION failed"; return -1; }
     for (int i = 0; i < d->hid_count; i++) {
         hid_t *h = &d->hid[i];
-        control(d, 0x21, 0x0B, 0, h->iface, 0, 0);          /* SET_PROTOCOL: boot (may be refused) */
+        if (h->kind == HID_POINTER) {
+            if (parse_pointer(d, h) != 0) {                 /* no X and Y in it: not ours */
+                h->kind = 0;
+                continue;
+            }
+        } else {
+            control(d, 0x21, 0x0B, 0, h->iface, 0, 0);      /* SET_PROTOCOL: boot (may be refused) */
+        }
         control(d, 0x21, 0x0A, 0, h->iface, 0, 0);          /* SET_IDLE: report only on change */
-        if (h->kind == HID_MOUSE) mouse_count++;
-        else keyboard_count++;
+        if (h->kind == HID_KEYBOARD) keyboard_count++;
+        else mouse_count++;
         queue_report(d, h);
     }
     return 0;
@@ -748,6 +891,7 @@ static void setup_device(usb_device_t *d) {
     /* Walk the descriptors: the first interface (for lsusb), and each boot
      * keyboard or mouse interface with its interrupt IN endpoint. */
     int kind = 0, have_iface = 0, msc = 0, hubif = 0;
+    uint16_t rdesc = 0;
     uint8_t iface = 0;
     uint16_t mps[MAX_HID];
     uint8_t interval[MAX_HID];
@@ -762,6 +906,8 @@ static void setup_device(usb_device_t *d) {
             }
             int boot = buf[i + 5] == 3 && buf[i + 6] == 1;
             kind = boot && (buf[i + 7] == HID_MOUSE || buf[i + 7] == HID_KEYBOARD) ? buf[i + 7] : 0;
+            if (!kind && buf[i + 5] == 3) kind = HID_POINTER;   /* (if its report has X and Y) */
+            rdesc = 0;
             iface = buf[i + 2];
             msc = buf[i + 5] == 8 && buf[i + 6] == 6 && buf[i + 7] == 0x50 && !d->st_in_ep;   /* SCSI, bulk-only */
             hubif = buf[i + 5] == 9 && !d->hub_dci;
@@ -781,10 +927,13 @@ static void setup_device(usb_device_t *d) {
                 d->st_out_dci = (buf[i + 2] & 0xF) * 2;
                 d->st_out_mps = size;
             }
+        } else if (type == 0x21 && len >= 9 && kind == HID_POINTER && buf[i + 6] == 0x22) {
+            rdesc = (uint16_t)(buf[i + 7] | buf[i + 8] << 8);  /* the HID descriptor: the report's length */
         } else if (type == 5 && len >= 7 && kind && (buf[i + 2] & 0x80) && (buf[i + 3] & 3) == 3 &&
-                   d->hid_count < MAX_HID) {
+                   d->hid_count < MAX_HID && (kind != HID_POINTER || rdesc)) {
             hid_t *h = &d->hid[d->hid_count];
             h->kind = kind;
+            h->rdesc_len = rdesc;
             h->iface = iface;
             h->dci = (buf[i + 2] & 0xF) * 2 + 1;
             mps[d->hid_count] = (uint16_t)((buf[i + 4] | buf[i + 5] << 8) & 0x7FF);
@@ -811,7 +960,8 @@ static void setup_device(usb_device_t *d) {
 
 static int device_kinds(const usb_device_t *d) {
     int k = 0;
-    for (int i = 0; i < d->hid_count; i++) k |= 1 << d->hid[i].kind;
+    for (int i = 0; i < d->hid_count; i++)
+        if (d->hid[i].kind) k |= 1 << d->hid[i].kind;
     return k;
 }
 
@@ -1040,8 +1190,8 @@ static void remove_device(int i) {
     int slot = devices[i].slot;
     if (devices[i].net && slot == net_slot) net_slot = 0;  /* (the controller may give the slot to the next device) */
     for (int j = 0; j < devices[i].hid_count; j++) {
-        if (devices[i].hid[j].kind == HID_MOUSE) mouse_count--;
-        else keyboard_count--;
+        if (devices[i].hid[j].kind == HID_KEYBOARD) keyboard_count--;
+        else if (devices[i].hid[j].kind) mouse_count--;
     }
     devices[i] = devices[--device_count];
     for (int j = 0; j < device_count; j++)
@@ -1058,10 +1208,11 @@ static void remove_device(int i) {
 static void print_device(const usb_device_t *d) {
     char place[24];
     place_text(d, place, sizeof(place));
-    kprintf("USB port %s: %04x:%04x class %u/%u/%u%s%s%s%s%s%s\n", place, d->vendor, d->product,
+    kprintf("USB port %s: %04x:%04x class %u/%u/%u%s%s%s%s%s%s%s\n", place, d->vendor, d->product,
             d->if_class, d->if_subclass, d->if_protocol,
             (device_kinds(d) >> HID_KEYBOARD) & 1 ? ", keyboard" : "",
             (device_kinds(d) >> HID_MOUSE) & 1 ? ", mouse" : "",
+            (device_kinds(d) >> HID_POINTER) & 1 ? ", tablet or touchscreen" : "",
             d->storage ? ", storage" : "", d->hub_ports ? ", hub" : "",
             d->note ? ": " : "", d->note ? d->note : "");
 }
@@ -1210,8 +1361,10 @@ static void handle_transfer(const trb_t *e) {
                     mouse_report("USB", r[0] & 7, (int8_t)r[1], (int8_t)r[2], got >= 4 ? (int8_t)r[3] : 0);
                 else if (h->kind == HID_KEYBOARD && got >= 8)
                     keyboard_report(h, r);
+                else if (h->kind == HID_POINTER)
+                    pointer_report(h, r, got);
             }
-            queue_report(d, h);
+            if (h->kind) queue_report(d, h);
             return;
         }
     }
@@ -1457,6 +1610,7 @@ void usb_print_devices(void) {
                            kinds == (1 << HID_MOUSE | 1 << HID_KEYBOARD) ? "keyboard + mouse (in use)" :
                            kinds == 1 << HID_MOUSE ? "mouse (in use)" :
                            kinds == 1 << HID_KEYBOARD ? "keyboard (in use)" :
+                           kinds & 1 << HID_POINTER ? "tablet or touchscreen (in use)" :
                            d->if_class == 3 ? "HID device" :
                            d->storage ? "storage (in use)" :
                            d->if_class == 8 ? "storage" : d->hub_ports ? (d->hub_ss ? "USB 3 hub" : "hub") :

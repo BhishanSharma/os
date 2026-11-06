@@ -139,7 +139,8 @@ Hardware breadth: SATA drives (AHCI, MSI; every disk is a drive next to
 NVMe: partitions, `/`, `install` and the firmware boot from it), USB hubs
 (USB 2 and 3, five tiers, plug-in and removal behind them, slots given back
 when a device goes), USB network adapters (CDC-ECM: dongles and docks,
-DHCP when plugged in), and the processor's own power management (Intel HWP:
+DHCP when plugged in), USB tablets and touchscreens (the HID report
+protocol: X, Y, buttons or the tip switch, the wheel), and the processor's own power management (Intel HWP:
 the CPU picks its clock, turbo included, leaning balanced; idle cores in
 MWAIT C6 where the APIC timer and TSC keep running; `cpu` measures the
 clock). Every core's idle task now waits outside the kernel lock (only

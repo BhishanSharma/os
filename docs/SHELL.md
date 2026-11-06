@@ -88,7 +88,7 @@ disk the accounts last until reboot.
 | `dmesg`                    | The full boot log, including the driver messages hidden at boot |
 | `bklstat` [`reset`]        | The big kernel lock: how long each core waited for it, and who held it how long (by system call); `reset` counts again from now |
 | `lspci`                    | Every device on the PCI bus: address, IDs, kind, maker, and the driver of this OS that runs it |
-| `lsusb`                    | The USB controller and what is plugged into each port, hubs included (`3.2` is port 2 of the hub on port 3); keyboards, mice and sticks are used; plug-in and removal are noticed, behind hubs too |
+| `lsusb`                    | The USB controller and what is plugged into each port, hubs included (`3.2` is port 2 of the hub on port 3); keyboards, mice, tablets, touchscreens, sticks and network adapters are used; plug-in and removal are noticed, behind hubs too |
 | `cpu`                      | The processor: its clock while busy (measured), hardware P-states (HWP) and the C-state idle cores wait in |
 | `touchpad`                 | Find the laptop's I2C touchpad: controllers, addresses that answer, its report layout, then 8 seconds of raw reports |
 | `clock [local\|utc]`       | Whether the hardware clock holds local time (Windows) or UTC (Linux, VMs); real PCs default to local |

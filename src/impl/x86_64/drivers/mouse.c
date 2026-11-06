@@ -68,6 +68,8 @@ typedef struct {
     int8_t wheel;
     uint8_t buttons;
     uint8_t pad;                      /* from the touchpad */
+    uint8_t abs;                      /* a tablet or touchscreen: ax, ay are where (0..65535) */
+    uint16_t ax, ay;
     uint32_t ms;                      /* when it came (timer_ms), for the speed */
 } packet_t;
 
@@ -232,6 +234,28 @@ void mouse_report(const char *source, int buttons, int dx, int dy, int wheel) {
     p.dx = (int16_t)dx;
     p.dy = (int16_t)-dy;                                       // queue holds PS/2 sense: up positive
     p.wheel = (int8_t)-wheel;                                  // and PS/2 wheel: negative = up
+    p.abs = 0;
+    p.ms = timer_ms();
+    uint32_t next = (queue_head + 1) % QUEUE_SIZE;
+    if (next == queue_tail) return;
+    queue[queue_head] = p;
+    queue_head = next;
+}
+
+void mouse_report_abs(const char *source, int buttons, int x, int y, int wheel) {
+    if (!present) {
+        present = 1;
+        packet_size = 0;
+    }
+    other_source = source;
+    saw_mouse = 1;
+    packet_t p;
+    memset(&p, 0, sizeof(p));
+    p.buttons = (uint8_t)(buttons & 7);
+    p.wheel = (int8_t)-wheel;
+    p.abs = 1;
+    p.ax = (uint16_t)(x < 0 ? 0 : x > 65535 ? 65535 : x);
+    p.ay = (uint16_t)(y < 0 ? 0 : y > 65535 ? 65535 : y);
     p.ms = timer_ms();
     uint32_t next = (queue_head + 1) % QUEUE_SIZE;
     if (next == queue_tail) return;
@@ -393,7 +417,14 @@ static void take_packets(void) {
         if (!p.pad && cfg.swap_buttons)
             p.buttons = (uint8_t)((p.buttons & ~3) | (p.buttons & 1) << 1 | (p.buttons & 2) >> 1);
         if (p.pad ? cfg.natural : cfg.wheel_reverse) p.wheel = (int8_t)-p.wheel;
-        if (!vbox_absolute) {
+        if (p.abs) {                                           /* a tablet: right there */
+            int w, h, gx, gy, cw, ch;
+            geometry(&w, &h, &gx, &gy, &cw, &ch);
+            int64_t nx = ((int64_t)p.ax * w / 0x10000) << 8, ny = ((int64_t)p.ay * h / 0x10000) << 8;
+            moved |= nx != sx || ny != sy;
+            sx = nx;
+            sy = ny;
+        } else if (!vbox_absolute) {
             move_by(&p);
             moved |= p.dx || p.dy;
         }
