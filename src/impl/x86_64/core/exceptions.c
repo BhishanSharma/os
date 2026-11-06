@@ -181,7 +181,7 @@ void exception_handler(struct exc_frame* f) {
     }
     if ((f->cs & 3) == 3) {
         uint32_t uv = f->vector < 32 ? (uint32_t)f->vector : 31;
-        process_fault(f->vector, exc_name[uv], f->rip, f->vector == 14 ? read_cr(2) : 0);
+        process_fault(f->vector, exc_name[uv], f->rip, f->vector == 14 ? read_cr(2) : 0, f->rsp);
     }
 
     begin_or_halt();

@@ -718,10 +718,12 @@ def test_desktop():
 
 def test_polish():
     """The desktop's polish: a notification's banner, a screenshot (Print
-    Screen), Calculator and Calendar open."""
+    Screen), Calculator and Calendar open, the Launcher opens (Ctrl+L)."""
     m = Machine("polish", usb_stick())
     try:
         login(m)
+        out = m.run("cat /DOCK.CFG")                 # the Dock's apps (once empty: a CRLF mkdock.sh)
+        check("Calculator" in out and "Settings" in out, "the Dock's apps (DOCK.CFG)", out)
         m.type("windowserver notify:Hello calculator calendar")
         m.expect(r"windowserver: \d+x\d+", 30)
         m.expect(r"notification from notify: Hello", 30)
@@ -729,6 +731,11 @@ def test_polish():
         m.screenshot("polish")
         m.keys("print")                              # Print Screen: a PNG in ~/Pictures
         m.expect(r"notification from DOOR OS: Screenshot", 30)
+        m.keys("ctrl-l")                             # the Launcher (its glass once overflowed a GPU batch)
+        time.sleep(2)
+        m.keys("print")                              # still drawing, still answering
+        m.expect(r"notification from DOOR OS: Screenshot", 30)
+        check("Segmentation fault" not in m.text(), "the Launcher crashed the window server", m.text()[-600:])
         m.keys("ctrl-q")
         m.expect(PROMPT, 10)
     finally:

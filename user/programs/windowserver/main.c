@@ -1940,7 +1940,14 @@ static long clip_area(const ui_canvas *c, int x0, int y0, int x1, int y1) {
 }
 
 static struct os_gpu_draw *gd_add(struct os_gpu_draws *d, int op, int x, int y, int w, int h) {
-    struct os_gpu_draw *o = &d->op[d->n++];            /* (callers stay within GD_MAX) */
+    static struct os_gpu_draw spare;                    /* a batch already full: it goes nowhere */
+    if (d->n >= GD_MAX) {                               /* (callers gd_run a full batch first) */
+        static int told;
+        if (!told++) printf("windowserver: a GPU batch over %d drawings (one left out)\n", GD_MAX);
+        memset(&spare, 0, sizeof(spare));
+        return &spare;
+    }
+    struct os_gpu_draw *o = &d->op[d->n++];
     memset(o, 0, sizeof(*o));
     o->op = op;
     o->x = x;
@@ -2554,9 +2561,11 @@ static void glass(painter_t *p, int x, int y, int w, int h, int r, int corners, 
     gd_shadow(&d, x, y + S, w, h, r, 3 * S, al * 2 / 3, 1);                       /* contact: tight and dark */
     gd_fill(&d, x - 1, y - 1, w + 2, h + 2, r + 1, TH.hair, TH.hair_strong, corners);   /* rim */
     material(p, &d, x, y, w, h, r, corners, TH.glass, TH.glass_alpha, TH.s1);
-    if (sheen && h >= 4 * r)                                                       /* light falling from above */
+    if (sheen && h >= 4 * r) {                                                     /* light falling from above */
+        gd_run(p, &d);                                     /* (a batch of its own: GD_MAX drawings a batch) */
         for (int k = 0; k < 12; k++)                                              /* (fine steps: no bands) */
             gd_fill(&d, x, y, w, h * (12 - k) / 26, r, TH.sheen, TH.sheen_alpha / 34 + 1, corners & (UI_TL | UI_TR));
+    }
     gd_run(p, &d);
     ui_fill_a(&p->c, x + r, y, w - 2 * r, S, TH.sheen, TH.sheen_alpha / 2);        /* the lit top edge */
     ui_fill_a(&p->c, x + r, y + h - S, w - 2 * r, S, 0x000000, 36);                /* and the shade below */

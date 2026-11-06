@@ -295,9 +295,13 @@ $(RAMDISK_GZ): scripts/mkramdisk.sh scripts/mkdock.sh $(wildcard $(RAMDISK_DIR)/
 	rm -rf $(RAMDISK_STAGE)
 	mkdir -p $(RAMDISK_STAGE)
 	cp $(RAMDISK_DIR)/* $(USER_ELFS) $(APP_ELFS) $(PORT_ELFS) $(RAMDISK_STAGE)/
-	# With Ladybird the Dock gets the Browser too, after Terminal.
-	{ sh scripts/mkdock.sh apps; $(if $(LADYBIRD),echo "2.5|Pointer|/ladybird/bin/Ladybird|browser|2F6FDE";) } | \
+	# With Ladybird the Dock gets the Browser too, after Terminal. (No apps
+	# at all means mkdock.sh failed, e.g. a CRLF copy of it: stop here.)
+	sh scripts/mkdock.sh apps > $(RAMDISK_STAGE)/DOCK.APPS
+	@test -s $(RAMDISK_STAGE)/DOCK.APPS || { echo "scripts/mkdock.sh found no apps for the Dock" >&2; exit 1; }
+	{ cat $(RAMDISK_STAGE)/DOCK.APPS; $(if $(LADYBIRD),echo "2.5|Pointer|/ladybird/bin/Ladybird|browser|2F6FDE";) } | \
 	    sort -t '|' -k1,1n > $(RAMDISK_STAGE)/DOCK.CFG
+	rm $(RAMDISK_STAGE)/DOCK.APPS
 	$(if $(LADYBIRD),cp -r $(LADYBIRD) $(RAMDISK_STAGE)/ladybird)
 	$(if $(DYN_LIBS),mkdir -p $(RAMDISK_STAGE)/LIB && cp $(DYN_LIBS) $(RAMDISK_STAGE)/LIB/)
 	$(if $(PORTS_BIN),cp $(PORTS_BIN) $(RAMDISK_STAGE)/)

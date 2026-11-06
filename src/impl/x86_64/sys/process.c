@@ -633,7 +633,7 @@ void check_killed(void) {
     }
 }
 
-void process_fault(uint64_t vector, const char *name, uint64_t rip, uint64_t address) {
+void process_fault(uint64_t vector, const char *name, uint64_t rip, uint64_t address, uint64_t rsp) {
     task_t *t = task_current();
     if (!t || !t->is_user) return;
     print_set_theme_colors();
@@ -651,6 +651,19 @@ void process_fault(uint64_t vector, const char *name, uint64_t rip, uint64_t add
     else
         k_snprintf(msg, sizeof(msg), "%s (pid %d): %s (rip 0x%lx) - program terminated", t->name, t->pid, name, rip);
     print_error(msg);
+    /* A jump to nowhere (a null function pointer, or a return address the
+     * program overwrote): the stack around it, for its callers (nm). */
+    if (rip < USER_BASE && user_range_ok(rsp - 64, 192, 0)) {
+        uint64_t w[24];
+        user_access_begin();
+        memcpy(w, (const void *)(rsp - 64), sizeof(w));
+        user_access_end();
+        for (int i = 0; i < 24; i += 4) {
+            k_snprintf(msg, sizeof(msg), "  stack rsp%d: %016lx %016lx %016lx %016lx", i * 8 - 64,
+                       w[i], w[i + 1], w[i + 2], w[i + 3]);
+            print_error(msg);
+        }
+    }
     process_exit(vector == 0 ? EXIT_ARITHMETIC : vector == 6 ? EXIT_ILLEGAL : EXIT_SEGFAULT);
 }
 
