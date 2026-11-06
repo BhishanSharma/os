@@ -38,6 +38,13 @@ inline int to_errno(long r) {
 	case TOS_ERR_INUSE: return EADDRINUSE;
 	case TOS_ERR_PIPE: return EPIPE;
 	case TOS_ERR_WOULDBLOCK: return EAGAIN;
+	case TOS_ERR_EXIST: return EEXIST;
+	case TOS_ERR_BADNAME: return EINVAL;
+	case TOS_ERR_NOTEMPTY: return ENOTEMPTY;
+	case TOS_ERR_NOSPC: return ENOSPC;
+	case TOS_ERR_ROFS: return EROFS;
+	case TOS_ERR_NOTSUP: return ENOTSUP;
+	case TOS_ERR_XDEV: return EXDEV;
 	default: return EIO;
 	}
 }

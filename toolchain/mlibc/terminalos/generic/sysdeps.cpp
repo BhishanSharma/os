@@ -95,15 +95,18 @@ unsigned long path_hash(const char *p) {
 }
 
 int fill_stat(const char *path, struct stat *st) {
-	tos_stat ks;
-	long r = sc(TOS_STAT, (long)path, (long)&ks);
+	tos_statx ks;
+	long r = sc(TOS_STATX, (long)path, (long)&ks);
 	if (r < 0)
 		return to_errno(r);
 	memset(st, 0, sizeof(*st));
 	st->st_dev = 1;
 	st->st_ino = path_hash(path);
 	st->st_nlink = 1;
-	st->st_mode = ks.is_dir ? (S_IFDIR | 0755) : (S_IFREG | 0644);
+	st->st_mode = (ks.is_dir ? S_IFDIR : S_IFREG) | (ks.mode & 07777);
+	st->st_uid = ks.uid;
+	st->st_gid = ks.gid;
+	st->st_mtim.tv_sec = st->st_atim.tv_sec = st->st_ctim.tv_sec = (time_t)ks.mtime;
 	st->st_size = ks.size;
 	st->st_blksize = 4096;
 	st->st_blocks = (ks.size + 511) / 512;
@@ -713,6 +716,37 @@ int Sysdeps<Mkdir>::operator()(const char *path, mode_t) {
 	if (sc(TOS_STAT, (long)path, (long)&ks) == 0)
 		return EEXIST;
 	long r = sc(TOS_MKDIR, (long)path);
+	return r < 0 ? to_errno(r) : 0;
+}
+
+int Sysdeps<Rename>::operator()(const char *path, const char *new_path) {
+	long r = sc(TOS_RENAME, (long)path, (long)new_path);
+	return r < 0 ? to_errno(r) : 0;
+}
+
+int Sysdeps<Renameat>::operator()(int olddirfd, const char *old_path, int newdirfd, const char *new_path) {
+	if ((olddirfd != AT_FDCWD && old_path[0] != '/') || (newdirfd != AT_FDCWD && new_path[0] != '/'))
+		return ENOSYS;
+	long r = sc(TOS_RENAME, (long)old_path, (long)new_path);
+	return r < 0 ? to_errno(r) : 0;
+}
+
+int Sysdeps<Chmod>::operator()(const char *pathname, mode_t mode) {
+	long r = sc(TOS_CHMOD, (long)pathname, (long)(mode & 07777));
+	return r < 0 ? to_errno(r) : 0;
+}
+
+int Sysdeps<Fchmodat>::operator()(int fd, const char *pathname, mode_t mode, int) {
+	if (fd != AT_FDCWD && pathname[0] != '/')
+		return ENOSYS;
+	long r = sc(TOS_CHMOD, (long)pathname, (long)(mode & 07777));
+	return r < 0 ? to_errno(r) : 0;
+}
+
+int Sysdeps<Fchownat>::operator()(int dirfd, const char *pathname, uid_t owner, gid_t group, int) {
+	if (dirfd != AT_FDCWD && pathname[0] != '/')
+		return ENOSYS;
+	long r = sc(TOS_CHOWN, (long)pathname, (long)(int)owner, (long)(int)group);
 	return r < 0 ? to_errno(r) : 0;
 }
 

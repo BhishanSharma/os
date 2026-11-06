@@ -56,6 +56,10 @@
 #define TOS_EXEPATH    71
 #define TOS_MMAPAT     72
 #define TOS_FDPATH     73
+#define TOS_STATX      74
+#define TOS_CHMOD      75
+#define TOS_CHOWN      76
+#define TOS_RENAME     77
 
 // sound(op, a, b): one 48 kHz, 16-bit stereo output stream (kernel SYS_SOUND).
 #define TOS_SOUND      35
@@ -120,8 +124,15 @@
 #define TOS_ERR_CLOSED  -18
 #define TOS_ERR_NOROUTE -19
 #define TOS_ERR_INUSE   -20
+#define TOS_ERR_EXIST   -22
+#define TOS_ERR_BADNAME -23
+#define TOS_ERR_NOTEMPTY -24
+#define TOS_ERR_NOSPC   -25
+#define TOS_ERR_ROFS    -26
 #define TOS_ERR_PIPE    -28
 #define TOS_ERR_WOULDBLOCK -29
+#define TOS_ERR_NOTSUP  -30
+#define TOS_ERR_XDEV    -31
 
 struct tos_sockinfo { unsigned int available; unsigned short lport, rport; unsigned char rip[4]; };
 
@@ -129,6 +140,14 @@ struct tos_time { int year, month, day, hour, minute, second; char zone[8]; };
 struct tos_user { unsigned int uid; char name[16]; char home[48]; };
 struct tos_dirent { char name[256]; unsigned char is_dir; unsigned int size; };
 struct tos_stat { unsigned int size; unsigned char is_dir; };
+/* statx: owners and modes (ext2 volumes; made up on FAT32, owners 0). */
+struct tos_statx {
+	unsigned long size;
+	unsigned char is_dir, owners;
+	unsigned short mode;
+	unsigned int uid, gid;
+	unsigned long mtime;
+};
 struct tos_uname { char sysname[24]; char release[16]; char hostname[32]; };
 
 static inline long tos_syscall(long n, long a, long b, long c, long d) {
