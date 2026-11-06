@@ -38,10 +38,12 @@ static int same_name(const char *a, const char *b) {
 static int (*write_guard)(const char *path);
 static int (*read_guard)(const char *path);
 static int (*creds)(uint32_t *uid, uint32_t *gid);
+static int (*path_check)(const char *abs);
 
 void fat32_set_write_guard(int (*guard)(const char *path)) { write_guard = guard; }
 void fat32_set_read_guard(int (*guard)(const char *path)) { read_guard = guard; }
 void vfs_set_creds(int (*fn)(uint32_t *uid, uint32_t *gid)) { creds = fn; }
+void vfs_set_path_check(int (*fn)(const char *abs)) { path_check = fn; }
 
 const char *vfs_error(int code) {
     switch (code) {
@@ -185,6 +187,7 @@ static int step(target_t *t, const char *name, void *scratch) {
 static int resolve(const char *path, int parent, target_t *t) {
     char norm[FAT32_MAX_PATH];
     if (vfs_normalize(path, norm, sizeof(norm)) != 0) return FATV_BAD_NAME;
+    if (path_check && !path_check(norm)) return FAT32_ERR_PERMISSION;   /* outside a sandbox */
     const char *rest;
     t->m = find_mount(norm, &rest);
     if (!t->m) return FATV_NOT_FOUND;

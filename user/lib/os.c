@@ -36,6 +36,7 @@ int statx(const char *path, struct os_statx *st) { return (int)os_syscall(SYS_ST
 int chmod(const char *path, unsigned mode)      { return (int)os_syscall(SYS_CHMOD, (long)path, mode, 0); }
 int chown(const char *path, int uid, int gid)   { return (int)os_syscall(SYS_CHOWN, (long)path, uid, gid); }
 int rename(const char *from, const char *to)    { return (int)os_syscall(SYS_RENAME, (long)from, (long)to, 0); }
+int sandbox(int op, const char *dirs, int net)  { return (int)os_syscall(SYS_SANDBOX, op, (long)dirs, net); }
 int meminfo(struct os_meminfo *m)               { return (int)os_syscall(SYS_MEMINFO, (long)m, 0, 0); }
 int getuser(struct os_user *u)                  { return (int)os_syscall(SYS_GETUSER, (long)u, 0, 0); }
 int getpid(void)                                { return (int)os_syscall(SYS_GETPID, 0, 0, 0); }

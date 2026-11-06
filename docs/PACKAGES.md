@@ -47,7 +47,16 @@ version = 1.0
 author = Your Name
 color = FF9500        # the drawn icon's colour when there is no icon.png
 icon = folder         # (optional) a built-in icon instead of icon.png
+files = Documents     # (optional) home folders it may use besides its own
+network = yes         # (optional) it may use the network
 ```
+
+An installed app runs in a sandbox: of your home folder (and the USB stick)
+it sees only its own folder `~/Apps/ID/` and the folders `files` names
+(`Documents, Pictures`, up to five); without `network = yes` it cannot
+connect, listen or look up a name. The system's files stay readable. The
+programs it starts are in the same sandbox, and it cannot widen it (the
+`sandbox` call only ever narrows). The built-in apps are not sandboxed.
 
 Build the package (in Docker, like the OS):
 
@@ -88,3 +97,8 @@ that is an ELF file, nothing outside the app's folder) and installs at most
   installing or removing, and it reads them again.
 - `user/lib/ui.c`: `ui_icon` draws a picture file when the icon name is a
   path (`icon.png`).
+- The sandbox: the window server calls `sandbox(SANDBOX_NEXT, folders,
+  network)` before it starts an installed app; the kernel keeps it in the
+  process (`sys/process.c`, inherited by what it starts), the VFS asks it
+  about every path (`vfs_set_path_check`) and the network calls check it.
+  `attack sandbox` (system test `user`) tries to get out.

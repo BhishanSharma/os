@@ -975,6 +975,65 @@ static int64_t sys_chown(uint64_t path_ptr, uint64_t uid, uint64_t gid) {
     return fs_result(vfs_chown(path, (int64_t)(int32_t)uid, (int64_t)(int32_t)gid));
 }
 
+/* ---- Sandbox ------------------------------------------------------------- */
+
+static int under(const char *path, const char *dir) {
+    size_t n = strlen(dir);
+    for (size_t i = 0; i < n; i++) {
+        char a = path[i], b = dir[i];
+        if (a >= 'a' && a <= 'z') a -= 32;
+        if (b >= 'a' && b <= 'z') b -= 32;
+        if (a != b) return 0;
+    }
+    return path[n] == '/' || path[n] == 0;
+}
+
+/* For the VFS: a sandboxed program keeps out of the homes and the USB stick
+ * except for its folders (the rest is the system's, guarded by owners). */
+int process_sandbox_allows(const char *abs) {
+    task_t *t = task_current();
+    if (!t || !t->is_user || !P()->sandbox.on) return 1;
+    if (!under(abs, "/HOME") && !under(abs, "/USB")) return 1;
+    for (int i = 0; i < SANDBOX_DIRS; i++)
+        if (P()->sandbox.dirs[i][0] && under(abs, P()->sandbox.dirs[i])) return 1;
+    return 0;
+}
+
+int process_may_network(void) {
+    task_t *t = task_current();
+    return !t || !t->is_user || !P()->sandbox.on || P()->sandbox.net;
+}
+
+static int64_t sys_sandbox(uint64_t op, uint64_t dirs_ptr, uint64_t net) {
+    char dirs[SANDBOX_DIRS * 96];
+    if (op > SANDBOX_SELF) return SYSERR_BADCALL;
+    if (dirs_ptr && copy_user_string(dirs, dirs_ptr, sizeof(dirs)) != 0) return SYSERR_FAULT;
+    if (!dirs_ptr) dirs[0] = 0;
+    process_t *p = P();
+    if (op == SANDBOX_SELF && p->sandbox.on) return SYSERR_PERM;        /* no way out, nor wider */
+    sandbox_t box;
+    memset(&box, 0, sizeof(box));
+    box.on = 1;
+    box.net = net != 0 && !(p->sandbox.on && !p->sandbox.net);
+    int n = 0;
+    for (char *line = dirs, *next; line && *line && n < SANDBOX_DIRS; line = next) {
+        next = 0;
+        for (char *c = line; *c; c++)
+            if (*c == '\n') {
+                *c = 0;
+                next = c + 1;
+                break;
+            }
+        char abs[MAX_PATH];
+        if (!*line || vfs_absolute(user_cwd(), line, abs, sizeof(abs)) != 0 || strlen(abs) >= 96) continue;
+        if (p->sandbox.on && !process_sandbox_allows(abs)) continue;            /* (inside its own box only) */
+        kstrncpy(box.dirs[n++], abs, 96);
+    }
+    if (op == SANDBOX_SELF) p->sandbox = box;
+    else p->sandbox_next = box;
+    return 0;
+}
+
 static int64_t sys_rename(uint64_t from_ptr, uint64_t to_ptr) {
     char from[MAX_PATH], to[MAX_PATH];
     if (user_path(from_ptr, from, sizeof(from)) != 0 || user_path(to_ptr, to, sizeof(to)) != 0) return SYSERR_FAULT;
@@ -1142,6 +1201,7 @@ static void syscall_dispatch_locked(struct exc_frame *f) {
         case SYS_CHMOD:   r = sys_chmod(f->rdi, f->rsi); break;
         case SYS_CHOWN:   r = sys_chown(f->rdi, f->rsi, f->rdx); break;
         case SYS_RENAME:  r = sys_rename(f->rdi, f->rsi); break;
+        case SYS_SANDBOX: r = sys_sandbox(f->rdi, f->rsi, f->rdx); break;
         case SYS_LISTDIR: r = sys_listdir(f->rdi, f->rsi, f->rdx); break;
         case SYS_MEMINFO: r = sys_meminfo(f->rdi); break;
         case SYS_MMAP:    r = sys_mmap(f->rdi, f->rsi, (int64_t)f->rdx); break;
@@ -1384,6 +1444,12 @@ static int spawn_as(const uint8_t *data, uint32_t size, const char *path, int ar
         ends_added(f);
     }
     kstrncpy(p->cwd, cwd, sizeof(p->cwd));
+    if (parent && parent->sandbox.on) {
+        p->sandbox = parent->sandbox;                   /* what a sandboxed app starts stays in it */
+    } else if (parent && parent->sandbox_next.on) {
+        p->sandbox = parent->sandbox_next;
+        parent->sandbox_next.on = 0;
+    }
 
     // Name for ps and messages: the file name without folders and extension.
     const char *base = argv[0];
@@ -2124,6 +2190,7 @@ static int64_t sys_fork(struct exc_frame *f) {
     }
     memcpy(c, p, sizeof(*c));
     memset(&c->ports, 0, sizeof(c->ports));
+    c->sandbox_next.on = 0;
     c->sig_pending = 0;
     c->threads = 1;
     c->root = root;

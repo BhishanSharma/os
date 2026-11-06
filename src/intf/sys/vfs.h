@@ -37,6 +37,8 @@
  * returns 1 when no permission applies (the kernel itself, root, or the
  * kernel acting for a user, as when it saves the account file). */
 void vfs_set_creds(int (*creds)(uint32_t *uid, uint32_t *gid));
+/* And the sandbox (sys/process.c): 0 if the current program may not touch `abs`. */
+void vfs_set_path_check(int (*check)(const char *abs));
 
 typedef struct {
     uint32_t size;

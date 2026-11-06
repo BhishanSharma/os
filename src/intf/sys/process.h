@@ -66,4 +66,7 @@ int process_page_fault(uint64_t addr, uint64_t err);
 int process_kernel_page_fault(uint64_t addr, uint64_t err);
 int process_signal_pending(void);    /* a handled signal waits: blocking calls return early */
 
+/* The sandbox's path check (vfs_set_path_check): 0 outside the program's folders. */
+int process_sandbox_allows(const char *abs);
+
 #endif

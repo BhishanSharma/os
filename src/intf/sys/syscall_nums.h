@@ -102,6 +102,13 @@
 #define SYS_CHMOD     75 /* chmod(path, mode): the owner or root           -> 0, SYSERR_NOTSUP on FAT32 */
 #define SYS_CHOWN     76 /* chown(path, uid, gid): root; -1 keeps each       -> 0 */
 #define SYS_RENAME    77 /* rename(from, to): same volume; a file at `to` is replaced -> 0 */
+
+/* Sandbox (stage 10): an app sees only the folders of /HOME and /USB it was
+ * given (one per line in `dirs`), and the network only with `network` 1. It
+ * cannot be widened again, and the programs it starts are in it too. */
+#define SYS_SANDBOX   78 /* sandbox(op, dirs, network), op SANDBOX_* -> 0 */
+#define SANDBOX_NEXT  0  /* for the next program this one starts (the window server, for an app) */
+#define SANDBOX_SELF  1  /* for this program, from now on */
 #define SYS_POLLWAIT  67 /* pollwait(gen, ms, net): gen -1 -> the I/O counter; else sleep until it is
                             not gen (a pipe or local socket changed), the next interrupt (net = 1:
                             TCP sockets are watched too) or ms pass -> the counter */

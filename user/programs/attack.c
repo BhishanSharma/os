@@ -4,6 +4,7 @@
 //   sigreturn  return from a "signal handler" to a kernel address
 //   tramp      a signal trampoline in the kernel
 //   port       take over the "echo" service (launchd's echod, as root)
+//   sandbox    a sandboxed program reads the home, uses the network, widens its box
 #include <stdio.h>
 #include <string.h>
 #include <os.h>
@@ -45,8 +46,37 @@ static int evil_elf(void) {
 
 static void handler(int sig) { (void)sig; }
 
+/* Run in a sandbox of /TMP/box only: the home, the network and a wider box
+ * must all be refused, the box itself not. */
+static void in_sandbox(void) {
+    struct os_user u;
+    char secret[128];
+    getuser(&u);
+    snprintf(secret, sizeof(secret), "%s/secret.txt", u.home);
+    int fd = open(secret, OPEN_WRITE);
+    if (fd >= 0) {
+        write(fd, "mine", 4);
+        close(fd);
+    }
+    mkdir("/TMP/box");
+    if (sandbox(SANDBOX_SELF, "/TMP/box", 0) != 0) {
+        printf("attack sandbox: could not start\n");
+        return;
+    }
+    say("sandbox home", open(secret, OPEN_READ) < 0);      /* (it is not even there for it) */
+    unsigned char ip[4];
+    say("sandbox network", os_syscall(SYS_RESOLVE, (long)"example.com", (long)ip, 0) == SYSERR_PERM);
+    say("sandbox widen", sandbox(SANDBOX_SELF, u.home, 1) != 0);
+    fd = open("/TMP/box/ok.txt", OPEN_WRITE);
+    printf("attack sandbox: its own folder %s\n", fd >= 0 && close(fd) == 0 ? "works" : "FAILS");
+}
+
 int main(int argc, char **argv) {
     const char *kind = argc > 1 ? argv[1] : "";
+    if (!strcmp(kind, "sandbox")) {
+        in_sandbox();
+        return 0;
+    }
     if (!strcmp(kind, "elf")) {
         say("elf", evil_elf() < 0);
     } else if (!strcmp(kind, "sigreturn")) {

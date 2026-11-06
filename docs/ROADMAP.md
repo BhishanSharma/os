@@ -77,6 +77,13 @@ D3 for devices (so it draws more than Windows' Modern Standby: hours, not
 days), no wake on the touchpad, the power button no longer shuts down (the
 menu's Shut Down and `shutdown` do).
 
+Stage 10's sandbox is done, lean: installed apps (`~/Apps/ID`) run with
+their own folder and the home folders their app.cfg names (`files =`), the
+network only with `network = yes` (docs/PACKAGES.md). The kernel keeps the
+sandbox per process (inherited, never widened), the VFS asks it about every
+path, the network calls check it. Cuts: ports (Mach IPC) and shared memory
+are not limited; built-in apps are not sandboxed; a settings app for it.
+
 Each stage below is the *lean* version: the smallest design that gives the
 macOS-style structure, with the cuts written down. One stage per working
 session; it ends with `make test` + `make test-os` green, a USB stick, one

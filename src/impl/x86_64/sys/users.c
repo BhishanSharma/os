@@ -17,6 +17,7 @@
 #include "sys/task.h"
 #include "drivers/fat32.h"
 #include "sys/vfs.h"
+#include "sys/process.h"
 #include "drivers/disk.h"
 #include "drivers/keyboard.h"
 #include "drivers/timer.h"
@@ -507,6 +508,7 @@ void users_init(void) {
     fat32_set_write_guard(write_guard);
     fat32_set_read_guard(read_guard);
     vfs_set_creds(creds);
+    vfs_set_path_check(process_sandbox_allows);
     session_depth = 0;
     load_accounts();
     if (!find_account("root") && !fbcon_active()) first_start();

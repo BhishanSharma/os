@@ -55,6 +55,13 @@ typedef struct kfile {
 } file_t;
 
 
+#define SANDBOX_DIRS 6
+
+typedef struct {
+    int on, net;
+    char dirs[SANDBOX_DIRS][96];      // absolute: "/HOME/BOSS/Apps/notes"
+} sandbox_t;
+
 typedef struct {
     uint64_t brk_start, brk;
     uint64_t stack_lo;                // the stack region's start
@@ -71,6 +78,7 @@ typedef struct {
     char line_buf[256];               // keyboard input for read(0), one line at a time
     uint32_t line_len, line_pos;
     char cwd[256];                    // its own current directory
+    sandbox_t sandbox, sandbox_next;  // what it may use (on: sandboxed); for the next program it starts
     int ctrlc_mode;                   // CTRLC_END / CTRLC_KEY
     pipe_t *tap_out, *tap_in;         // a kernel command run from a Terminal window: its pipes
     char tap_buf[128];
@@ -80,6 +88,7 @@ typedef struct {
 
 /* The running program. */
 static inline process_t *P(void) { return (process_t *)task_current()->process; }
+int process_may_network(void);           /* 0 in a sandbox without the network */
 
 /* 1 if the running program may read (or, with `write`, write) [ptr, ptr + len);
  * missing pages of its regions are brought in. */

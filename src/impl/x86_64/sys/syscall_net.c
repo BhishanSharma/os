@@ -70,6 +70,7 @@ static int64_t sys_recv(uint64_t s, uint64_t buf, uint64_t len, uint64_t timeout
 
 int64_t sys_net(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
     int64_t r;
+    if ((nr == SYS_RESOLVE || nr == SYS_CONNECT || nr == SYS_LISTEN) && !process_may_network()) return SYSERR_PERM;
     switch (nr) {
         case SYS_RESOLVE: return sys_resolve(a, b);
         case SYS_CONNECT: return sys_connect(a, b, c);

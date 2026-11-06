@@ -50,6 +50,7 @@ int statx(const char *path, struct os_statx *st);   /* with owner, mode and time
 int chmod(const char *path, unsigned mode);  /* SYSERR_NOTSUP on FAT32 */
 int chown(const char *path, int uid, int gid);   /* root; -1 keeps */
 int rename(const char *from, const char *to);
+int sandbox(int op, const char *dirs, int network);   /* SANDBOX_NEXT / SANDBOX_SELF; dirs one per line */
 int meminfo(struct os_meminfo *m);
 int getuser(struct os_user *user);           /* who is running this program */
 int getpid(void);                            /* this program's process id */

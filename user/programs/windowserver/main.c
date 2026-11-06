@@ -261,6 +261,17 @@ static void load_dock(void) {
 /* The apps this user installed (tapp: docs/PACKAGES.md), after the built-in
  * ones: ~/Apps/ID/app.cfg ("name = ...", "color = RRGGBB", "icon = NAME"),
  * the program ~/Apps/ID/ID, its picture ~/Apps/ID/icon.png. */
+/* Installed apps run in a sandbox (stage 10): their own folder, the home
+ * folders app.cfg names ("files = Documents, Pictures"), the network only
+ * with "network = yes". */
+static struct { char program[128], dirs[600]; int net; } boxes[MAX_DOCK];
+static int n_boxes;
+
+static void sandbox_for(const char *program) {
+    for (int i = 0; i < n_boxes; i++)
+        if (!strcmp(boxes[i].program, program)) sandbox(SANDBOX_NEXT, boxes[i].dirs, boxes[i].net);
+}
+
 static void load_installed(void) {
     static char text[MAX_DOCK][3][128];               /* name, program, icon */
     static struct os_dirent ents[MAX_DOCK];
@@ -283,6 +294,9 @@ static void load_installed(void) {
         char *name = text[k][0], *program = text[k][1], *icon = text[k][2];
         snprintf(name, 128, "%s", id);
         icon[0] = 0;
+        int box = n_boxes < MAX_DOCK ? n_boxes++ : MAX_DOCK - 1;
+        snprintf(boxes[box].dirs, sizeof(boxes[box].dirs), "%s/%s", dir, id);
+        boxes[box].net = 0;
         unsigned color = 0x8E8E93;
         for (char *line = cfg, *next; line && *line; line = next) {   /* key = value  # comment */
             next = strchr(line, '\n');
@@ -300,6 +314,17 @@ static void load_installed(void) {
             *end = 0;
             if (!strcmp(key, "name") && *value) snprintf(name, 128, "%s", value);
             else if (!strcmp(key, "icon")) snprintf(icon, 128, "%s", value);
+            else if (!strcmp(key, "network")) boxes[box].net = !strcmp(value, "yes");
+            else if (!strcmp(key, "files")) {
+                for (char *f = value, *comma; f && *f; f = comma) {   /* "Documents, Pictures" */
+                    comma = strchr(f, ',');
+                    if (comma) *comma++ = 0;
+                    while (*f == ' ') f++;
+                    size_t used = strlen(boxes[box].dirs);
+                    if (*f && !strchr(f, '/') && strcmp(f, "..") && strcmp(f, "Apps"))
+                        snprintf(boxes[box].dirs + used, sizeof(boxes[box].dirs) - used, "\n%s/%s", u.home, f);
+                }
+            }
             else if (!strcmp(key, "color")) {
                 color = 0;
                 for (char *p = value; *p; p++)
@@ -307,6 +332,7 @@ static void load_installed(void) {
             }
         }
         snprintf(program, 128, "%s/%s/%s", dir, id, id);
+        snprintf(boxes[box].program, sizeof(boxes[box].program), "%s", program);
         struct os_stat st;
         snprintf(path, sizeof(path), "%s/%s/icon.png", dir, id);
         if (stat(path, &st) == 0 && !st.is_dir) snprintf(icon, 128, "%s", path);
@@ -2651,6 +2677,7 @@ static void launch(int i) {
         }
     if (apps[i].pid > 0 && apps[i].launching) return;     /* a second click while it starts */
     char *argv[] = { (char *)apps[i].program, 0 };
+    sandbox_for(apps[i].program);
     int pid = spawn(apps[i].program, argv, 0);
     printf("windowserver: open %s: %s\n", apps[i].program, pid > 0 ? "started" : "cannot start");   /* (in the log) */
     if (pid > 0) {
@@ -2668,6 +2695,7 @@ static int n_started;
 
 static void run(const char *program, const char *arg) {
     char *argv[] = { (char *)program, (char *)arg, 0 };
+    sandbox_for(program);
     int pid = spawn(program, argv, 0);
     printf("windowserver: open %s: %s\n", program, pid > 0 ? "started" : "cannot start");
     if (pid <= 0) return;

@@ -387,6 +387,9 @@ def test_user():
         check("permission denied" in out, "an everyday user read the password file", out)
         out = m.run("attack port", 60)                # echod (root) has "echo": not boss's to take
         check("attack port: refused" in out, "an everyday user took over a root service", out)
+        out = m.run("attack sandbox", 60)             # stage 10: an app's sandbox holds
+        check(out.count(": refused") == 3 and "NOT REFUSED" not in out and "folder works" in out,
+              "the sandbox", out)
     finally:
         m.stop()
 
