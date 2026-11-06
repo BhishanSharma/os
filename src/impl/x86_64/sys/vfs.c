@@ -319,9 +319,10 @@ int vfs_root_persistent(void) {
     return m && mdev(m)->kind != DISK_RAM;
 }
 
-const char *vfs_partition_mount(uint64_t start) {
+const char *vfs_partition_mount(int drive, uint64_t start) {
     for (int i = 0; i < VFS_MAX_MOUNTS; i++)
-        if (mounts[i].used && mdev(&mounts[i])->kind == DISK_NVME && mdev(&mounts[i])->part_start == start)
+        if (mounts[i].used && mdev(&mounts[i])->kind == DISK_DRIVE && mdev(&mounts[i])->drive == drive &&
+            mdev(&mounts[i])->part_start == start)
             return mounts[i].path;
     return 0;
 }

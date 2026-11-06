@@ -135,6 +135,16 @@ Taking and leaving the lock now happen with interrupts off: an interrupt on
 the same core (which takes the lock too) between setting the owner and the
 depth could free it under another core and let two cores into the kernel.
 
+Hardware breadth: SATA drives (AHCI, MSI; every disk is a drive next to
+NVMe: partitions, `/`, `install` and the firmware boot from it), USB hubs
+(USB 2 and 3, five tiers, plug-in and removal behind them, slots given back
+when a device goes), and the processor's own power management (Intel HWP:
+the CPU picks its clock, turbo included, leaning balanced; idle cores in
+MWAIT C6 where the APIC timer and TSC keep running; `cpu` measures the
+clock). Every core's idle task now waits outside the kernel lock (only
+core 0's did). Cuts: no port multipliers, CD/DVD or 4Kn disks; no
+AMD P-states (CPPC); no tickless idle (the 1 ms tick still wakes each core).
+
 Each stage below is the *lean* version: the smallest design that gives the
 macOS-style structure, with the cuts written down. One stage per working
 session; it ends with `make test` + `make test-os` green, a USB stick, one

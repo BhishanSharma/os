@@ -28,6 +28,9 @@
 #include "drivers/iwlwifi.h"
 #include "drivers/hda.h"
 #include "drivers/nvme.h"
+#include "drivers/ahci.h"
+#include "drivers/cpupower.h"
+#include "drivers/drive.h"
 #include "drivers/part.h"
 #include "drivers/fatvol.h"
 #include "sys/vfs.h"
@@ -246,9 +249,11 @@ static void cmd_help(void)
     print_str("free               - free last test allocation\n");
     print_str("freeidx <n>        - free n-th test allocation\n");
     print_str("listptr            - list test allocations\n");
-    print_str("mount [ram|ata|nvme n] [dir] - mount a volume (no arguments: list mounts)\n");
+    print_str("mount [ram|ata|nvme n|sata n|disk d n] [dir] - mount a volume (no arguments: list mounts)\n");
     print_str("umount <dir>       - unmount a volume\n");
-    print_str("nvme               - the NVMe drive and its partitions\n");
+    print_str("disks              - the NVMe and SATA drives and their partitions (also `nvme`)\n");
+    print_str("sata               - the SATA (AHCI) controllers and what is on each port\n");
+    print_str("cpu                - the processor: its clock now, HWP, the idle C-state\n");
     print_str("diskinfo           - boot sector of the current disk\n");
     print_str("readsector <lba>   - dump a raw sector\n");
     print_str("fat32info          - FAT32 volume parameters\n");
@@ -332,17 +337,30 @@ static void cmd_mount(const char *which)
         vfs_print_mounts();
         return;
     }
-    /* mount <ata|ram|nvme N> [folder] */
+    /* mount <ata|ram|nvme N|sata N|disk D N> [folder] */
     char kind[8];
     int k = 0;
     while (*which && *which != ' ' && k < 7) kind[k++] = *which++;
     kind[k] = 0;
     while (*which == ' ') which++;
-    int number = 0;
-    if (!strcmp(kind, "nvme"))
+    int number = 0, drive = -1;
+    int on_drive = !strcmp(kind, "nvme") || !strcmp(kind, "sata") || !strcmp(kind, "disk");
+    if (!strcmp(kind, "disk")) {
+        int d = 0;
+        while (*which >= '0' && *which <= '9') d = d * 10 + (*which++ - '0');
+        while (*which == ' ') which++;
+        drive = d - 1;
+    } else if (on_drive) {
+        for (int i = 0; i < drive_count() && drive < 0; i++)
+            if (!strcmp(drive_get(i)->kind, !strcmp(kind, "nvme") ? "NVMe" : "SATA")) drive = i;
+    }
+    if (on_drive)
         while (*which >= '0' && *which <= '9') number = number * 10 + (*which++ - '0');
     while (*which == ' ') which++;
-    const char *at = *which ? which : !strcmp(kind, "nvme") ? "/NVME" : !strcmp(kind, "ram") ? "/RAM" : "/ATA";
+    char def[12];
+    k_snprintf(def, sizeof(def), "/DISK%d", drive + 1);
+    const char *at = *which ? which : !strcmp(kind, "nvme") ? "/NVME" : !strcmp(kind, "sata") ? "/SATA"
+                   : !strcmp(kind, "disk") ? def : !strcmp(kind, "ram") ? "/RAM" : "/ATA";
     blockdev_t dev;
     if (!strcmp(kind, "ram"))
     {
@@ -352,32 +370,34 @@ static void cmd_mount(const char *which)
     {
         if (ata_init() != 0 || disk_open(DISK_ATA, &dev) != 0) { print_error("No ATA disk found"); return; }
     }
-    else if (!strcmp(kind, "nvme"))
+    else if (on_drive)
     {
-        char how[160];
-        if (!nvme_present() && nvme_init(how, sizeof(how)) != 0)
+        if (!drive_get(drive))
         {
-            kprintf("mount: %s\n", how);
+            kprintf("mount: no such drive (`disks` lists them)\n");
             return;
         }
         static partition_t parts[16];
-        int n = part_scan(nvme_partition_reader, parts, 16);
-        if (number < 1 || number > n)
+        int n = drive_scan(drive, parts, 16);
+        partition_t *p = 0;
+        for (int i = 0; i < n; i++)
+            if (parts[i].number == number) p = &parts[i];
+        if (!p)
         {
-            print_str("usage: mount nvme <partition> [folder]   (`nvme` lists the partitions)\n");
+            kprintf("usage: mount %s <partition> [folder]   (`disks` lists the partitions)\n",
+                    !strcmp(kind, "disk") ? "disk <drive>" : kind);
             return;
         }
-        partition_t *p = &parts[number - 1];
-        if (!p->fat32)
+        if (!p->fat32 && !p->ext2)
         {
-            print_error("That partition is not FAT32 (NTFS cannot be read yet)");
+            print_error("That partition is not FAT32 or ext2/3 (NTFS cannot be read yet)");
             return;
         }
-        if (disk_open_nvme_partition(p->start, p->sectors, p->ours, number, &dev) != 0) return;
+        if (disk_open_drive_partition(drive, p->start, p->sectors, p->ours, number, &dev) != 0) return;
     }
     else
     {
-        print_str("usage: mount [ram|ata|nvme <n>] [folder]   (no arguments: list the mounts)\n");
+        print_str("usage: mount [ram|ata|nvme <n>|sata <n>|disk <d> <n>] [folder]   (no arguments: list the mounts)\n");
         return;
     }
     int r = vfs_mount(at, &dev);
@@ -1016,9 +1036,17 @@ static int kernel_command(const char *line, int run_programs) {
         if (!need_root("umount")) return 1;
         cmd_umount(line + 7);
     }
-    else if (strcmp(line, "nvme") == 0)
+    else if (strcmp(line, "nvme") == 0 || strcmp(line, "disks") == 0)
     {
-        nvme_print_info();
+        drive_print_info();
+    }
+    else if (strcmp(line, "sata") == 0)
+    {
+        ahci_print_info();
+    }
+    else if (strcmp(line, "cpu") == 0)
+    {
+        cpupower_print();
     }
     else if (strcmp(line, "lspci") == 0)
     {

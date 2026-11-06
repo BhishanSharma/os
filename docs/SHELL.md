@@ -88,7 +88,8 @@ disk the accounts last until reboot.
 | `dmesg`                    | The full boot log, including the driver messages hidden at boot |
 | `bklstat` [`reset`]        | The big kernel lock: how long each core waited for it, and who held it how long (by system call); `reset` counts again from now |
 | `lspci`                    | Every device on the PCI bus: address, IDs, kind, maker, and the driver of this OS that runs it |
-| `lsusb`                    | The USB controller and what is plugged into each port (keyboards and mice are used; plug-in and removal are noticed) |
+| `lsusb`                    | The USB controller and what is plugged into each port, hubs included (`3.2` is port 2 of the hub on port 3); keyboards, mice and sticks are used; plug-in and removal are noticed, behind hubs too |
+| `cpu`                      | The processor: its clock while busy (measured), hardware P-states (HWP) and the C-state idle cores wait in |
 | `touchpad`                 | Find the laptop's I2C touchpad: controllers, addresses that answer, its report layout, then 8 seconds of raw reports |
 | `clock [local\|utc]`       | Whether the hardware clock holds local time (Windows) or UTC (Linux, VMs); real PCs default to local |
 | `clear`                    | Clear the screen                                         |
@@ -101,9 +102,10 @@ disk the accounts last until reboot.
 | `malloc <bytes>`           | Allocate heap memory in a test slot                      |
 | `free` / `freeidx <n>`     | Free the last / the n-th test allocation                 |
 | `listptr`                  | List test allocations                                    |
-| `mount [ram\|ata\|nvme n] [dir]` | List the mounted volumes, or mount one at a folder (default /RAM, /ATA, /NVME) |
+| `mount [ram\|ata\|nvme n\|sata n\|disk d n] [dir]` | List the mounted volumes, or mount one at a folder (default /RAM, /ATA, /NVME, /SATA, /DISKd); FAT32 or ext2/3 |
 | `umount <dir>`             | (root) Unmount a volume (not /)                          |
-| `nvme`                     | The NVMe drive: model, size, partitions (TERMINALOS is the read-write one) |
+| `disks` (or `nvme`)        | Every NVMe and SATA drive: model, size, partitions (TERMINALOS is the read-write one) |
+| `sata`                     | The SATA (AHCI) controllers and what is on each port (disk, CD/DVD drive, nothing) |
 | `cpus`                     | The CPU cores and what each one runs                     |
 | `interrupts`               | Devices that interrupt through MSI/MSI-X, and how often  |
 | `diskinfo`                 | Boot sector of the current disk                          |
@@ -166,11 +168,14 @@ made with Windows (Terminal OS never changes Windows' partition table):
 2. Right-click the new "Unallocated" space: New Simple Volume. No drive letter
    is needed; file system **FAT32**, volume label **TERMINALOS**.
 3. Boot Terminal OS: the boot screen says "Files: on the NVMe TERMINALOS
-   partition". That partition is now `/`; the RAM disk's programs and
-   firmware are at `/SYS`. The first boot asks for a root password again.
+   partition" (or SATA, for an SSD or hard disk on SATA). That partition is
+   now `/`; the RAM disk's programs and firmware are at `/SYS`. The first
+   boot asks for a root password again.
 
 If the drive is not found, the firmware setup may have the SSD in Intel
-RST/VMD mode (`nvme` says so); AHCI/NVMe mode shows it.
+RST/VMD or RAID mode (the boot screen and `disks` say so); AHCI/NVMe mode
+shows it. With several drives, the first TERMINALOS partition found is `/`
+(NVMe before SATA); `install` lists every drive's partitions.
 
 ## Mouse
 

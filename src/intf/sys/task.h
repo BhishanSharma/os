@@ -51,6 +51,10 @@ typedef struct task {
 int task_freezing(void);
 int task_slice_over(void);
 
+/* A core's idle task, for ever: runs what there is, else waits outside the
+ * kernel lock (core 0's idle task; each other core's after it starts). */
+void task_idle_loop(void) __attribute__((noreturn));
+
 /* The boot context becomes task 1 ("shell"); also starts the idle task (pid 0). */
 void task_init(void);
 /* A core that just started: its boot context becomes its idle task. */

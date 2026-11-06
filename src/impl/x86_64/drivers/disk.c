@@ -1,7 +1,7 @@
-// disk.c - block devices: the ATA disk, NVMe partitions and the RAM disk
+// disk.c - block devices: the ATA disk, the drives' partitions and the RAM disk
 #include "drivers/disk.h"
 #include "drivers/ata.h"
-#include "drivers/nvme.h"
+#include "drivers/drive.h"
 #include "drivers/usb.h"
 #include "drivers/heap.h"
 #include "lib/string.h"
@@ -42,18 +42,24 @@ static int ata_wr(void *ctx, uint64_t lba, uint32_t count, const void *buf) {
     return lba + count > 0xFFFFFFFFull ? -1 : ata_write_sectors((uint32_t)lba, count, (uint8_t *)buf);
 }
 
-typedef struct { uint64_t start, sectors; int writable; } nvme_part_t;
+typedef struct { int drive; uint64_t start, sectors; int writable; } drive_part_t;
 
-static int nvme_part_read(void *ctx, uint64_t lba, uint32_t count, void *buf) {
-    nvme_part_t *p = ctx;
+static int drive_part_read(void *ctx, uint64_t lba, uint32_t count, void *buf) {
+    drive_part_t *p = ctx;
     if (lba + count > p->sectors) return -1;
-    return nvme_read(p->start + lba, count, buf);
+    return drive_read(p->drive, p->start + lba, count, buf);
 }
 
-static int nvme_part_write(void *ctx, uint64_t lba, uint32_t count, const void *buf) {
-    nvme_part_t *p = ctx;
+static int drive_part_write(void *ctx, uint64_t lba, uint32_t count, const void *buf) {
+    drive_part_t *p = ctx;
     if (!p->writable || lba + count > p->sectors) return -1;    /* only inside our own partition */
-    return nvme_write(p->start + lba, count, buf);
+    return drive_write(p->drive, p->start + lba, count, buf);
+}
+
+static int drive_part_flush(void *ctx) {
+    drive_part_t *p = ctx;
+    const drive_t *d = drive_get(p->drive);
+    return d && d->flush ? d->flush(d->ctx) : 0;
 }
 
 typedef struct { int stick; uint64_t start, sectors; int writable; } usb_part_t;
@@ -111,21 +117,26 @@ int disk_open(disk_kind_t kind, blockdev_t *out) {
     return -1;
 }
 
-int disk_open_nvme_partition(uint64_t start, uint64_t sectors, int writable, int number, blockdev_t *out) {
-    nvme_part_t *p = kmalloc(sizeof(*p));
+int disk_open_drive_partition(int drive, uint64_t start, uint64_t sectors, int writable, int number, blockdev_t *out) {
+    const drive_t *d = drive_get(drive);
+    if (!d) return -1;
+    drive_part_t *p = kmalloc(sizeof(*p));
     if (!p) return -1;
+    p->drive = drive;
     p->start = start;
     p->sectors = sectors;
     p->writable = writable;
     memset(out, 0, sizeof(*out));
-    out->kind = DISK_NVME;
+    out->kind = DISK_DRIVE;
+    out->drive = drive;
     out->part_start = start;
-    out->read = nvme_part_read;
-    out->write = nvme_part_write;
+    out->read = drive_part_read;
+    out->write = drive_part_write;
+    if (d->flush) out->flush = drive_part_flush;
     out->ctx = p;
     out->sectors = sectors;
     out->writable = writable;
-    if (writable) kstrncpy(out->name, "NVMe disk", sizeof(out->name));
-    else k_snprintf(out->name, sizeof(out->name), "NVMe partition %d", number);
+    if (writable) k_snprintf(out->name, sizeof(out->name), "%s disk", d->kind);
+    else k_snprintf(out->name, sizeof(out->name), "%s partition %d", d->kind, number);
     return 0;
 }

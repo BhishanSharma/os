@@ -9,6 +9,7 @@
 //   4. Reads and writes go through a 64 KiB bounce buffer described by a PRP
 //      list, so callers may pass any buffer.
 #include "drivers/nvme.h"
+#include "drivers/drive.h"
 #include "sys/smp.h"
 #include "drivers/part.h"
 #include "drivers/pci.h"
@@ -151,6 +152,9 @@ static int find_controller(pci_device_t *out, int *vmd) {
     return -1;
 }
 
+static int drive_rd(void *ctx, uint64_t lba, uint32_t count, void *buf);
+static int drive_wr(void *ctx, uint64_t lba, uint32_t count, const void *buf);
+
 int nvme_init(char *how, int size) {
     pci_device_t d;
     int vmd;
@@ -274,6 +278,18 @@ int nvme_init(char *how, int size) {
     k_snprintf(desc, sizeof(desc), "%s, %u.%u GB", model[0] ? model : "NVMe drive", (uint32_t)(mb / 1000),
                (uint32_t)(mb % 1000 / 100));
     k_snprintf(how, (size_t)size, "%s", desc);
+    static int added;
+    if (!added) {                                           /* (the drive list: drivers/drive.h) */
+        added = 1;
+        drive_t dr;
+        memset(&dr, 0, sizeof(dr));
+        dr.kind = "NVMe";
+        kstrncpy(dr.model, model[0] ? model : "NVMe drive", sizeof(dr.model));
+        dr.sectors = nvme_sectors();
+        dr.read = drive_rd;
+        dr.write = drive_wr;
+        drive_add(&dr);
+    }
     return 0;
 }
 
@@ -320,6 +336,16 @@ int nvme_write(uint64_t lba, uint32_t count, const void *buf) {
 }
 
 int nvme_partition_reader(uint64_t lba, uint32_t count, void *buf) { return nvme_read(lba, count, buf); }
+
+static int drive_rd(void *ctx, uint64_t lba, uint32_t count, void *buf) {
+    (void)ctx;
+    return nvme_read(lba, count, buf);
+}
+
+static int drive_wr(void *ctx, uint64_t lba, uint32_t count, const void *buf) {
+    (void)ctx;
+    return nvme_write(lba, count, buf);
+}
 
 void nvme_print_info(void) {
     if (!ready) {

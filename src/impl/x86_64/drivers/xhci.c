@@ -1,4 +1,4 @@
-// xhci.c - USB 3 host controller (xHCI): mice, keyboards and USB sticks
+// xhci.c - USB 3 host controller (xHCI): mice, keyboards, USB sticks, hubs
 //
 // The controller works from rings of 16-byte TRBs in memory: a command ring
 // (we ask it to give a device an address, set up an endpoint, ...), one
@@ -10,7 +10,14 @@
 // Reference: the eXtensible Host Controller Interface specification 1.2, and
 // the USB 2.0 spec chapter 9 (device requests) and HID 1.11 appendix B (boot
 // protocol mouse); for sticks, the USB Mass Storage Bulk-Only Transport 1.0
-// and the SCSI block commands (SBC-3: READ CAPACITY, READ and WRITE (10)).
+// and the SCSI block commands (SBC-3: READ CAPACITY, READ and WRITE (10));
+// for hubs, USB 2.0 chapter 11 and USB 3.2 chapter 10 (hub class requests).
+//
+// Hubs: a device behind one is addressed with a route string (a hub port
+// number per tier, up to 5 tiers) and its root port; a low- or full-speed
+// device behind a high-speed hub also names that hub's transaction
+// translator. A hub reports plugs on its status endpoint; its ports are then
+// looked at again from usb_service, as the root ports are.
 #include "drivers/usb.h"
 #include "sys/smp.h"
 #include "drivers/msi.h"
@@ -95,7 +102,7 @@ typedef struct {
 
 enum {
     TRB_NORMAL = 1, TRB_SETUP = 2, TRB_DATA = 3, TRB_STATUS = 4, TRB_LINK = 6,
-    TRB_ENABLE_SLOT = 9, TRB_ADDRESS_DEVICE = 11, TRB_CONFIGURE_EP = 12, TRB_EVALUATE = 13,
+    TRB_ENABLE_SLOT = 9, TRB_DISABLE_SLOT = 10, TRB_ADDRESS_DEVICE = 11, TRB_CONFIGURE_EP = 12, TRB_EVALUATE = 13,
     TRB_RESET_EP = 14, TRB_SET_DEQUEUE = 16,
     TRB_EV_TRANSFER = 32, TRB_EV_COMMAND = 33, TRB_EV_PORT = 34,
 };
@@ -114,7 +121,8 @@ typedef struct {
 
 /* ---- State ----------------------------------------------------------------- */
 
-#define MAX_DEVICES 16
+#define MAX_DEVICES 32
+#define MAX_TIERS   5               /* hubs below the root port (USB allows 5) */
 #define HID_KEYBOARD 1              /* = the boot interface protocol numbers */
 #define HID_MOUSE    2
 
@@ -132,9 +140,21 @@ typedef struct {
 } hid_t;
 
 typedef struct {
-    int port;                       /* 1-based root port */
+    int port;                       /* 1-based root port (behind hubs: the first hub's) */
     int speed;
     int slot;
+    int hub_slot, hub_port;         /* behind a hub: its slot and port (0: on a root port) */
+    uint32_t route;                 /* route string: the hub port of each tier, 4 bits each */
+    int tier;                       /* hubs between it and the root port */
+    int tt_slot, tt_port;           /* low/full speed behind a high-speed hub: its translator */
+    /* A hub. */
+    int hub_ports;                  /* 0: not (yet) a working hub */
+    int hub_ss;                     /* a USB 3 hub (its other half is a USB 2 hub) */
+    int hub_dci, hub_mps;
+    uint8_t hub_interval;
+    ring_t hub_ring;
+    uint8_t *hub_change;            /* the bitmap of ports that changed, from the status endpoint */
+    volatile int hub_changed;
     uint16_t vendor, product;
     uint8_t dev_class, if_class, if_subclass, if_protocol;
     hid_t hid[MAX_HID];
@@ -347,8 +367,9 @@ static int address_device(usb_device_t *d) {
 
     uint32_t *icc = in_entry(d, 0), *slot = in_entry(d, 1), *ep0 = in_entry(d, 2);
     icc[1] = 0x3;                                           /* add: slot, EP0 */
-    slot[0] = ((uint32_t)d->speed << 20) | (1u << 27);      /* one context entry */
+    slot[0] = (d->route & 0xFFFFF) | ((uint32_t)d->speed << 20) | (1u << 27);   /* route, speed, one entry */
     slot[1] = (uint32_t)d->port << 16;                      /* root hub port */
+    slot[2] = (uint32_t)d->tt_slot | (uint32_t)d->tt_port << 8;   /* (behind a high-speed hub) */
     ep0[1] = (3u << 1) | (4u << 3) | ((uint32_t)ep0_max_packet(d->speed) << 16);   /* CErr 3, control */
     uint64_t deq = virt_to_phys(d->ep0.trbs) | 1;
     ep0[2] = (uint32_t)deq;
@@ -578,6 +599,119 @@ int usb_storage_write(int n, uint64_t lba, uint32_t count, const void *buf) {
     return storage_io(n, lba, count, (void *)buf, 1);
 }
 
+/* ---- Hubs ----------------------------------------------------------------------
+ * Class requests to the hub (USB 2.0 11.24, USB 3.2 10.16): its descriptor,
+ * port power, reset, status and the change bits (cleared by feature). */
+
+#define HUB_PORT_RESET    4
+#define HUB_PORT_POWER    8
+#define HUB_C_CONNECTION  16
+#define HUB_C_ENABLE      17
+#define HUB_C_SUSPEND     18
+#define HUB_C_OVERCURRENT 19
+#define HUB_C_RESET       20
+#define HUB_C_LINK_STATE  25
+#define HUB_C_CONFIG_ERR  26
+#define HUB_C_BH_RESET    29
+
+static uint8_t *hub_buf;                /* (setup runs one device at a time) */
+
+static int hub_port_status(usb_device_t *hub, int port, uint16_t *status, uint16_t *change) {
+    if (control(hub, 0xA3, 0, 0, (uint16_t)port, hub_buf, 4) != 0) return -1;
+    *status = (uint16_t)(hub_buf[0] | hub_buf[1] << 8);
+    *change = (uint16_t)(hub_buf[2] | hub_buf[3] << 8);
+    return 0;
+}
+
+static void hub_clear(usb_device_t *hub, int port, int feature) {
+    control(hub, 0x23, 1, (uint16_t)feature, (uint16_t)port, 0, 0);
+}
+
+/* Every change bit the port has set, cleared (so the hub reports the next). */
+static void hub_clear_changes(usb_device_t *hub, int port, uint16_t change) {
+    if (change & 0x01) hub_clear(hub, port, HUB_C_CONNECTION);
+    if (change & 0x08) hub_clear(hub, port, HUB_C_OVERCURRENT);
+    if (change & 0x10) hub_clear(hub, port, HUB_C_RESET);
+    if (hub->hub_ss) {
+        if (change & 0x20) hub_clear(hub, port, HUB_C_BH_RESET);
+        if (change & 0x40) hub_clear(hub, port, HUB_C_LINK_STATE);
+        if (change & 0x80) hub_clear(hub, port, HUB_C_CONFIG_ERR);
+    } else {
+        if (change & 0x02) hub_clear(hub, port, HUB_C_ENABLE);
+        if (change & 0x04) hub_clear(hub, port, HUB_C_SUSPEND);
+    }
+}
+
+/* Reset a hub port; the speed of what is there, 0 if nothing came up. */
+static int hub_port_reset(usb_device_t *hub, int port) {
+    if (control(hub, 0x23, 3, HUB_PORT_RESET, (uint16_t)port, 0, 0) != 0) return 0;
+    uint16_t status = 0, change = 0;
+    for (int i = 0; i < 50; i++) {
+        delay_ms(10);
+        if (hub_port_status(hub, port, &status, &change) != 0) return 0;
+        if ((change & 0x10) && !(status & 0x10)) break;
+    }
+    hub_clear_changes(hub, port, change);
+    delay_ms(20);                                           /* reset recovery */
+    if (!(status & 0x01) || !(status & 0x02)) return 0;     /* connected and enabled */
+    if (hub->hub_ss) return SPEED_SUPER;
+    return status & 0x200 ? SPEED_LOW : status & 0x400 ? SPEED_HIGH : SPEED_FULL;
+}
+
+static void queue_hub_status(usb_device_t *d) {
+    ring_push(&d->hub_ring, virt_to_phys(d->hub_change), (uint32_t)(d->hub_mps > 8 ? 8 : d->hub_mps),
+              TRB_TYPE(TRB_NORMAL) | TRB_IOC | TRB_ISP);
+    ring_doorbell(d->slot, d->hub_dci);
+}
+
+/* Tell the controller the device is a hub (its ports, the translator's
+ * think time), set up its status endpoint, and power its ports. */
+static int setup_hub(usb_device_t *d, uint8_t config_value) {
+    if (d->tier >= MAX_TIERS) { d->note = "hub: more than 5 hubs deep"; return -1; }
+    if (!hub_buf && !(hub_buf = dma_alloc(64, 64))) { d->note = "out of memory"; return -1; }
+    int ss = d->speed == SPEED_SUPER;
+    if (control(d, 0xA0, 6, ss ? 0x2A00 : 0x2900, 0, hub_buf, ss ? 12 : 9) != 0) {
+        d->note = "hub: no hub descriptor";
+        return -1;
+    }
+    int ports = hub_buf[2] > 15 ? 15 : hub_buf[2];          /* (a route string tier holds 15) */
+    uint16_t chars = (uint16_t)(hub_buf[3] | hub_buf[4] << 8);
+    uint32_t power_ms = (uint32_t)hub_buf[5] * 2;
+
+    uint32_t *icc = in_entry(d, 0), *slot = in_entry(d, 1);
+    memset(d->in_ctx, 0, (uint64_t)ctx_size * 33);
+    memcpy(slot, d->out_ctx, (uint64_t)ctx_size);
+    icc[1] = 1u;                                            /* add: slot */
+    slot[0] |= 1u << 26;                                    /* a hub */
+    slot[1] = (slot[1] & 0x00FFFFFFu) | (uint32_t)ports << 24;
+    if (d->speed == SPEED_HIGH) slot[2] = (slot[2] & ~(3u << 16)) | (((chars >> 5) & 3u) << 16);   /* TT think time */
+    if (d->hub_dci) {
+        d->hub_change = dma_alloc(64, 64);
+        if (!d->hub_change || ring_init(&d->hub_ring) != 0) { d->note = "out of memory"; return -1; }
+        uint32_t *ep = in_entry(d, d->hub_dci + 1);
+        icc[1] |= 1u << d->hub_dci;
+        ep[0] = xhci_interval(d->speed, d->hub_interval ? d->hub_interval : 12) << 16;
+        ep[1] = (3u << 1) | (7u << 3) | ((uint32_t)d->hub_mps << 16);   /* CErr 3, interrupt IN */
+        uint64_t deq = virt_to_phys(d->hub_ring.trbs) | 1;
+        ep[2] = (uint32_t)deq;
+        ep[3] = (uint32_t)(deq >> 32);
+        ep[4] = (uint32_t)d->hub_mps | ((uint32_t)d->hub_mps << 16);
+        slot[0] = (slot[0] & ~(0x1Fu << 27)) | ((uint32_t)d->hub_dci << 27);
+    }
+    if (command(virt_to_phys(d->in_ctx), 0, TRB_TYPE(TRB_CONFIGURE_EP) | ((uint32_t)d->slot << 24), 0) != CC_SUCCESS) {
+        d->note = "hub: endpoint setup failed";
+        return -1;
+    }
+    if (control(d, 0x00, 9, config_value, 0, 0, 0) != 0) { d->note = "SET_CONFIGURATION failed"; return -1; }
+    if (ss) control(d, 0x20, 12, (uint16_t)d->tier, 0, 0, 0);   /* SET_HUB_DEPTH */
+    for (int p = 1; p <= ports; p++) control(d, 0x23, 3, HUB_PORT_POWER, (uint16_t)p, 0, 0);
+    delay_ms(power_ms < 100 ? 100 : power_ms);              /* until the ports' power is good */
+    d->hub_ports = ports;
+    d->hub_ss = ss;
+    if (d->hub_dci) queue_hub_status(d);
+    return 0;
+}
+
 static void setup_device(usb_device_t *d) {
     uint8_t *buf = dma_alloc(512, 64);
     if (!buf) { d->note = "out of memory"; return; }
@@ -596,7 +730,7 @@ static void setup_device(usb_device_t *d) {
 
     /* Walk the descriptors: the first interface (for lsusb), and each boot
      * keyboard or mouse interface with its interrupt IN endpoint. */
-    int kind = 0, have_iface = 0, msc = 0;
+    int kind = 0, have_iface = 0, msc = 0, hubif = 0;
     uint8_t iface = 0;
     uint16_t mps[MAX_HID];
     uint8_t interval[MAX_HID];
@@ -613,6 +747,12 @@ static void setup_device(usb_device_t *d) {
             kind = boot && (buf[i + 7] == HID_MOUSE || buf[i + 7] == HID_KEYBOARD) ? buf[i + 7] : 0;
             iface = buf[i + 2];
             msc = buf[i + 5] == 8 && buf[i + 6] == 6 && buf[i + 7] == 0x50 && !d->st_in_ep;   /* SCSI, bulk-only */
+            hubif = buf[i + 5] == 9 && !d->hub_dci;
+        } else if (type == 5 && len >= 7 && hubif && (buf[i + 2] & 0x80) && (buf[i + 3] & 3) == 3) {
+            d->hub_dci = (buf[i + 2] & 0xF) * 2 + 1;           /* the status change endpoint */
+            d->hub_mps = (buf[i + 4] | buf[i + 5] << 8) & 0x7FF;
+            d->hub_interval = buf[i + 6];
+            hubif = 0;
         } else if (type == 5 && len >= 7 && msc && (buf[i + 3] & 3) == 2) {   /* a bulk endpoint */
             uint16_t size = (uint16_t)((buf[i + 4] | buf[i + 5] << 8) & 0x7FF);
             if (buf[i + 2] & 0x80) {
@@ -644,14 +784,108 @@ static void setup_device(usb_device_t *d) {
         setup_storage(d, config_value);
         return;
     }
-    if (d->dev_class == 9 || d->if_class == 9) d->note = "hub: devices behind hubs are not supported yet";
-    else d->note = "no driver";
+    if (d->dev_class == 9 || d->if_class == 9) {
+        setup_hub(d, config_value);
+        return;
+    }
+    d->note = "no driver";
 }
 
 static int device_kinds(const usb_device_t *d) {
     int k = 0;
     for (int i = 0; i < d->hid_count; i++) k |= 1 << d->hid[i].kind;
     return k;
+}
+
+static usb_device_t *by_slot(int slot) {
+    for (int i = 0; i < device_count; i++)
+        if (devices[i].slot == slot) return &devices[i];
+    return 0;
+}
+
+/* Where a device is: "3", or "3.2.1" behind hubs (root port, then hub ports). */
+static void place_text(const usb_device_t *d, char *out, int size) {
+    k_snprintf(out, (size_t)size, "%d", d->port);
+    for (int t = 0; t < d->tier; t++) {
+        size_t at = strlen(out);
+        k_snprintf(out + at, (size_t)size - at, ".%u", (d->route >> (4 * t)) & 0xF);
+    }
+}
+
+/* A device was unplugged: forget it (and what was behind it, if a hub) and
+ * give the controller its slot back. */
+static void remove_device(int i) {
+    int slot = devices[i].slot;
+    for (int j = 0; j < devices[i].hid_count; j++) {
+        if (devices[i].hid[j].kind == HID_MOUSE) mouse_count--;
+        else keyboard_count--;
+    }
+    devices[i] = devices[--device_count];
+    for (int j = 0; j < device_count; j++)
+        if (devices[j].hub_slot == slot && slot) {
+            remove_device(j);
+            j = -1;                                         /* (the array moved) */
+        }
+    if (slot > 0 && slot <= max_slots) {
+        command(0, 0, TRB_TYPE(TRB_DISABLE_SLOT) | ((uint32_t)slot << 24), 0);
+        dcbaa[slot] = 0;
+    }
+}
+
+static void print_device(const usb_device_t *d) {
+    char place[24];
+    place_text(d, place, sizeof(place));
+    kprintf("USB port %s: %04x:%04x class %u/%u/%u%s%s%s%s%s%s\n", place, d->vendor, d->product,
+            d->if_class, d->if_subclass, d->if_protocol,
+            (device_kinds(d) >> HID_KEYBOARD) & 1 ? ", keyboard" : "",
+            (device_kinds(d) >> HID_MOUSE) & 1 ? ", mouse" : "",
+            d->storage ? ", storage" : "", d->hub_ports ? ", hub" : "",
+            d->note ? ": " : "", d->note ? d->note : "");
+}
+
+/* Look at a hub's ports: forget what went, set up what came (and the ports
+ * of a hub that came, and so on). */
+static void hub_scan(int hub_slot) {
+    usb_device_t *hub = by_slot(hub_slot);
+    if (!hub || !hub->hub_ports) return;
+    hub->hub_changed = 0;
+    for (int p = 1; p <= hub->hub_ports; p++) {
+        hub = by_slot(hub_slot);                            /* (removals move the array) */
+        if (!hub) return;
+        uint16_t status, change;
+        if (hub_port_status(hub, p, &status, &change) != 0) continue;
+        hub_clear_changes(hub, p, change);
+        int known = -1;
+        for (int i = 0; i < device_count; i++)
+            if (devices[i].hub_slot == hub_slot && devices[i].hub_port == p) known = i;
+        if (known >= 0 && (!(status & 0x01) || (change & 0x01))) {   /* gone, or unplugged and back */
+            remove_device(known);
+            known = -1;
+            hub = by_slot(hub_slot);
+            if (!hub) return;
+        }
+        if (!(status & 0x01) || known >= 0 || device_count >= MAX_DEVICES) continue;
+        int speed = hub_port_reset(hub, p);
+        if (!speed) continue;
+        usb_device_t *d = &devices[device_count++];
+        memset(d, 0, sizeof(*d));
+        d->port = hub->port;
+        d->speed = speed;
+        d->hub_slot = hub_slot;
+        d->hub_port = p;
+        d->tier = hub->tier + 1;
+        d->route = hub->route | (uint32_t)p << (4 * hub->tier);
+        if ((speed == SPEED_LOW || speed == SPEED_FULL) && hub->speed == SPEED_HIGH) {
+            d->tt_slot = hub_slot;
+            d->tt_port = p;
+        } else {
+            d->tt_slot = hub->tt_slot;
+            d->tt_port = hub->tt_port;
+        }
+        setup_device(d);
+        print_device(d);
+        if (d->hub_ports) hub_scan(d->slot);
+    }
 }
 
 static void scan_ports(void) {
@@ -669,12 +903,8 @@ static void scan_ports(void) {
         if (!d->speed) continue;                            /* USB 3 half of a USB 2 device, etc. */
         device_count++;
         setup_device(d);
-        kprintf("USB port %d: %04x:%04x class %u/%u/%u%s%s%s%s%s\n", port, d->vendor, d->product,
-                d->if_class, d->if_subclass, d->if_protocol,
-                (device_kinds(d) >> HID_KEYBOARD) & 1 ? ", keyboard" : "",
-                (device_kinds(d) >> HID_MOUSE) & 1 ? ", mouse" : "",
-                d->storage ? ", storage" : "",
-                d->note ? ": " : "", d->note ? d->note : "");
+        print_device(d);
+        if (d->hub_ports) hub_scan(d->slot);
     }
 }
 
@@ -736,6 +966,15 @@ static void handle_transfer(const trb_t *e) {
     for (int i = 0; i < device_count; i++) {
         usb_device_t *d = &devices[i];
         if (d->slot != slot) continue;
+        if (d->hub_ports && d->hub_dci == dci) {            /* a hub port changed: usb_service looks */
+            int cc = (int)(e->status >> 24);
+            if (cc == CC_SUCCESS || cc == CC_SHORT) {
+                d->hub_changed = 1;
+                rescan_wanted = 1;
+                queue_hub_status(d);
+            }
+            return;
+        }
         for (int j = 0; j < d->hid_count; j++) {
             hid_t *h = &d->hid[j];
             if (h->dci != dci) continue;
@@ -935,17 +1174,14 @@ void usb_service(void) {
     if (!found || !rescan_wanted) return;
     rescan_wanted = 0;
     busy = 1;
-    /* Forget devices whose port is now empty (their slot stays used). */
+    /* Forget devices whose root port is now empty (and what was behind them). */
     for (int i = 0; i < device_count; i++) {
+        if (devices[i].hub_slot) continue;
         uint32_t v = r32(op, OP_PORTSC + 0x10 * (uint32_t)(devices[i].port - 1));
         w32(op, OP_PORTSC + 0x10 * (uint32_t)(devices[i].port - 1), (v & PORT_KEEP) | (v & PORT_CHANGES));
         if (!(v & PORT_CONNECT)) {
-            for (int j = 0; j < devices[i].hid_count; j++) {
-                if (devices[i].hid[j].kind == HID_MOUSE) mouse_count--;
-                else keyboard_count--;
-            }
-            devices[i] = devices[--device_count];
-            i--;
+            remove_device(i);
+            i = -1;                                         /* (the array moved) */
         }
     }
     for (int p = 1; p <= max_ports; p++) {                  /* clear connect changes */
@@ -954,6 +1190,10 @@ void usb_service(void) {
         if (v & PORT_CHANGES) w32(op, off, (v & PORT_KEEP) | (v & PORT_CHANGES));
     }
     scan_ports();
+    int hubs[MAX_DEVICES], nh = 0;                          /* hubs whose ports changed */
+    for (int i = 0; i < device_count; i++)
+        if (devices[i].hub_ports && (devices[i].hub_changed || !devices[i].hub_dci)) hubs[nh++] = devices[i].slot;
+    for (int i = 0; i < nh; i++) hub_scan(hubs[i]);
     busy = 0;
     describe();
 }
@@ -984,10 +1224,14 @@ void usb_print_devices(void) {
                            kinds == 1 << HID_KEYBOARD ? "keyboard (in use)" :
                            d->if_class == 3 ? "HID device" :
                            d->storage ? "storage (in use)" :
-                           d->if_class == 8 ? "storage" : d->if_class == 9 || d->dev_class == 9 ? "hub" :
+                           d->if_class == 8 ? "storage" : d->hub_ports ? (d->hub_ss ? "USB 3 hub" : "hub") :
+                           d->if_class == 9 || d->dev_class == 9 ? "hub" :
                            d->if_class == 0xE0 ? "wireless (Bluetooth?)" : d->if_class == 0x0E ? "camera" :
                            d->if_class == 1 ? "audio" : "device";
-        kprintf("  port %2d  %04x:%04x  %-10s  %s%s%s\n", d->port, d->vendor, d->product, speed_name(d->speed),
-                what, d->note ? " - " : "", d->note ? d->note : "");
+        char place[24];
+        place_text(d, place, sizeof(place));
+        kprintf("  port %-6s %04x:%04x  %-10s  %s", place, d->vendor, d->product, speed_name(d->speed), what);
+        if (d->hub_ports) kprintf(" (%d ports)", d->hub_ports);
+        kprintf("%s%s\n", d->note ? " - " : "", d->note ? d->note : "");
     }
 }

@@ -9,7 +9,7 @@
 #include "sys/install.h"
 #include "core/multiboot2.h"
 #include "drivers/efi.h"
-#include "drivers/nvme.h"
+#include "drivers/drive.h"
 #include "drivers/part.h"
 #include "drivers/disk.h"
 #include "drivers/fatvol.h"
@@ -50,7 +50,7 @@ void install_save_boot_info(void) {
 
 const char *install_boot_description(void) {
     if (live) return "from the USB stick (`install` puts Terminal OS on this PC)";
-    if (boot_part[0]) return "installed, from the SSD";
+    if (boot_part[0]) return "installed, from the SSD";   /* (NVMe or SATA: the tests look for this) */
     return "";
 }
 
@@ -233,14 +233,21 @@ void install_run(void) {
         print_str("install: this PC did not start Terminal OS through UEFI, so its boot menu cannot be changed.\n");
         return;
     }
-    if (!nvme_present()) {
-        print_str("install: no NVMe SSD found.\n");
+    if (!drive_count()) {
+        print_str("install: no SSD or hard disk (NVMe or SATA) found.\n");
         return;
     }
-    static partition_t parts[16];
-    int n = part_scan(nvme_partition_reader, parts, 16);
+    /* Every drive's partitions in one list, numbered from 1. */
+    static partition_t parts[32];
+    static int part_drive[32];
+    int n = 0;
+    for (int d = 0; d < drive_count() && n < 32; d++) {
+        int k = drive_scan(d, parts + n, 32 - n);
+        for (int j = 0; j < k; j++) part_drive[n + j] = d;
+        n += k;
+    }
     if (n <= 0) {
-        print_str("install: the SSD has no partition table.\n");
+        print_str("install: the drive has no partition table.\n");
         return;
     }
 
@@ -250,11 +257,16 @@ void install_run(void) {
     kprintf("  %-3s %-10s %-20s %-22s\n", "#", "Size", "Type", "Contents");
     for (int i = 0; i < n; i++) {
         partition_t *p = &parts[i];
+        if (drive_count() > 1 && (i == 0 || part_drive[i] != part_drive[i - 1])) {
+            char label[32];
+            drive_label(part_drive[i], label, sizeof(label));
+            kprintf(" %s: %s\n", label, drive_get(part_drive[i])->model);
+        }
         size_text(p->sectors, size, sizeof(size));
         char contents[32];
         if (p->fat32) k_snprintf(contents, sizeof(contents), "FAT32 \"%s\"", p->label);
         else k_snprintf(contents, sizeof(contents), "%s", p->fs ? p->fs : "?");
-        kprintf("  %-3d %-10s %-20s %-22s ", p->number, size, p->kind ? p->kind : "?", contents);
+        kprintf("  %-3d %-10s %-20s %-22s ", i + 1, size, p->kind ? p->kind : "?", contents);
         guid_text(p->guid, gtext);
         int running_here = boot_part[0] && !live && !strcmp(gtext, boot_part);
         if (can_install(p)) {
@@ -278,9 +290,8 @@ void install_run(void) {
     }
     int want = 0;
     for (const char *c = line; *c >= '0' && *c <= '9'; c++) want = want * 10 + (*c - '0');
-    partition_t *p = 0;
-    for (int i = 0; i < n; i++)
-        if (parts[i].number == want && can_install(&parts[i])) p = &parts[i];
+    partition_t *p = want >= 1 && want <= n && can_install(&parts[want - 1]) ? &parts[want - 1] : 0;
+    int drive = p ? part_drive[want - 1] : -1;
     if (!p) {
         print_str("That is not one of the partitions marked \"can install here\".\n");
         return;
@@ -288,11 +299,11 @@ void install_run(void) {
 
     int format = !p->fat32;
     size_text(p->sectors, size, sizeof(size));
-    kprintf("\nPartition %d (%s) will get:\n", p->number, size);
+    kprintf("\nPartition %d (%s) will get:\n", want, size);
     if (format) print_str("  - a new FAT32 file system labelled TERMINALOS (it is empty now)\n");
     print_str("  - Terminal OS in \\EFI\\TERMINALOS (your files there are kept)\n"
               "  - an entry \"Terminal OS\" at the end of this PC's boot menu (Windows stays first)\n"
-              "Nothing else on the SSD is changed.\n");
+              "Nothing else on the drive is changed.\n");
     if (ask("Type yes to install: ", line, sizeof(line)) < 0 || !is_yes(line)) {
         print_str("Cancelled.\n");
         return;
@@ -301,7 +312,7 @@ void install_run(void) {
     blockdev_t dev;
     if (format) {
         uint8_t first[512];
-        if (nvme_read(p->start, 1, first) != 0) {
+        if (drive_read(drive, p->start, 1, first) != 0) {
             print_str("install: cannot read the partition.\n");
             return;
         }
@@ -312,7 +323,7 @@ void install_run(void) {
             }
         print_str("Formatting... ");
         kmutex_lock(&vfs_lock);                       /* (see the copy below) */
-        int bad = disk_open_nvme_partition(p->start, p->sectors, 1, p->number, &dev) != 0 ||
+        int bad = disk_open_drive_partition(drive, p->start, p->sectors, 1, p->number, &dev) != 0 ||
                   fatvol_format(&dev, p->start, OUR_LABEL) != 0;
         kmutex_unlock(&vfs_lock);
         if (bad) {
@@ -324,10 +335,10 @@ void install_run(void) {
 
     /* Write through the mount it already has (two mounts of one volume would
      * each cache the FAT), or mount it for the copy. */
-    const char *mounted = vfs_partition_mount(p->start);
+    const char *mounted = vfs_partition_mount(drive, p->start);
     int mounted_here = 0;
     if (!mounted) {
-        if (disk_open_nvme_partition(p->start, p->sectors, 1, p->number, &dev) != 0 ||
+        if (disk_open_drive_partition(drive, p->start, p->sectors, 1, p->number, &dev) != 0 ||
             vfs_mount("/INSTALL", &dev) != 0) {
             print_str("install: cannot open the partition's file system.\n");
             return;
@@ -350,7 +361,7 @@ void install_run(void) {
 
     int number = add_boot_entry(p);
     if (number < 0) {
-        print_str("install: the files are on the SSD, but the firmware did not take the boot menu entry.\n"
+        print_str("install: the files are on the drive, but the firmware did not take the boot menu entry.\n"
                   "Your PC's setup (F2) may let you add \\EFI\\TERMINALOS\\TERMOS.EFI as a boot option.\n");
         return;
     }

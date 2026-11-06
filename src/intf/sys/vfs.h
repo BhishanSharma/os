@@ -112,7 +112,7 @@ int vfs_open_file(const char *path, vfs_file_t *out);     /* 0, or < 0 (FAT32_ER
 int vfs_read_at(vfs_file_t *f, uint32_t offset, void *buf, uint32_t len);
 uint32_t vfs_file_size(const vfs_file_t *f);
 
-/* Where the NVMe partition starting at `start` is mounted, or 0. */
-const char *vfs_partition_mount(uint64_t start);
+/* Where partition `start` of drive `drive` is mounted, or 0. */
+const char *vfs_partition_mount(int drive, uint64_t start);
 
 #endif

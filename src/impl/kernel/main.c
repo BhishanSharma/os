@@ -27,6 +27,9 @@
 #include "drivers/iwlwifi.h"
 #include "drivers/hda.h"
 #include "drivers/nvme.h"
+#include "drivers/ahci.h"
+#include "drivers/cpupower.h"
+#include "drivers/drive.h"
 #include "drivers/msi.h"
 #include "sys/smp.h"
 #include "drivers/part.h"
@@ -90,27 +93,32 @@ static void mount_filesystem(void) {
     print_boot_status(BOOT_FAIL, "Storage", "no disk with a FAT32 volume: file commands will not work");
 }
 
-// The NVMe drive's TERMINALOS partition (FAT32, made in Windows' Disk
-// Management) becomes "/": homes, accounts and settings survive reboots. The
-// RAM disk's system files stay reachable at /SYS.
+// A drive's TERMINALOS partition (FAT32, made in Windows' Disk Management,
+// or by `install`) becomes "/": homes, accounts and settings survive
+// reboots. The first one found (NVMe before SATA). The RAM disk's system
+// files stay reachable at /SYS.
 static void mount_persistent(void) {
     static partition_t parts[16];
-    int n = part_scan(nvme_partition_reader, parts, 16);
-    for (int i = 0; i < n; i++) {
-        if (!parts[i].ours) continue;
-        blockdev_t nv, ram;
-        if (disk_open_nvme_partition(parts[i].start, parts[i].sectors, 1, i + 1, &nv) != 0) return;
-        if (vfs_mount("/", &nv) != 0) {
-            print_boot_status(BOOT_WARN, "Files", "TERMINALOS partition found but it is not readable FAT32");
+    for (int d = 0; d < drive_count(); d++) {
+        int n = drive_scan(d, parts, 16);
+        for (int i = 0; i < n; i++) {
+            if (!parts[i].ours || !parts[i].fat32) continue;
+            blockdev_t nv, ram;
+            if (disk_open_drive_partition(d, parts[i].start, parts[i].sectors, 1, parts[i].number, &nv) != 0) return;
+            if (vfs_mount("/", &nv) != 0) {
+                print_boot_status(BOOT_WARN, "Files", "TERMINALOS partition found but it is not readable FAT32");
+                return;
+            }
+            if (disk_open(DISK_RAM, &ram) == 0) vfs_mount("/SYS", &ram);
+            fat32_change_directory("/");
+            char label[32];
+            drive_label(d, label, sizeof(label));
+            registry_add(registry_find("storage"), "TERMINALOS", "volume", "%s, partition %d, FAT32, %u MiB, mounted at /",
+                         label, parts[i].number, (uint32_t)(parts[i].sectors / 2048));
+            print_boot_status(BOOT_OK, "Files", "on the %s TERMINALOS partition (%u MiB, kept across reboots); "
+                              "system files at /SYS", drive_get(d)->kind, (uint32_t)(parts[i].sectors / 2048));
             return;
         }
-        if (disk_open(DISK_RAM, &ram) == 0) vfs_mount("/SYS", &ram);
-        fat32_change_directory("/");
-        registry_add(registry_find("storage"), "TERMINALOS", "volume", "partition %d, FAT32, %u MiB, mounted at /",
-                     i + 1, (uint32_t)(parts[i].sectors / 2048));
-        print_boot_status(BOOT_OK, "Files", "on the NVMe TERMINALOS partition (%u MiB, kept across reboots); "
-                          "system files at /SYS", (uint32_t)(parts[i].sectors / 2048));
-        return;
     }
 }
 
@@ -421,11 +429,15 @@ void kernel_main() {
         int nv = nvme_init(nvme_how, sizeof(nvme_how));
         if (nv == 0 || strncmp(nvme_how, "no NVMe", 7) != 0)
             print_boot_status(nv == 0 ? BOOT_OK : BOOT_WARN, "NVMe", "%s%s", nvme_how,
-                              nv == 0 ? " (`nvme` lists partitions)" : "");
-        if (nv == 0) {
-            registry_add(find_class_node(0x01, 0x08), "NVMe drive", "storage", "%s", nvme_how);
-            mount_persistent();
-        }
+                              nv == 0 ? " (`disks` lists partitions)" : "");
+        if (nv == 0) registry_add(find_class_node(0x01, 0x08), "NVMe drive", "storage", "%s", nvme_how);
+        char sata_how[160];
+        int sata = ahci_init(sata_how, sizeof(sata_how));
+        if (sata > 0 || strncmp(sata_how, "no AHCI", 7) != 0)
+            print_boot_status(sata > 0 ? BOOT_OK : BOOT_WARN, "SATA", "%s%s", sata_how,
+                              sata > 0 ? " (`disks` lists partitions)" : "");
+        if (sata > 0) registry_add(find_class_node(0x01, 0x06), "SATA disks", "storage", "%s", sata_how);
+        if (drive_count()) mount_persistent();
         mount_stick_data();
         char sound_how[96];
         int snd = sound_init(sound_how, sizeof(sound_how));
@@ -464,6 +476,9 @@ void kernel_main() {
         if (r == 0) print_boot_status(BOOT_OK, "Wi-Fi", "%s", how);
         else if (r < 0) print_boot_status(BOOT_WARN, "Wi-Fi", "%s", how);
     }
+
+    cpupower_init();    // (before the other cores start: they set themselves up the same way)
+    print_boot_status(BOOT_OK, "CPU power", "%s", cpupower_status());
 
     print_set_muted(0);
     print_bootlog_stop();

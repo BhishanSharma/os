@@ -24,6 +24,8 @@ int bkl_depth_get(void);                  // sys/smp.c
 void bkl_depth_set(int depth);
 void bkl_switched(void);
 
+#include "drivers/cpupower.h"
+
 #define KSTACK_SIZE (64 * 1024)   // kernel commands run on it too (kcommand: TLS, FAT32)
 
 static task_t tasks[MAX_TASKS];
@@ -115,12 +117,13 @@ static int work_for(int me) {
 
 /* An idle core waits outside the kernel lock and takes it only when there
  * is something to run: it looked for work under the lock at every interrupt
- * (a thousand a second), the cores with programs waiting behind it. */
-static void idle_loop(void) {
+ * (a thousand a second), the cores with programs waiting behind it. The
+ * wait is MWAIT in a deep C-state where the CPU has one (drivers/cpupower.h). */
+void task_idle_loop(void) {
     for (;;) {
         if (!work_for(cpu_index())) {
             int depth = bkl_drop();
-            while (!work_for(cpu_index())) __asm__ volatile("sti; hlt");   /* (an interrupt a millisecond) */
+            while (!work_for(cpu_index())) cpu_idle_wait();   /* (an interrupt a millisecond) */
             bkl_take(depth);
         }
         task_yield();
@@ -145,7 +148,7 @@ void task_init(void) {
     idle->pinned = 0;
     if (alloc_stack(idle) != 0) kpanic("no memory for the idle task");
     // After the ret into task_start_kernel the stack must be 16-byte aligned for `call`.
-    initial_stack(idle, (uint64_t *)idle->kstack_top, task_start_kernel, (uint64_t)idle_loop);
+    initial_stack(idle, (uint64_t *)idle->kstack_top, task_start_kernel, (uint64_t)task_idle_loop);
     idle->state = TASK_READY;
     idle_of[0] = idle;
 }

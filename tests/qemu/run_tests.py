@@ -262,6 +262,13 @@ def nvme(image, snapshot=True):
             "-device", "nvme,serial=TOS123,drive=nv0"]
 
 
+def sata(image, snapshot=True, port=0):
+    """A disk on an AHCI controller (QEMU's ICH9 AHCI), on SATA port `port`."""
+    return ["-device", "ahci,id=ahci",
+            "-drive", "file=%s,if=none,id=sd0,format=raw%s" % (image, ",snapshot=on" if snapshot else ""),
+            "-device", "ide-hd,drive=sd0,bus=ahci.%d" % port]
+
+
 # ---- The tests ---------------------------------------------------------------------------
 
 def test_boot():
@@ -590,6 +597,77 @@ def test_install():
         m.stop()
 
 
+def test_sata():
+    """A SATA disk (AHCI): found at boot with its partitions; `install` puts
+    Terminal OS on it (40 MB written and read back) and the firmware starts it
+    from there, its partition mounted as /."""
+    disk = os.path.join(OUT, "sata-install.img")
+    vars_fd = os.path.join(OUT, "sata-vars.fd")
+    shutil.copy(asset("nvme-install.img"), disk)
+    shutil.copy(find_ovmf("vars"), vars_fd)
+    m = Machine("sata", ["-drive", "if=pflash,format=raw,file=" + vars_fd] + usb_stick() + sata(disk, False, 2))
+    try:
+        m.expect(r"SATA\s+1 disk: QEMU HARDDISK, 0\.\d GB", 120)
+        login(m)
+        out = m.run("sata")
+        check(re.search(r"AHCI 1\.\d controller .*MSI", out) and re.search(r"port 2: disk: QEMU HARDDISK", out),
+              "`sata` shows the controller (with MSI) and the disk on port 2", out)
+        out = m.run("disks")
+        check(re.search(r"1\. SATA drive: QEMU HARDDISK", out) and re.search(r"2: \S.*\s66 MB", out),
+              "`disks` lists the SATA drive and its two partitions", out)
+        m.type("install")
+        m.expect(r"Install on partition number", 60)
+        m.type("2")
+        m.expect(r"Type yes to install: ")
+        m.type("yes")
+        m.expect(r"RAMDISK\.GZ\s+\d+ KiB - written and checked", 240)
+        m.expect(r"Installed\.", 60)
+        m.expect(r"Restart into it now\? \(yes/no\) ")
+        m.type("yes")
+        m.expect(r"Boot\s+installed, from the SSD", 180)
+        m.expect(r"Files\s+on the SATA TERMINALOS partition", 120)
+    finally:
+        m.stop()
+
+
+def test_hub():
+    """USB hubs: a keyboard, a mouse and a second stick behind a hub, and a
+    hub behind that hub; a keyboard plugged into it and out again later."""
+    stick2 = os.path.join(OUT, "hub-stick2.img")
+    shutil.copy(asset("nvme-files.img"), stick2)
+    m = Machine("hub", usb_stick() + [
+        "-device", "usb-hub,bus=xhci.0,port=2,id=hub1",
+        "-device", "usb-mouse,bus=xhci.0,port=2.1",
+        "-device", "usb-kbd,bus=xhci.0,port=2.2",
+        "-drive", "if=none,id=stick2,file=%s,format=raw" % stick2,
+        "-device", "usb-storage,bus=xhci.0,port=2.3,drive=stick2",
+        "-device", "usb-hub,bus=xhci.0,port=2.4,id=hub2",
+        "-device", "usb-tablet,bus=xhci.0,port=2.4.1"])
+    try:
+        login(m)
+        out = m.run("lsusb")
+        root = re.search(r"port (\d+) +\S+ +12 Mbit/s +hub \(\d+ ports\)", out)   # (QEMU's port 2: a USB 2 port)
+        check(root, "lsusb: the hub", out)
+        h = root.group(1)
+        check(re.search(r"port %s\.1 .* mouse \(in use\)" % h, out), "lsusb: the mouse behind the hub", out)
+        check(re.search(r"port %s\.2 .* keyboard \(in use\)" % h, out), "lsusb: the keyboard behind the hub", out)
+        check(re.search(r"port %s\.3 .* storage \(in use\)" % h, out), "lsusb: the stick behind the hub", out)
+        check(re.search(r"port %s\.4 .* hub \(\d+ ports\)" % h, out), "lsusb: the hub behind the hub", out)
+        check(re.search(r"port %s\.4\.1 .* HID device" % h, out), "lsusb: the tablet two hubs down", out)
+        m.monitor("device_add usb-kbd,bus=xhci.0,port=2.5,id=kbd2")
+        time.sleep(3)
+        out = m.run("lsusb")
+        check(re.search(r"port %s\.5 .* keyboard \(in use\)" % h, out), "a keyboard plugged into the hub", out)
+        m.monitor("device_del kbd2")
+        time.sleep(3)
+        out = m.run("lsusb")
+        check(not re.search(r"port %s\.5 " % h, out) and re.search(r"port %s\.2 .* keyboard" % h, out),
+              "the keyboard unplugged from the hub", out)
+        check("still here" in m.run("echo still here"), "typing after the hubs")
+    finally:
+        m.stop()
+
+
 def test_network():
     """DHCP, DNS, TCP and TLS: an HTTPS download."""
     m = Machine("network", usb_stick(), cpus=2)
@@ -659,6 +737,8 @@ def test_kernel():
         check(re.search(r"2\s+2\s+8", out), "redirection", out)
         out = m.run("ioreg")
         check("Storage" in out or "nvme" in out.lower() or "usb" in out.lower(), "ioreg", out)
+        out = m.run("cpu")
+        check(re.search(r"CPU: .*, 4 cores running", out) and re.search(r"idle", out), "cpu", out)
         out = m.run("ps")
         pid = re.search(r"^\s*(\d+)\s+\d+\s+\w+\s+\w+\s+\S+\s+echod", out, re.M)
         check(pid and "launchd" in out, "launchd and echod are not running", out)
@@ -887,7 +967,7 @@ def test_logs():
 
 
 TESTS = [("boot", test_boot), ("files", test_files), ("fault", test_fault), ("panic", test_panic),
-         ("kernel", test_kernel), ("desktop", test_desktop), ("polish", test_polish), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("logs", test_logs), ("user", test_user), ("video", test_nvme_video), ("bundle", test_bundle), ("storage", test_storage), ("sleep", test_sleep), ("dynamic", test_dynamic), ("ports", test_ports), ("install", test_install), ("network", test_network),
+         ("kernel", test_kernel), ("desktop", test_desktop), ("polish", test_polish), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("logs", test_logs), ("user", test_user), ("video", test_nvme_video), ("bundle", test_bundle), ("storage", test_storage), ("sleep", test_sleep), ("dynamic", test_dynamic), ("ports", test_ports), ("install", test_install), ("sata", test_sata), ("hub", test_hub), ("network", test_network),
          ("bios", test_legacy_bios)]
 NEEDS_INTERNET = {"network"}
 # Tests of programs only the full toolchain builds (myos-ladybird: build.ps1).

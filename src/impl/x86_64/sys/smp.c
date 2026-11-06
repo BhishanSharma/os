@@ -8,6 +8,7 @@
 #include "drivers/paging.h"
 #include "drivers/heap.h"
 #include "drivers/timer.h"
+#include "drivers/cpupower.h"
 #include "lib/print.h"
 #include "lib/string.h"
 
@@ -353,14 +354,12 @@ void ap_main(uint64_t cpu) {
     apic_setup_core(timer_rate, AP_TIMER_VECTOR);
     paging_pat_init();                              /* the same memory types as core 0 */
     paging_cpu_protect();
+    cpupower_init_ap();                             /* HWP, as on core 0 */
     __asm__ volatile("fninit");
     bkl_enter();
     task_init_ap((int)cpu);
     cpu_up[cpu] = 1;
-    for (;;) {                                      /* this core's idle task */
-        task_yield();
-        cpu_wait();
-    }
+    task_idle_loop();                               /* this core's idle task: waits outside the lock */
 }
 
 int smp_init(int enabled) {
