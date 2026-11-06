@@ -158,7 +158,7 @@ int wifi_connect(const char *name, const char *password);
 int wifi_disconnect(void);
 int volume(int set);                          /* 0-100 sets, -1 reads -> the volume */
 int battery(void);                            /* percent | 0x100 charging, SYSERR_NOENT none */
-int power(int restart);                       /* 0 shut down, 1 restart: returns only on failure */
+int power(int how);                           /* 0 shut down, 1 restart (return only on failure), 2 sleep */
 int password_change(const char *old, const char *now);   /* your own sign-in: now "" turns it off -> 0, SYSERR_AUTH */
 int signin_on(void);                          /* 1: your account has a PIN or password */
 int accounts(struct os_account *list, int max);           /* root only: the login screen's profiles -> count */

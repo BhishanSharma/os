@@ -49,4 +49,7 @@ int keyboard_inject(int key);
 /* Set by the keyboard interrupt on Ctrl+C (also queued as KEY_CTRL_C). */
 extern volatile int keyboard_ctrl_c;
 
+/* Keys pressed since boot (any key, as the scan codes arrive). */
+extern volatile uint32_t keyboard_presses;
+
 #endif

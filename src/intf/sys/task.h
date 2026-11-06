@@ -39,6 +39,7 @@ typedef struct task {
     int running_on;           /* the core running it now, -1 if none (sys/smp.h) */
     int pinned;               /* kernel tasks: the only core that may run it */
     int is_idle;
+    int frozen;               /* stopped at its return to user mode while the computer sleeps */
     int bkl_depth;            /* its kernel-lock nesting while switched out */
     uint64_t fs_base;         /* user programs: the thread pointer (thread-local storage) */
     uint8_t fpu[512] __attribute__((aligned(16)));   /* x87/SSE registers (fxsave) */
@@ -88,5 +89,11 @@ void task_reap(task_t *t);                 /* free a zombie's slot and stack */
 void task_tick(void);
 /* Timer interrupt that interrupted user code: switch if its slice is used up. */
 void task_preempt(void);
+
+/* Sleep: programs stop at their next return to user mode (where they hold no
+ * kernel lock) until thawed; kernel tasks go on (the idle loop watches for
+ * the wake-up). */
+void task_freeze(int on);
+void task_freeze_point(void);             /* at each return to user mode */
 
 #endif

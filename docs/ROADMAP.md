@@ -65,6 +65,18 @@ links or extended attributes are made (Linux's are read); groups are one per
 user; a file deleted while open reads stale blocks; the mlibc port still
 reports made-up modes until it is rebuilt with `statx`.
 
+Sleep and wake (stage 10's part, done first): the laptop (Alder Lake, an
+LPIT table) has Modern Standby and no ACPI S3, so sleep is the S0ix kind
+without the platform's deepest states: the panel's backlight, plane and
+cursor off (`igfx_sleep`), programs stopped at their next return to user
+mode (`task_freeze`: they hold no kernel lock there), the file systems
+marked clean, the cores halted between interrupts. The power button and the
+lid (PNP0C0D) sleep and wake, a key wakes; `suspend`, the desktop menu's
+Sleep and `power(2)` start it. System test: `sleep`. Cuts: no ACPI S3 and no
+D3 for devices (so it draws more than Windows' Modern Standby: hours, not
+days), no wake on the touchpad, the power button no longer shuts down (the
+menu's Shut Down and `shutdown` do).
+
 Each stage below is the *lean* version: the smallest design that gives the
 macOS-style structure, with the cuts written down. One stage per working
 session; it ends with `make test` + `make test-os` green, a USB stick, one

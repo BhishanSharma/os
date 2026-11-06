@@ -492,6 +492,31 @@ def test_storage():
     check(fsck.returncode == 0, "e2fsck on the data partition", fsck.stdout + fsck.stderr)
 
 
+def test_sleep():
+    """Sleep and wake: `suspend` and a key, then the power button twice; the
+    programs carry on afterwards."""
+    m = Machine("sleep", usb_stick())
+    try:
+        login(m)
+        m.type("suspend")
+        m.expect(r"Sleeping: ", 30)
+        time.sleep(2)
+        m.keys("spc")
+        m.expect(r"Awake after \d+ s", 30)
+        time.sleep(1)
+        m.monitor("system_powerdown")                # the power button
+        m.expect(r"Sleeping: ", 30)
+        time.sleep(1)
+        m.monitor("system_powerdown")
+        m.expect(r"Awake after \d+ s", 30)
+        time.sleep(1)
+        m.type("")                                   # a fresh prompt
+        out = m.run("echo still here")
+        check("still here" in out, "the shell after sleeping", out)
+    finally:
+        m.stop()
+
+
 def test_install():
     """`install` on an empty partition, then the restart boots from the SSD."""
     disk = os.path.join(OUT, "install-nvme.img")
@@ -783,7 +808,7 @@ def test_logs():
 
 
 TESTS = [("boot", test_boot), ("files", test_files), ("fault", test_fault), ("panic", test_panic),
-         ("kernel", test_kernel), ("desktop", test_desktop), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("logs", test_logs), ("user", test_user), ("video", test_nvme_video), ("bundle", test_bundle), ("storage", test_storage), ("install", test_install), ("network", test_network),
+         ("kernel", test_kernel), ("desktop", test_desktop), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("logs", test_logs), ("user", test_user), ("video", test_nvme_video), ("bundle", test_bundle), ("storage", test_storage), ("sleep", test_sleep), ("install", test_install), ("network", test_network),
          ("bios", test_legacy_bios)]
 NEEDS_INTERNET = {"network"}
 

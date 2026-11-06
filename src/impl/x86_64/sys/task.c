@@ -238,8 +238,20 @@ void kmutex_unlock(kmutex_t *m) {
     }
 }
 
+static volatile int freezing;
+
+void task_freeze(int on) { freezing = on; }
+
+void task_freeze_point(void) {
+    task_t *me = task_current();
+    if (!freezing || !me || !me->is_user) return;
+    me->frozen = 1;
+    while (freezing) task_yield();                  /* (not picked while frozen) */
+    me->frozen = 0;
+}
+
 static int may_run_here(const task_t *t, int me) {
-    if (t->state != TASK_READY || t->running_on >= 0 || t->is_idle) return 0;
+    if (t->state != TASK_READY || t->running_on >= 0 || t->is_idle || (t->frozen && freezing)) return 0;
     return t->is_user || t->pinned == me;
 }
 
@@ -259,7 +271,7 @@ static void schedule(void) {
     task_t *next = 0;
     for (int i = 1; i <= MAX_TASKS; i++) {
         task_t *t = &tasks[(start + i) % MAX_TASKS];
-        if (t == prev ? (t->state == TASK_READY && !t->is_idle) : may_run_here(t, me)) {
+        if (t == prev ? (t->state == TASK_READY && !t->is_idle && !(t->frozen && freezing)) : may_run_here(t, me)) {
             next = t;
             break;
         }

@@ -17,6 +17,8 @@
 #include "sys/task.h"
 #include "sys/smp.h"
 #include "sys/vfs.h"
+#include "drivers/igfx.h"
+#include "drivers/keyboard.h"
 #include "lib/print.h"
 #include "lib/serial.h"
 #include "lib/string.h"
@@ -462,7 +464,8 @@ static battery_t bats[MAX_BATTERIES];
 static int bat_count;
 static uacpi_namespace_node *ac_node;
 static int ac_online = -1;
-static volatile int refresh_wanted = 1, button_pressed;
+static volatile int refresh_wanted = 1, button_pressed, lid_changed;
+static uacpi_namespace_node *lid_node;
 static uint32_t last_refresh, ready_since;
 static int acpi_ready;
 
@@ -544,6 +547,7 @@ static int percent(const battery_t *b) {
 static uacpi_status changed(uacpi_handle ctx, uacpi_namespace_node *node, uacpi_u64 value) {
     refresh_wanted = 1;
     if (ctx == (uacpi_handle)2 && value == 0x80) button_pressed = 1;     /* a power button device */
+    if (ctx == (uacpi_handle)3) lid_changed = 1;                          /* the lid */
     return UACPI_STATUS_OK;
 }
 
@@ -564,6 +568,12 @@ static uacpi_iteration_decision found_ac(void *user, uacpi_namespace_node *node,
 static uacpi_iteration_decision found_button(void *user, uacpi_namespace_node *node, uacpi_u32 depth) {
     uacpi_install_notify_handler(node, changed, (uacpi_handle)2);
     return UACPI_ITERATION_DECISION_CONTINUE;
+}
+
+static uacpi_iteration_decision found_lid(void *user, uacpi_namespace_node *node, uacpi_u32 depth) {
+    lid_node = node;
+    uacpi_install_notify_handler(node, changed, (uacpi_handle)3);
+    return UACPI_ITERATION_DECISION_BREAK;
 }
 
 static uacpi_interrupt_ret power_button(uacpi_handle ctx) {
@@ -612,6 +622,7 @@ int power_init(char *how, int how_len) {
     uacpi_finalize_gpe_initialization();
     uacpi_install_fixed_event_handler(UACPI_FIXED_EVENT_POWER_BUTTON, power_button, UACPI_NULL);
     uacpi_find_devices("PNP0C0C", found_button, UACPI_NULL);
+    uacpi_find_devices("PNP0C0D", found_lid, UACPI_NULL);
     uacpi_find_devices("PNP0C0A", found_battery, UACPI_NULL);
     uacpi_find_devices("ACPI0003", found_ac, UACPI_NULL);
     step("devices");
@@ -627,14 +638,58 @@ int power_init(char *how, int how_len) {
         k_snprintf(bat, sizeof(bat), ", battery %d%%%s", p, (bats[0].state & 2) ? " charging" : "");
     else if (bat_count)
         k_snprintf(bat, sizeof(bat), ", battery not readable");
-    k_snprintf(how, how_len, "ACPI (uACPI)%s%s, power button (`shutdown`, `battery`)",
+    k_snprintf(how, how_len, "ACPI (uACPI)%s%s, power button and lid sleep (`suspend`, `shutdown`, `battery`)",
                ec_up ? ", embedded controller" : "", bat);
     return 0;
+}
+
+/* ---- Sleep ---------------------------------------------------------------------------------- */
+
+static volatile int sleep_wanted, asleep;
+static uint32_t slept_at, keys_at_sleep;
+
+void power_sleep(void) { sleep_wanted = 1; }
+int power_asleep(void) { return asleep; }
+
+static void go_to_sleep(void) {
+    sleep_wanted = 0;
+    kprintf("Sleeping: the power button, a key or opening the lid wakes it.\n");
+    print_flush();
+    vfs_shutdown();                                   /* clean: an empty battery loses nothing */
+    task_freeze(1);
+    igfx_sleep(1);
+    keys_at_sleep = keyboard_presses;
+    slept_at = get_tick();
+    asleep = 1;
+}
+
+static void wake_up(void) {
+    igfx_sleep(0);
+    keyboard_flush();                                 /* the key that woke it types nothing */
+    asleep = 0;
+    task_freeze(0);
+    kprintf("Awake after %u s.\n", (unsigned)((get_tick() - slept_at) / TIMER_FREQ));
+}
+
+/* The lid: closed sleeps, opened wakes. */
+static void lid_event(void) {
+    uint64_t open = 1;
+    lid_changed = 0;
+    if (!lid_node || uacpi_eval_simple_integer(lid_node, "_LID", &open) != UACPI_STATUS_OK) return;
+    if (!open && !asleep) sleep_wanted = 1;
+    if (open && asleep) wake_up();
+}
+
+static void sleep_poll(void) {
+    if (sleep_wanted && !asleep) go_to_sleep();
+    else if (asleep && keyboard_presses != keys_at_sleep && (uint32_t)(get_tick() - slept_at) > TIMER_FREQ / 2)
+        wake_up();                                    /* (not the Enter that typed `suspend`) */
 }
 
 void power_poll(void) {
     static int busy;
     static uint32_t last;
+    sleep_poll();
     if (!acpi_ready || busy) return;
     uint32_t now = get_tick();
     if ((uint32_t)(now - last) < TIMER_FREQ / 20) return;
@@ -646,13 +701,13 @@ void power_poll(void) {
     if (refresh_wanted || (uint32_t)(now - last_refresh) > 15 * TIMER_FREQ) refresh();
     busy = 0;
 
+    if (lid_changed) lid_event();
     if (button_pressed) {
         button_pressed = 0;
         /* The press that switched the laptop on can still be pending. */
         if ((uint32_t)(now - ready_since) > 2 * TIMER_FREQ) {
-            kprintf("\nPower button: shutting down.\n");
-            vfs_shutdown();
-            power_off();
+            if (asleep) wake_up();
+            else go_to_sleep();
         }
     }
 }

@@ -596,6 +596,7 @@ void user_check_interrupt(void) {
     bkl_enter();
     check_killed();
     task_preempt();
+    task_freeze_point();
     bkl_leave();
 }
 
@@ -1060,6 +1061,7 @@ void syscall_dispatch(struct exc_frame *f) {
     bkl_enter();
     user_access_begin();                              /* SMAP: the call may use the program's memory */
     syscall_dispatch_locked(f);
+    task_freeze_point();                              /* the computer sleeps: wait here */
     user_access_end();
     bkl_leave();
 }
@@ -2532,6 +2534,10 @@ static int64_t sys_system(uint64_t op, uint64_t a, uint64_t b) {
             return 0;
         }
         case SYSTEM_POWER:
+            if (a == 2) {                                       /* sleep: back here at the wake-up */
+                power_sleep();
+                return 0;
+            }
             print_set_graphics(0);
             vfs_shutdown();                                     /* ext3: clean, nothing to replay */
             if (a == 1) reboot();

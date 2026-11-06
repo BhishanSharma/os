@@ -234,7 +234,8 @@ static void cmd_help(void)
     print_str("sleep <seconds>    - wait\n");
     print_str("status             - uptime and allocation count\n");
     print_str("reboot             - reboot system\n");
-    print_str("shutdown           - switch the computer off (the power button does too)\n");
+    print_str("shutdown           - switch the computer off\n");
+    print_str("suspend            - sleep (the power button and the lid do too; a key wakes it)\n");
     print_str("install            - put Terminal OS on this PC's SSD (from the USB stick)\n");
     print_str("bootmenu           - the PC's boot menu entries (UEFI)\n");
     print_str("battery            - battery charge, health and time left; the charger\n");
@@ -536,6 +537,10 @@ static int kernel_command(const char *line, int run_programs) {
         power_off();
         efi_reset(1);                                   // ACPI failed: ask the firmware
         print_str("shutdown: the computer could not be switched off; hold the power button.\n");
+    }
+    else if (strcmp(line, "suspend") == 0)
+    {
+        power_sleep();
     }
     else if (strcmp(line, "bootmenu") == 0)
     {

@@ -340,7 +340,7 @@ static void reload_dock(void) {
 }
 
 enum { M_ABOUT = 1, M_SETTINGS, M_ACTIVITY, M_APPEARANCE, M_MOTION, M_TRANSP, M_TERMINAL,
-       M_CONTRAST, M_RESTART, M_SHUTDOWN, M_LOGOUT };
+       M_CONTRAST, M_RESTART, M_SHUTDOWN, M_LOGOUT, M_SLEEP };
 #define MI_SEP 1
 #define MI_OFF 2
 #define MI_MAX 24
@@ -892,11 +892,13 @@ static void build_menu(int kind) {
         add_sep();
         add_item("New Terminal", 0, M_TERMINAL, 0);
         add_sep();
+        add_item("Sleep", 0, M_SLEEP, 0);
         add_item("Restart...", 0, M_RESTART, 0);
         add_item("Shut Down...", 0, M_SHUTDOWN, 0);
         add_sep();
         add_item("Log Out", "Ctrl+Q", M_LOGOUT, 0);
     } else if (kind == 2) {
+        add_item("Sleep", 0, M_SLEEP, 0);
         add_item("Restart...", 0, M_RESTART, 0);
         add_item("Shut Down...", 0, M_SHUTDOWN, 0);
         add_sep();
@@ -2713,6 +2715,9 @@ static void menu_choose(int id) {
         power(id == M_RESTART);
     } else if (id == M_LOGOUT) {
         quit();
+    } else if (id == M_SLEEP) {
+        power(2);                                     /* (this program stops until the wake-up) */
+        damage(0, 0, W, H);
     }
 }
 

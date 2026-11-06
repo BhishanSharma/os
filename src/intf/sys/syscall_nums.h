@@ -113,7 +113,7 @@
 #define SYSTEM_WIFI_OFF     3  /* leave the network                         -> 0 */
 #define SYSTEM_VOLUME       4  /* a = 0-100 to set, -1 to read               -> volume, SYSERR_NOENT no sound */
 #define SYSTEM_BATTERY      5  /* -> percent | 0x100 charging, SYSERR_NOENT no battery */
-#define SYSTEM_POWER        6  /* a = 0 shut down, 1 restart                 -> only on failure */
+#define SYSTEM_POWER        6  /* a = 0 shut down, 1 restart -> only on failure; 2 sleep -> 0 (at once) */
 #define SYSTEM_SETUP        7  /* a = name, b = password: the first accounts -> 0; a = 0: 1 if needed */
 #define SYSTEM_SETUP_TEXT   8  /* the first-start questions on the console   -> 0 */
 #define SYSTEM_LOG          9  /* a = struct os_log *: the system log         -> bytes copied */

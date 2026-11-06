@@ -71,6 +71,42 @@ static uint32_t rd_pipe(int p, uint32_t r) { return *(volatile uint32_t *)(regs 
 
 const char *igfx_status(void) { return status; }
 
+/* The laptop panel's power sequencer (south display): bit 2 lets the
+ * backlight on; the PWM that dims it has its own enable. */
+#define PP_CONTROL       0xC7204
+#define PP_BLC_ENABLE    (1u << 2)
+#define BLC_PWM_CTL1     0xC8250
+#define BLC_PWM_ENABLE   (1u << 31)
+
+static uint32_t rd_abs(uint32_t r) { return *(volatile uint32_t *)(regs + r); }
+static void wr_abs(uint32_t r, uint32_t v) { *(volatile uint32_t *)(regs + r) = v; }
+
+void igfx_sleep(int asleep) {
+    static uint32_t plane, cursor, pp, pwm, saved;
+    if (!ok) return;
+    if (asleep && !saved) {
+        plane = rd(PLANE_CTL);
+        cursor = rd(CUR_CTL);
+        wr(CUR_CTL, 0);
+        wr(CUR_BASE, rd(CUR_BASE));
+        pp = rd_abs(PP_CONTROL);
+        pwm = rd_abs(BLC_PWM_CTL1);
+        saved = 1;
+        if (pp & PP_BLC_ENABLE) wr_abs(PP_CONTROL, pp & ~PP_BLC_ENABLE);
+        if (pwm & BLC_PWM_ENABLE) wr_abs(BLC_PWM_CTL1, pwm & ~BLC_PWM_ENABLE);
+        wr(PLANE_CTL, plane & ~(1u << 31));                  /* black, should a backlight stay on */
+        wr(PLANE_SURF, rd(PLANE_SURF));                      /* (latched at the next refresh) */
+    } else if (!asleep && saved) {
+        wr(PLANE_CTL, plane);
+        wr(PLANE_SURF, rd(PLANE_SURF));
+        wr(CUR_CTL, cursor);
+        wr(CUR_BASE, rd(CUR_BASE));
+        if (pwm & BLC_PWM_ENABLE) wr_abs(BLC_PWM_CTL1, pwm);
+        if (pp & PP_BLC_ENABLE) wr_abs(PP_CONTROL, pp);
+        saved = 0;
+    }
+}
+
 /* Gen12/13 display: Tiger Lake, Rocket Lake, Alder Lake, Raptor Lake. */
 static int supported(uint16_t dev) {
     return (dev >= 0x9A40 && dev <= 0x9AFF) || (dev >= 0x4C80 && dev <= 0x4C8F) ||

@@ -60,4 +60,8 @@ uint32_t *igfx_back_buffer(void);       /* CPU address (write-combining), 0 if n
 void igfx_flip(int buffer);             /* 0 = the firmware's framebuffer, 1 = ours; at the next refresh */
 int igfx_flip_done(void);               /* 1 once the last flip is on the screen */
 
+/* Sleep: the panel's backlight and the picture off (1), and on again (0).
+ * The pipe keeps running, so waking needs no mode set. */
+void igfx_sleep(int asleep);
+
 #endif

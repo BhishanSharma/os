@@ -55,7 +55,10 @@ void keyboard_handler() {
 
 /* One byte of PS/2 scan code set 1, from the keyboard port or translated
  * from a USB keyboard. */
+volatile uint32_t keyboard_presses;
+
 void keyboard_scancode(uint8_t scancode) {
+    if (!(scancode & 0x80) && scancode != 0xE0) keyboard_presses++;   /* (a key went down: sleep ends) */
     // Check for extended scancode prefix (0xE0)
     if (scancode == 0xE0) {
         extended_scancode = 1;
