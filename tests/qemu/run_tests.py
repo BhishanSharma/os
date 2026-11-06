@@ -81,14 +81,15 @@ def kernel_symbols():
 class Machine:
     """One QEMU: the monitor on stdin, the serial port in a file."""
 
-    def __init__(self, name, args, mem="1G", cpus=4, uefi=True):
+    def __init__(self, name, args, mem="1G", cpus=4, uefi=True, nic=True):
         self.name = name
         self.serial = os.path.join(OUT, name + ".serial.txt")
         if os.path.exists(self.serial):
             os.remove(self.serial)
         cmd = [find_qemu(), "-cpu", "max", "-m", mem, "-smp", str(cpus), "-display", "none",
-               "-monitor", "stdio", "-serial", "file:" + self.serial,
-               "-netdev", "user,id=n0", "-device", "rtl8139,netdev=n0"]
+               "-monitor", "stdio", "-serial", "file:" + self.serial]
+        if nic:
+            cmd += ["-netdev", "user,id=n0", "-device", "rtl8139,netdev=n0"]
         if uefi:
             cmd += ["-drive", "if=pflash,format=raw,readonly=on,file=" + find_ovmf("code")]
         self.mon_path = os.path.join(OUT, name + ".monitor.txt")   # what the monitor answers
@@ -668,6 +669,31 @@ def test_hub():
         m.stop()
 
 
+def test_usbnet():
+    """A USB network adapter (CDC-ECM: QEMU's usb-net) behind a hub, and no
+    other network card: it is the card; DHCP and a ping over it."""
+    m = Machine("usbnet", usb_stick() + [
+        "-netdev", "user,id=n1",
+        "-device", "usb-hub,bus=xhci.0,port=2",
+        "-device", "usb-net,bus=xhci.0,port=2.1,netdev=n1,id=net1"], nic=False)
+    try:
+        m.expect(r"Network\s+USB Ethernet [0-9a-f]{4}:[0-9a-f]{4}, MAC 52:54:00:12:34:\w\w", 120)
+        m.expect(r"DHCP\s+10\.0\.2\.15, gateway 10\.0\.2\.2", 60)
+        login(m)
+        out = m.run("lsusb")
+        check(re.search(r"port \d+\.1 .* network adapter \(in use\)", out), "lsusb: the adapter", out)
+        out = m.run("ping 10.0.2.2 3", 30)
+        check(re.search(r"3 packets transmitted, [123] received", out), "ping over the USB adapter", out)
+        m.monitor("device_del net1")                           # out, and into another port of the hub
+        time.sleep(2)
+        m.monitor("device_add usb-net,bus=xhci.0,port=2.3,netdev=n1,id=net2")
+        m.expect(r"USB Ethernet [0-9a-f]{4}:[0-9a-f]{4}: DHCP gave 10\.0\.2\.15", 60)
+        out = m.run("ping 10.0.2.2 2", 30)
+        check(re.search(r"2 packets transmitted, [12] received", out), "ping after plugging the adapter in again", out)
+    finally:
+        m.stop()
+
+
 def test_network():
     """DHCP, DNS, TCP and TLS: an HTTPS download."""
     m = Machine("network", usb_stick(), cpus=2)
@@ -967,7 +993,7 @@ def test_logs():
 
 
 TESTS = [("boot", test_boot), ("files", test_files), ("fault", test_fault), ("panic", test_panic),
-         ("kernel", test_kernel), ("desktop", test_desktop), ("polish", test_polish), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("logs", test_logs), ("user", test_user), ("video", test_nvme_video), ("bundle", test_bundle), ("storage", test_storage), ("sleep", test_sleep), ("dynamic", test_dynamic), ("ports", test_ports), ("install", test_install), ("sata", test_sata), ("hub", test_hub), ("network", test_network),
+         ("kernel", test_kernel), ("desktop", test_desktop), ("polish", test_polish), ("gui", test_gui), ("apps", test_apps), ("zoom", test_zoom), ("logs", test_logs), ("user", test_user), ("video", test_nvme_video), ("bundle", test_bundle), ("storage", test_storage), ("sleep", test_sleep), ("dynamic", test_dynamic), ("ports", test_ports), ("install", test_install), ("sata", test_sata), ("hub", test_hub), ("usbnet", test_usbnet), ("network", test_network),
          ("bios", test_legacy_bios)]
 NEEDS_INTERNET = {"network"}
 # Tests of programs only the full toolchain builds (myos-ladybird: build.ps1).

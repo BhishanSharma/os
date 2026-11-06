@@ -16,6 +16,7 @@ is offered too. No root or host setup is needed.
 | 5 | **Done (minimal).** TLS 1.2 HTTPS client with BearSSL and certificate/name validation | `download https://...` |
 | 6 | **Done.** DHCP client; NIC abstraction (`drivers/nic.c`) | `dhcp`, `ifconfig` |
 | 7 | **Written, untested on hardware.** RTL8168/8111 driver for real PCs | boot on a PC with that NIC |
+| 8 | **Done.** USB network adapters (CDC-ECM), behind hubs too, plugged in any time | `usbnet` test (QEMU `usb-net`) |
 
 ## DHCP and NIC drivers
 
@@ -33,6 +34,13 @@ descriptor rings through the I/O-port BAR. Because UEFI machines often don't rou
 legacy PIC interrupt, its receive ring is also polled from the timer tick. QEMU cannot emulate
 this chip, so the driver has not been run yet. Booting on real hardware also needs UEFI boot
 and a framebuffer console, which the OS does not have yet.
+
+A USB network adapter (a USB-C or USB Ethernet dongle, a dock's Ethernet port) is the card
+when there is no other wired one: the standard CDC-ECM interface, which most adapters offer
+(Realtek RTL8153 dongles as a second configuration next to their own; every configuration is
+looked at). One Ethernet frame per bulk transfer, 16 receives kept queued. Plugged in after
+boot, it asks DHCP for an address by itself (`USB Ethernet ...: DHCP gave ...`). Cuts: no
+CDC-NCM or RNDIS, and no vendor-only adapters (ASIX AX88179 without ECM).
 
 ## Step 1: what exists
 

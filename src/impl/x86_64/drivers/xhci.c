@@ -1,4 +1,5 @@
-// xhci.c - USB 3 host controller (xHCI): mice, keyboards, USB sticks, hubs
+// xhci.c - USB 3 host controller (xHCI): mice, keyboards, USB sticks, hubs,
+// network adapters
 //
 // The controller works from rings of 16-byte TRBs in memory: a command ring
 // (we ask it to give a device an address, set up an endpoint, ...), one
@@ -18,6 +19,11 @@
 // device behind a high-speed hub also names that hub's transaction
 // translator. A hub reports plugs on its status endpoint; its ports are then
 // looked at again from usb_service, as the root ports are.
+//
+// Network adapters: CDC-ECM (USB CDC 1.2, ECM 1.2), one Ethernet frame per
+// bulk transfer. Many adapters (Realtek RTL8153 among them) offer it as a
+// second configuration next to their own; every configuration is looked at.
+// The adapter is the network card when there is no other wired one.
 #include "drivers/usb.h"
 #include "sys/smp.h"
 #include "drivers/msi.h"
@@ -27,6 +33,8 @@
 #include "drivers/timer.h"
 #include "drivers/mouse.h"
 #include "drivers/keyboard.h"
+#include "drivers/nic.h"
+#include "net/net.h"
 #include "lib/print.h"
 #include "lib/string.h"
 #include <stdint.h>
@@ -170,6 +178,12 @@ typedef struct {
     ring_t st_in, st_out;
     uint32_t st_tag;
     uint64_t st_sectors;            /* 512-byte blocks */
+    /* A network adapter (CDC-ECM). */
+    int net;                        /* 1: in use as the network card */
+    int net_in_dci, net_out_dci;
+    uint16_t net_in_mps, net_out_mps;
+    ring_t net_in, net_out;
+    uint8_t configs;                /* how many configurations it has */
 } usb_device_t;
 
 /* Keyboard repeat (USB keyboards only say what is held down). */
@@ -712,6 +726,8 @@ static int setup_hub(usb_device_t *d, uint8_t config_value) {
     return 0;
 }
 
+static int try_ecm(usb_device_t *d, uint8_t *buf);
+
 static void setup_device(usb_device_t *d) {
     uint8_t *buf = dma_alloc(512, 64);
     if (!buf) { d->note = "out of memory"; return; }
@@ -721,6 +737,7 @@ static void setup_device(usb_device_t *d) {
     d->dev_class = buf[4];
     d->vendor = (uint16_t)(buf[8] | buf[9] << 8);
     d->product = (uint16_t)(buf[10] | buf[11] << 8);
+    d->configs = buf[17];
 
     if (get_descriptor(d, 2, 0, buf, 9) != 0) { d->note = "no configuration"; return; }
     uint16_t total = (uint16_t)(buf[2] | buf[3] << 8);
@@ -788,6 +805,7 @@ static void setup_device(usb_device_t *d) {
         setup_hub(d, config_value);
         return;
     }
+    if (try_ecm(d, buf)) return;
     d->note = "no driver";
 }
 
@@ -800,6 +818,210 @@ static int device_kinds(const usb_device_t *d) {
 static usb_device_t *by_slot(int slot) {
     for (int i = 0; i < device_count; i++)
         if (devices[i].slot == slot) return &devices[i];
+    return 0;
+}
+
+/* ---- Network adapters (CDC-ECM) ------------------------------------------------ */
+
+#define NET_RX   16                     /* receive transfers kept queued */
+#define NET_TX   16                     /* frames sent and not yet done */
+#define NET_BUF  2048
+
+typedef struct {
+    uint8_t config_value, comm_if, data_if, data_alt, in_ep, out_ep, mac_index;
+    uint16_t in_mps, out_mps;
+} ecm_t;
+
+static uint8_t *net_rx_buf[NET_RX], *net_tx_buf[NET_TX];
+static int8_t net_rx_of[RING_TRBS];             /* which buffer each TRB of the IN ring holds */
+static int net_slot, net_tx_next;
+static volatile int net_tx_busy;
+static uint8_t net_mac[6];
+static nic_rx_cb_t net_cb;
+static nic_stats_t net_stats;
+static int net_dhcp_wanted;
+static char net_name[40] = "USB Ethernet";
+
+/* A configuration with a CDC Ethernet (ECM) interface and its data interface's bulk pair. */
+static int parse_ecm(const uint8_t *buf, int total, ecm_t *e) {
+    memset(e, 0, sizeof(*e));
+    e->config_value = buf[5];
+    int comm = 0, have_comm = 0, data = 0;
+    e->data_if = 0xFF;
+    for (int i = 0; i + 1 < total && buf[i] >= 2; i += buf[i]) {
+        uint8_t len = buf[i], type = buf[i + 1];
+        if (type == 4 && len >= 9) {
+            comm = buf[i + 5] == 2 && buf[i + 6] == 6;      /* CDC, Ethernet Networking Control Model */
+            if (comm && !have_comm) {
+                e->comm_if = buf[i + 2];
+                have_comm = 1;
+            }
+            data = have_comm && buf[i + 5] == 0x0A && buf[i + 2] == e->data_if;
+            if (data) e->data_alt = buf[i + 3];
+        } else if (type == 0x24 && comm && len >= 4) {      /* class-specific (functional) descriptors */
+            if (buf[i + 2] == 0x06 && len >= 5) e->data_if = buf[i + 4];      /* union: the data interface */
+            if (buf[i + 2] == 0x0F && len >= 13) e->mac_index = buf[i + 3];   /* Ethernet: the MAC string */
+        } else if (type == 5 && len >= 7 && data && (buf[i + 3] & 3) == 2) {
+            uint16_t mps = (uint16_t)((buf[i + 4] | buf[i + 5] << 8) & 0x7FF);
+            if (buf[i + 2] & 0x80) {
+                e->in_ep = buf[i + 2];
+                e->in_mps = mps;
+            } else {
+                e->out_ep = buf[i + 2];
+                e->out_mps = mps;
+            }
+        }
+    }
+    return have_comm && e->in_ep && e->out_ep;
+}
+
+static void queue_rx(usb_device_t *d, int k) {
+    trb_t *t = ring_push(&d->net_in, virt_to_phys(net_rx_buf[k]), NET_BUF, TRB_TYPE(TRB_NORMAL) | TRB_IOC | TRB_ISP);
+    net_rx_of[t - d->net_in.trbs] = (int8_t)k;
+    ring_doorbell(d->slot, d->net_in_dci);
+}
+
+static int hexval(uint16_t c) {
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'A' && c <= 'F' ? c - 'A' + 10 : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+}
+
+static void net_irq(void) { }                  /* (frames come with the USB events) */
+static void net_get_mac(uint8_t mac[6]) { memcpy(mac, net_mac, 6); }
+static void net_set_rx(nic_rx_cb_t cb) { net_cb = cb; }
+static void net_get_stats(nic_stats_t *out) { *out = net_stats; }
+
+static int net_send(const void *frame, uint16_t len) {
+    usb_device_t *d = net_slot ? by_slot(net_slot) : 0;
+    if (!d || !d->net || len > NIC_MAX_FRAME || net_tx_busy >= NET_TX) {
+        net_stats.tx_errors++;
+        return -1;
+    }
+    uint8_t *b = net_tx_buf[net_tx_next];
+    net_tx_next = (net_tx_next + 1) % NET_TX;
+    memcpy(b, frame, len);
+    uint32_t n = len;
+    if (n % d->net_out_mps == 0) b[n++] = 0;      /* (a full last packet would need a zero-length one) */
+    __sync_fetch_and_add(&net_tx_busy, 1);
+    ring_push(&d->net_out, virt_to_phys(b), n, TRB_TYPE(TRB_NORMAL) | TRB_IOC);
+    ring_doorbell(d->slot, d->net_out_dci);
+    net_stats.tx_packets++;
+    net_stats.tx_bytes += len;
+    return 0;
+}
+
+static nic_driver_t usbnet_drv = { net_name, NIC_IRQ_NONE, net_irq, net_get_mac, net_set_rx, net_get_stats, net_send };
+
+/* A frame came in, or one went out. 1 if the transfer was the adapter's. */
+static int net_transfer(usb_device_t *d, int dci, const trb_t *e) {
+    if (!d->net) return 0;
+    int cc = (int)(e->status >> 24);
+    if (dci == d->net_out_dci) {
+        if (net_tx_busy > 0) __sync_fetch_and_sub(&net_tx_busy, 1);
+        if (cc != CC_SUCCESS && cc != CC_SHORT) net_stats.tx_errors++;
+        return 1;
+    }
+    if (dci != d->net_in_dci) return 0;
+    uint64_t at = (e->param - virt_to_phys(d->net_in.trbs)) / sizeof(trb_t);   /* (the event names the TRB) */
+    if (at < RING_TRBS - 1) {
+        int k = net_rx_of[at];
+        int got = NET_BUF - (int)(e->status & 0xFFFFFF);
+        if ((cc == CC_SUCCESS || cc == CC_SHORT) && got >= 14 && got <= NIC_MAX_FRAME + 4) {
+            net_stats.rx_packets++;
+            net_stats.rx_bytes += (uint32_t)got;
+            if (net_cb) net_cb(net_rx_buf[k], (uint16_t)(got > NIC_MAX_FRAME ? NIC_MAX_FRAME : got));
+        } else {
+            net_stats.rx_errors++;
+        }
+        queue_rx(d, k);
+        return 1;
+    }
+    return 1;
+}
+
+static int setup_ecm(usb_device_t *d, const ecm_t *e, uint8_t *buf) {
+    if (net_slot && by_slot(net_slot)) { d->note = "a second USB network adapter (one is used)"; return -1; }
+    if (nic_is_up() && nic_name() != net_name) {             /* (an adapter plugged in again is fine) */
+        d->note = "network adapter (another network card is in use)";
+        return -1;
+    }
+    for (int k = 0; k < NET_RX; k++)
+        if (!net_rx_buf[k] && !(net_rx_buf[k] = dma_alloc(NET_BUF, 4096))) { d->note = "out of memory"; return -1; }
+    for (int k = 0; k < NET_TX; k++)
+        if (!net_tx_buf[k] && !(net_tx_buf[k] = dma_alloc(NET_BUF, 4096))) { d->note = "out of memory"; return -1; }
+    if (ring_init(&d->net_in) != 0 || ring_init(&d->net_out) != 0) { d->note = "out of memory"; return -1; }
+    d->net_in_dci = (e->in_ep & 0xF) * 2 + 1;
+    d->net_out_dci = (e->out_ep & 0xF) * 2;
+    d->net_in_mps = e->in_mps ? e->in_mps : 64;
+    d->net_out_mps = e->out_mps ? e->out_mps : 64;
+    uint32_t *icc = in_entry(d, 0), *slot = in_entry(d, 1);
+    memset(d->in_ctx, 0, (uint64_t)ctx_size * 33);
+    memcpy(slot, d->out_ctx, (uint64_t)ctx_size);
+    icc[1] = 1u | 1u << d->net_in_dci | 1u << d->net_out_dci;
+    for (int k = 0; k < 2; k++) {
+        int dci = k ? d->net_in_dci : d->net_out_dci;
+        uint32_t mps = k ? d->net_in_mps : d->net_out_mps;
+        ring_t *r = k ? &d->net_in : &d->net_out;
+        uint32_t *ep = in_entry(d, dci + 1);
+        ep[1] = (3u << 1) | ((k ? 6u : 2u) << 3) | (mps << 16);   /* CErr 3, bulk IN / OUT */
+        uint64_t deq = virt_to_phys(r->trbs) | 1;
+        ep[2] = (uint32_t)deq;
+        ep[3] = (uint32_t)(deq >> 32);
+        ep[4] = 1514;                                       /* average TRB length: a frame */
+    }
+    int last = d->net_in_dci > d->net_out_dci ? d->net_in_dci : d->net_out_dci;
+    slot[0] = (slot[0] & ~(0x1Fu << 27)) | ((uint32_t)last << 27);
+    if (command(virt_to_phys(d->in_ctx), 0, TRB_TYPE(TRB_CONFIGURE_EP) | ((uint32_t)d->slot << 24), 0) != CC_SUCCESS) {
+        d->note = "network adapter: endpoint setup failed";
+        return -1;
+    }
+    if (control(d, 0x00, 9, e->config_value, 0, 0, 0) != 0) { d->note = "SET_CONFIGURATION failed"; return -1; }
+    if (e->data_alt && control(d, 0x01, 11, e->data_alt, e->data_if, 0, 0) != 0) {   /* SET_INTERFACE: the bulk pair */
+        d->note = "network adapter: SET_INTERFACE failed";
+        return -1;
+    }
+    control(d, 0x21, 0x43, 0x0E, e->comm_if, 0, 0);          /* packet filter: own, broadcast, multicast */
+
+    /* The MAC address: a string of 12 hex digits. */
+    int ok = 0;
+    if (e->mac_index && control(d, 0x80, 6, (uint16_t)(0x0300 | e->mac_index), 0x0409, buf, 64) == 0 && buf[0] >= 26) {
+        ok = 1;
+        for (int i = 0; i < 12 && ok; i++) {
+            int v = hexval((uint16_t)(buf[2 + 2 * i] | buf[3 + 2 * i] << 8));
+            if (v < 0) ok = 0;
+            else if (i & 1) net_mac[i / 2] |= (uint8_t)v;
+            else net_mac[i / 2] = (uint8_t)(v << 4);
+        }
+    }
+    if (!ok) {                                              /* a made-up, locally administered one */
+        uint8_t made[6] = { 0x02, 0x54, 0x4F, (uint8_t)(d->vendor >> 8), (uint8_t)d->vendor, (uint8_t)d->product };
+        memcpy(net_mac, made, 6);
+    }
+    d->net = 1;
+    net_slot = d->slot;
+    net_tx_busy = 0;
+    memset(net_rx_of, 0, sizeof(net_rx_of));
+    for (int k = 0; k < NET_RX; k++) queue_rx(d, k);
+    k_snprintf(net_name, sizeof(net_name), "USB Ethernet %04x:%04x", d->vendor, d->product);
+    nic_attach(&usbnet_drv);
+    if (!net_is_up()) net_init();
+    else nic_set_rx_handler(net_cb);
+    net_dhcp_wanted = 1;
+    return 0;
+}
+
+/* Every configuration: one with CDC-ECM is set up. 1 if so (or tried). */
+static int try_ecm(usb_device_t *d, uint8_t *buf) {
+    int n = d->configs ? d->configs : 1;
+    for (int c = 0; c < n && c < 4; c++) {
+        if (get_descriptor(d, 2, (uint8_t)c, buf, 9) != 0) continue;
+        uint16_t total = (uint16_t)(buf[2] | buf[3] << 8);
+        if (total > 512) total = 512;
+        if (get_descriptor(d, 2, (uint8_t)c, buf, total) != 0) continue;
+        ecm_t e;
+        if (!parse_ecm(buf, total, &e)) continue;
+        setup_ecm(d, &e, buf);
+        return 1;
+    }
     return 0;
 }
 
@@ -816,6 +1038,7 @@ static void place_text(const usb_device_t *d, char *out, int size) {
  * give the controller its slot back. */
 static void remove_device(int i) {
     int slot = devices[i].slot;
+    if (devices[i].net && slot == net_slot) net_slot = 0;  /* (the controller may give the slot to the next device) */
     for (int j = 0; j < devices[i].hid_count; j++) {
         if (devices[i].hid[j].kind == HID_MOUSE) mouse_count--;
         else keyboard_count--;
@@ -966,6 +1189,7 @@ static void handle_transfer(const trb_t *e) {
     for (int i = 0; i < device_count; i++) {
         usb_device_t *d = &devices[i];
         if (d->slot != slot) continue;
+        if (net_transfer(d, dci, e)) return;
         if (d->hub_ports && d->hub_dci == dci) {            /* a hub port changed: usb_service looks */
             int cc = (int)(e->status >> 24);
             if (cc == CC_SUCCESS || cc == CC_SHORT) {
@@ -1196,7 +1420,17 @@ void usb_service(void) {
     for (int i = 0; i < nh; i++) hub_scan(hubs[i]);
     busy = 0;
     describe();
+    if (net_dhcp_wanted) {                                  /* an adapter came: ask for an address */
+        net_dhcp_wanted = 0;
+        char ip[16];
+        int ok = net_configure() == 0;
+        net_fmt_ip(ip, net_get_config()->ip);
+        kprintf("%s: %s %s\n", net_name, ok ? "DHCP gave" : "no DHCP answer, using", ip);
+    }
 }
+
+int usb_net_attached(void) { return net_slot != 0 && by_slot(net_slot) != 0; }
+void usb_net_boot_done(void) { net_dhcp_wanted = 0; }  /* (the boot's DHCP asks for it) */
 
 static const char *speed_name(int s) {
     switch (s) {
@@ -1219,7 +1453,8 @@ void usb_print_devices(void) {
     for (int i = 0; i < device_count; i++) {
         usb_device_t *d = &devices[i];
         int kinds = device_kinds(d);
-        const char *what = kinds == (1 << HID_MOUSE | 1 << HID_KEYBOARD) ? "keyboard + mouse (in use)" :
+        const char *what = d->net ? "network adapter (in use)" :
+                           kinds == (1 << HID_MOUSE | 1 << HID_KEYBOARD) ? "keyboard + mouse (in use)" :
                            kinds == 1 << HID_MOUSE ? "mouse (in use)" :
                            kinds == 1 << HID_KEYBOARD ? "keyboard (in use)" :
                            d->if_class == 3 ? "HID device" :

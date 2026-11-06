@@ -23,6 +23,11 @@ const char *usb_description(void);
 /* `lsusb`: the controller and what is plugged into each port. */
 void usb_print_devices(void);
 
+/* A USB network adapter (CDC-ECM) is the network card. usb_net_boot_done:
+ * the boot asks DHCP itself (usb_service does for one plugged in later). */
+int usb_net_attached(void);
+void usb_net_boot_done(void);
+
 /* USB sticks (mass storage), numbered from 0 in the order found. Sectors are
  * 512 bytes; read and write return 0 on success. */
 int usb_storage_count(void);

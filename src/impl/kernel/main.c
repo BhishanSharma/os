@@ -382,7 +382,8 @@ void kernel_main() {
         net_fmt_mac(mac, net_get_config()->mac);
         print_boot_status(BOOT_OK, "Network", "%s, MAC %s", nic_name(), mac);
     } else {
-        print_boot_status(BOOT_WARN, "Network", "no supported network card (RTL8139, RTL8168, Intel e1000)");
+        print_boot_status(BOOT_WARN, "Network", "no supported network card (RTL8139, RTL8168, Intel e1000; "
+                          "USB adapters with CDC-ECM work too)");
     }
 
     if (wifi_detect() > 0) {
@@ -424,6 +425,12 @@ void kernel_main() {
         int mice = usb_init();
         print_boot_status(mice > 0 ? BOOT_OK : BOOT_WARN, "USB", "%s%s", usb_description(),
                           mice == 0 ? " (plug a mouse in any time)" : "");
+        if (usb_net_attached()) {                          /* a USB network adapter is the card */
+            usb_net_boot_done();
+            char mac[18];
+            net_fmt_mac(mac, net_get_config()->mac);
+            print_boot_status(BOOT_OK, "Network", "%s, MAC %s", nic_name(), mac);
+        }
         mount_usb_stick();
         char nvme_how[160];
         int nv = nvme_init(nvme_how, sizeof(nvme_how));
