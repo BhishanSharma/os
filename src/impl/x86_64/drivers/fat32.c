@@ -2,7 +2,8 @@
 //
 // One fatvol_t per mounted volume, each with its own block device. The FAT
 // is read one sector at a time through a one-sector cache (writes go
-// straight through to every FAT copy). Folder entries are updated where they
+// straight through to every FAT copy, except inside a file's write or
+// delete: there once per sector). Folder entries are updated where they
 // are, in whichever cluster of the folder holds them. Long names (VFAT) are
 // read and written; see "Names" below.
 #include "drivers/fatvol.h"
@@ -25,8 +26,22 @@ static int dev_write(fatvol_t *v, uint32_t lba, uint32_t n, const void *buf) {
     return v->dev.write(v->dev.ctx, lba, n, buf) == 0 ? 0 : FATV_IO;
 }
 
+/* The cached FAT sector, changed, onto every FAT copy. */
+static int fat_flush(fatvol_t *v) {
+    if (!v->cache_dirty) return 0;
+    v->cache_dirty = 0;
+    for (uint32_t i = 0; i < v->num_fats; i++)
+        if (dev_write(v, v->cache_sector + i * v->fat_size, 1, v->cache) != 0) {
+            v->cache_valid = 0;                             /* the cache no longer matches the disk */
+            return FATV_IO;
+        }
+    return 0;
+}
+
 static int fat_load(fatvol_t *v, uint32_t sector) {
     if (v->cache_valid && v->cache_sector == sector) return 0;
+    int r = fat_flush(v);
+    if (r) return r;
     v->cache_valid = 0;
     if (dev_read(v, sector, 1, v->cache) != 0) return FATV_IO;
     v->cache_sector = sector;
@@ -50,14 +65,8 @@ static int fat_set(fatvol_t *v, uint32_t c, uint32_t value) {
     uint32_t *e = (uint32_t *)(v->cache + off % 512);
     *e = (*e & 0xF0000000u) | (value & 0x0FFFFFFF);
     v->map_first = 0;                                       /* a chain changed: the seek map may be wrong */
-    for (uint32_t i = 0; i < v->num_fats; i++) {
-        r = dev_write(v, sector + i * v->fat_size, 1, v->cache);
-        if (r) {
-            v->cache_valid = 0;                             /* the cache no longer matches the disk */
-            return r;
-        }
-    }
-    return 0;
+    v->cache_dirty = 1;
+    return v->defer ? 0 : fat_flush(v);                     /* (a big write: once per sector) */
 }
 
 static uint32_t cluster_lba(fatvol_t *v, uint32_t c) { return v->data_start + (c - 2) * v->spc; }
@@ -577,25 +586,30 @@ int fatvol_create(fatvol_t *v, uint32_t dir, const char *name, int is_dir, faten
 
 /* ---- Files ------------------------------------------------------------------------ */
 
+/* The whole file: runs of clusters that follow each other on the disk, each
+ * in one read (fatvol_read_at). */
 int fatvol_read(fatvol_t *v, const fatent_t *f, uint8_t *dst, uint32_t max) {
-    uint32_t size = f->e.file_size < max ? f->e.file_size : max, done = 0;
+    uint32_t size = f->e.file_size < max ? f->e.file_size : max;
     if (!size) return 0;
-    uint8_t *buf = kmalloc(v->bpc);
-    if (!buf) return FATV_IO;
-    uint32_t steps = v->clusters;
-    for (uint32_t c = fatent_cluster(f); done < size && valid_cluster(v, c) && steps--; c = fat_get(v, c)) {
-        if (read_cluster(v, c, buf) != 0) {
-            kfree(buf);
-            return FATV_IO;
-        }
-        uint32_t n = size - done < v->bpc ? size - done : v->bpc;
-        memcpy(dst + done, buf, n);
-        done += n;
-    }
-    kfree(buf);
-    return (int)done;
+    fatpos_t pos = { 0, 0 };
+    return fatvol_read_at(v, f, 0, dst, size, &pos);
 }
 
+/* Whole clusters in a row on the disk, written at once from the caller's data:
+ * `len` clusters from `start`, the data at `off`. */
+#define WRITE_RUN 2048                                      /* sectors at most (1 MiB) */
+typedef struct { uint32_t start, len, off; } run_t;
+
+static int run_flush(fatvol_t *v, run_t *run, const uint8_t *data, uint32_t *written) {
+    if (!run->len) return 0;
+    int r = dev_write(v, cluster_lba(v, run->start), run->len * v->spc, data + run->off);
+    if (r) *written = run->off;                             /* (only what is on the disk counts) */
+    run->len = 0;
+    return r;
+}
+
+/* A large file in few writes: its clusters run by run, and the FAT once per
+ * sector (`defer`), after the data, rather than twice per cluster. */
 int fatvol_write(fatvol_t *v, fatent_t *f, const uint8_t *data, uint32_t size) {
     if (!v->dev.writable) return FATV_READ_ONLY;
     if (f->e.attributes & FAT_ATTR_DIRECTORY) return FATV_EXISTS;
@@ -603,13 +617,15 @@ int fatvol_write(fatvol_t *v, fatent_t *f, const uint8_t *data, uint32_t size) {
     if (!valid_cluster(v, first)) first = 0;
     uint32_t need = (size + v->bpc - 1) / v->bpc, written = 0;
     int r = 0;
+    uint8_t *buf = need ? kmalloc(v->bpc) : 0;
+    if (need && !buf) return FATV_IO;
+    v->defer = 1;
     if (!need) {
         if (first) free_chain(v, first);
         first = 0;
     } else {
-        uint8_t *buf = kmalloc(v->bpc);
-        if (!buf) return FATV_IO;
         uint32_t prev = 0, cur = first;
+        run_t run = { 0, 0, 0 };
         for (uint32_t k = 0; k < need; k++) {
             if (!valid_cluster(v, cur)) {                   /* the chain is too short: grow it */
                 cur = alloc_cluster(v);
@@ -618,9 +634,20 @@ int fatvol_write(fatvol_t *v, fatent_t *f, const uint8_t *data, uint32_t size) {
                 else first = cur;
             }
             uint32_t n = size - written < v->bpc ? size - written : v->bpc;
-            memcpy(buf, data + written, n);
-            if (n < v->bpc) memset(buf + n, 0, v->bpc - n);
-            if ((r = write_cluster(v, cur, buf)) != 0) break;
+            if (run.len && (cur != run.start + run.len || n < v->bpc || (run.len + 1) * v->spc > WRITE_RUN) &&
+                (r = run_flush(v, &run, data, &written)) != 0)
+                break;
+            if (n == v->bpc) {
+                if (!run.len) {
+                    run.start = cur;
+                    run.off = written;
+                }
+                run.len++;
+            } else {                                        /* the end, part of a cluster: zeros after it */
+                memcpy(buf, data + written, n);
+                memset(buf + n, 0, v->bpc - n);
+                if ((r = write_cluster(v, cur, buf)) != 0) break;
+            }
             written += n;
             uint32_t next = fat_get(v, cur);
             if (k == need - 1 && next < EOC) {              /* the chain is too long: cut it */
@@ -630,13 +657,17 @@ int fatvol_write(fatvol_t *v, fatent_t *f, const uint8_t *data, uint32_t size) {
             prev = cur;
             cur = next;
         }
-        kfree(buf);
+        int w = run_flush(v, &run, data, &written);
+        if (!r) r = w;
     }
+    if (buf) kfree(buf);
+    v->defer = 0;
+    int fr = fat_flush(v);
     set_cluster(f, first);
     f->e.file_size = written;
     stamp(&f->e, 0);
     int s = entry_store(v, f);
-    return r ? r : s ? s : (int)written;
+    return r ? r : fr ? fr : s ? s : (int)written;
 }
 
 int fatvol_delete(fatvol_t *v, fatent_t *f) {
@@ -648,7 +679,12 @@ int fatvol_delete(fatvol_t *v, fatent_t *f) {
         for (int i = 0; i < n; i++)
             if (strcmp(list[i].name, ".") && strcmp(list[i].name, "..")) return FATV_NOT_EMPTY;
     }
-    if (valid_cluster(v, c)) free_chain(v, c);
+    if (valid_cluster(v, c)) {                              /* (the FAT once per sector) */
+        v->defer = 1;
+        free_chain(v, c);
+        v->defer = 0;
+        if (fat_flush(v) != 0) return FATV_IO;
+    }
     uint32_t lc = f->lfn_cluster, li = f->lfn_index;      /* its long name goes too */
     for (uint32_t k = 0; k < f->lfn_count; k++) {
         uint8_t raw[32];

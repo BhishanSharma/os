@@ -19,8 +19,9 @@ typedef struct {
     uint32_t alloc_hint;
     uint8_t media;
     char label[12];
-    uint32_t cache_sector;                /* one FAT sector, cached (write-through) */
-    int cache_valid;
+    uint32_t cache_sector;                /* one FAT sector, cached (write-through, */
+    int cache_valid, cache_dirty;         /*   but while `defer`: written when another */
+    int defer;                            /*   sector is wanted, and at the call's end) */
     uint8_t cache[512];
     uint32_t map_first, map_n;            /* every 64th cluster of the file read last: seeks are short */
     uint32_t *map;
