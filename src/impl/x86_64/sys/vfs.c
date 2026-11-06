@@ -298,6 +298,28 @@ void vfs_print_mounts(void) {
     }
 }
 
+/* `df`: each volume's size, what is used and free, like df -h. */
+void vfs_print_df(void) {
+    kprintf("%-28s %9s %9s %9s %4s  %s\n", "Volume", "Size", "Used", "Free", "Use%", "Mounted on");
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+        mount_t *m = &mounts[i];
+        if (!m->used) continue;
+        uint64_t total, free_bytes;
+        char name[64];
+        if (m->ext) {
+            ext2_space(&m->ev, &total, &free_bytes);
+            k_snprintf(name, sizeof(name), "%s (%s)", m->ev.dev.name, m->ev.jlen ? "ext3" : "ext2");
+        } else {
+            total = (uint64_t)m->vol.clusters * m->vol.bpc;
+            free_bytes = fatvol_free_bytes(&m->vol);
+            k_snprintf(name, sizeof(name), "%s (FAT32)", m->vol.dev.name);
+        }
+        uint64_t used = total > free_bytes ? total - free_bytes : 0;
+        kprintf("%-28s %6u MiB %6u MiB %6u MiB %3u%%  %s\n", name, (uint32_t)(total >> 20), (uint32_t)(used >> 20),
+                (uint32_t)(free_bytes >> 20), total ? (uint32_t)(used * 100 / total) : 0, m->path);
+    }
+}
+
 const char *vfs_system_dir(void) {
     for (int i = 0; i < VFS_MAX_MOUNTS; i++)
         if (mounts[i].used && mdev(&mounts[i])->kind == DISK_RAM) return mounts[i].path;
@@ -624,6 +646,14 @@ static int vfs_chown_unlocked(const char *path, int64_t uid, int64_t gid) {
     return ext2_setattr(&t.m->ev, &f, -1, uid, gid);
 }
 
+/* Is path `in` inside folder `dir` (or it)? Without case (FAT32 names). */
+static int inside(const char *in, const char *dir) {
+    size_t n = strlen(dir);
+    for (size_t i = 0; i < n; i++)
+        if (up(in[i]) != up(dir[i])) return 0;
+    return in[n] == '/' || !in[n];
+}
+
 static int vfs_rename_unlocked(const char *from, const char *to) {
     target_t *a = kmalloc(2 * sizeof(target_t)), *b = a + 1;
     if (!a) return FATV_IO;
@@ -631,7 +661,22 @@ static int vfs_rename_unlocked(const char *from, const char *to) {
     if (!r) r = resolve(to, 1, b);
     if (!r && (!a->base[0] || !b->base[0] || mount_at(a->abs) || mount_at(b->abs))) r = FATV_BAD_NAME;
     if (!r && a->m != b->m) r = VFS_ERR_CROSS;
-    if (!r && !a->m->ext) r = VFS_ERR_NO_OWNERS;
+    if (!r && inside(b->abs, a->abs) && strlen(b->abs) != strlen(a->abs)) r = FATV_BAD_NAME;   /* a folder into itself */
+    if (!r && !a->m->ext) {                                 /* FAT32: the home-folder rule, as for deleting */
+        if (write_guard && (!write_guard(a->abs) || !write_guard(b->abs))) r = FAT32_ERR_PERMISSION;
+        fatent_t *fe = r ? 0 : kmalloc(sizeof(fatent_t));
+        if (!r && !fe) r = FATV_IO;
+        if (!r) r = fatvol_lookup(&a->m->vol, a->dir, a->base, fe);
+        fatent_t *dst = r ? 0 : kmalloc(sizeof(fatent_t));  /* a file already called <to> is replaced */
+        if (dst && fatvol_lookup(&a->m->vol, b->dir, b->base, dst) == 0 &&
+            (dst->slot_cluster != fe->slot_cluster || dst->slot_index != fe->slot_index))
+            r = (dst->e.attributes & FAT_ATTR_DIRECTORY) ? FATV_EXISTS : fatvol_delete(&a->m->vol, dst);
+        if (dst) kfree(dst);
+        if (!r) r = fatvol_rename(&a->m->vol, a->dir, fe, b->dir, b->base);
+        if (fe) kfree(fe);
+        kfree(a);
+        return r;
+    }
     ext2ent_t f, there;
     if (!r) r = ext2_lookup(&a->m->ev, a->dir, a->base, &f);
     if (!r && !may_remove(&a->folder, &f)) r = FAT32_ERR_PERMISSION;

@@ -747,7 +747,7 @@ def test_tablet():
         time.sleep(0.3)
         q.click(int(button.group(1)), int(button.group(2)), w, h)
         m.expect(r"about: OK clicked", 10)
-        m.keys("ctrl-q")
+        m.keys("meta_l-q")
         m.expect(PROMPT, 10)
     finally:
         m.stop()
@@ -905,7 +905,7 @@ def test_desktop():
             clicks = re.findall(r"click at (\d+),(\d+)", m.text())
             at = (int(clicks[-1][0]), int(clicks[-1][1]))
         m.expect(r"about: OK clicked", 10)
-        m.keys("ctrl-q")                             # Ctrl+Q leaves the desktop
+        m.keys("meta_l-q")                           # Windows+Q leaves the desktop
         m.expect(PROMPT, 10)
     finally:
         m.stop()
@@ -926,12 +926,12 @@ def test_polish():
         m.screenshot("polish")
         m.keys("print")                              # Print Screen: a PNG in ~/Pictures
         m.expect(r"notification from DOOR OS: Screenshot", 30)
-        m.keys("ctrl-l")                             # the Launcher (its glass once overflowed a GPU batch)
+        m.keys("meta_l")                             # the Launcher (its glass once overflowed a GPU batch)
         time.sleep(2)
         m.keys("print")                              # still drawing, still answering
         m.expect(r"notification from DOOR OS: Screenshot", 30)
         check("Segmentation fault" not in m.text(), "the Launcher crashed the window server", m.text()[-600:])
-        m.keys("ctrl-q")
+        m.keys("meta_l-q")
         m.expect(PROMPT, 10)
     finally:
         m.stop()
@@ -957,7 +957,7 @@ def test_gui():
         time.sleep(2)
         m.screenshot("gui")
         start = len(m.text())
-        m.keys("ctrl-q")                             # Log Out: the profiles
+        m.keys("meta_l-q")                           # Log Out: the profiles
         m.expect(r"loginwindow: ready", 30, since=start)
         time.sleep(1)
         m.screenshot("profiles")
@@ -968,7 +968,7 @@ def test_gui():
         time.sleep(2)
         m.screenshot("gui2")
         start = len(m.text())                        # root has no password yet: no way in as root
-        m.keys("ctrl-q")
+        m.keys("meta_l-q")
         m.expect(r"loginwindow: ready", 30, since=start)
         time.sleep(1)
         m.type(">console")
@@ -1003,7 +1003,7 @@ def test_apps():
         m.screenshot("terminal")
         out = m.text()[start:]
         check("[ERROR]" not in out and "KERNEL PANIC" not in out, "an app crashed", out)
-        m.keys("ctrl-q")
+        m.keys("meta_l-q")
         m.expect(PROMPT, 20)
         out = m.run("ps")
         for name in apps:
@@ -1070,7 +1070,7 @@ def test_logs():
         m.expect(r"crashrep: .* quit unexpectedly", 30, since=start)
         time.sleep(2)
         m.screenshot("crash")
-        m.keys("ctrl-q")
+        m.keys("meta_l-q")
         m.expect(PROMPT, 20)
     finally:
         m.stop()

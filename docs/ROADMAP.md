@@ -15,7 +15,7 @@ and the big kernel lock still covers most of the kernel.
 Stage 7 is done, lean: `windowserver` (or `desktop`) composites shared-memory
 windows, redrawing only damaged rectangles, with a menu bar (the Terminal OS
 menu, the app's name, a clock), a Dock (Terminal, Files, About), and windows
-that can be dragged, closed and minimised; Ctrl+Q leaves. `user/lib/ui.c` has
+that can be dragged, closed and minimised; Windows+Q leaves. `user/lib/ui.c` has
 the drawing and widgets (button, text field, list). Terminal runs `shell -t`
 over pipes (Ctrl+C interrupts its programs); Files browses folders and opens
 pictures in `view`, videos in `video` (both draw in a window on the desktop)

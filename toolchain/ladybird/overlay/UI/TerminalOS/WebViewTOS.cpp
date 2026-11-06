@@ -18,6 +18,7 @@
 #include <LibURL/URL.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/HeadlessWebView.h>
+#include <LibWebView/Menu.h>
 #include <LibWebView/URL.h>
 #include <LibWebView/Utilities.h>
 #include <UI/TerminalOS/Browser.h>
@@ -37,7 +38,9 @@
 namespace Ladybird {
 
 static constexpr int TOOLBAR_HEIGHT = 40;
-static constexpr u32 KEY_UP = 0x101, KEY_DOWN = 0x102, KEY_LEFT = 0x103, KEY_RIGHT = 0x104;
+static constexpr u32 KEY_UP = 0x101, KEY_DOWN = 0x102, KEY_LEFT = 0x103, KEY_RIGHT = 0x104, KEY_HOME = 0x105,
+                     KEY_END = 0x106, KEY_PGUP = 0x107, KEY_PGDN = 0x108, KEY_DELETE = 0x109, KEY_INSERT = 0x10A;
+static constexpr int KEYMOD_SHIFT = 0x1000, KEYMOD_CTRL = 0x2000;
 
 // The page: a web view whose frames go into the window.
 class TOSWebView final : public WebView::HeadlessWebView {
@@ -229,6 +232,12 @@ private:
         canvas->save();
         canvas->clipRect(SkRect::MakeXYWH(fx + 10, 5, fw - 20, 30));
         bool empty = m_address.is_empty();
+        if (m_editing && m_all_selected && !empty) {      // the selection behind the address
+            float tw = font.measureText(m_address.characters(), m_address.length(), SkTextEncoding::kUTF8);
+            auto sel = c.accent;
+            paint.setColor((sel & 0x00FFFFFF) | 0x50000000);
+            canvas->drawRect(SkRect::MakeXYWH(fx + 11, 10, tw + 2, 21), paint);
+        }
         auto text = empty && m_editing ? ByteString("Search or enter an address") : m_address;
         paint.setColor(empty ? c.faint : c.text);
         canvas->drawSimpleText(text.characters(), text.length(), SkTextEncoding::kUTF8, fx + 12, 25, font, paint);
@@ -393,6 +402,7 @@ private:
             }
             if (event.x >= FIELD_X) {
                 m_editing = true;
+                m_all_selected = !m_address.is_empty();     // as in any browser: typing replaces the address
                 return true;
             }
             return false;
@@ -413,6 +423,14 @@ private:
 
     bool handle_key(int key)
     {
+        if (m_editing && m_all_selected) {               // the address is selected: a key decides what happens to it
+            m_all_selected = false;
+            int base = key & ~(KEYMOD_SHIFT | KEYMOD_CTRL);
+            if ((key >= 32 && key < 0x100 && key != 127) || key == 8 || key == 127 || base == KEY_DELETE || key == 22)
+                m_address = {};
+            else if (key == 3 || base == KEY_LEFT || base == KEY_RIGHT || base == KEY_HOME || base == KEY_END)
+                return key == 3 ? (clipboard_set(m_address), true) : true;
+        }
         if (m_editing) {
             if (key == '\n' || key == '\r') {
                 if (auto url = WebView::sanitize_url(m_address, WebView::Application::settings().search_engine_settings().engine); url.has_value()) {
@@ -428,6 +446,17 @@ private:
                 m_address = m_view->url().serialize().to_byte_string();
             } else if (key == 21) {                     // Ctrl+U: clear
                 m_address = {};
+            } else if (key == 3) {                      // Ctrl+C: the address
+                clipboard_set(m_address);
+            } else if (key == 22) {                     // Ctrl+V: the clipboard's first line
+                auto text = clipboard_get();
+                size_t end = 0;
+                while (end < text.length() && text[end] != '\n' && text[end] != '\r')
+                    end++;
+                StringBuilder builder;
+                builder.append(m_address);
+                builder.append(text.substring_view(0, end).trim_whitespace());
+                m_address = builder.to_byte_string();
             } else if (key >= 32 && key < 0x100 && key != 127) {
                 StringBuilder builder;
                 builder.append(m_address);
@@ -436,11 +465,16 @@ private:
             }
             return true;
         }
-        if (key == 12) {                                // Ctrl+L: the address
+        if (key == 12) {                                // Ctrl+L: the address, selected
             m_editing = true;
-            m_address = {};
+            m_all_selected = !m_address.is_empty();
             return true;
         }
+        auto& app = WebView::Application::the();           // the editing keys: the browser's own actions
+        if (key == 3) { app.copy_selection_action().activate(); return false; }
+        if (key == 24) { app.cut_selection_action().activate(); return false; }
+        if (key == 22) { app.paste_action().activate(); return false; }
+        if (key == 1) { app.select_all_action().activate(); return false; }
         send_key(key);
         return false;
     }
@@ -459,11 +493,23 @@ private:
         KeyCode code = KeyCode::Key_Invalid;
         u32 code_point = 0;
         auto modifiers = KeyModifier::Mod_None;
+        if (key & (KEYMOD_SHIFT | KEYMOD_CTRL)) {
+            unsigned m = (key & KEYMOD_SHIFT ? (unsigned)KeyModifier::Mod_Shift : 0) |
+                         (key & KEYMOD_CTRL ? (unsigned)KeyModifier::Mod_Ctrl : 0);
+            modifiers = static_cast<KeyModifier>(m);
+            key &= ~(KEYMOD_SHIFT | KEYMOD_CTRL);
+        }
         switch (key) {
         case KEY_UP: code = KeyCode::Key_Up; break;
         case KEY_DOWN: code = KeyCode::Key_Down; break;
         case KEY_LEFT: code = KeyCode::Key_Left; break;
         case KEY_RIGHT: code = KeyCode::Key_Right; break;
+        case KEY_HOME: code = KeyCode::Key_Home; break;
+        case KEY_END: code = KeyCode::Key_End; break;
+        case KEY_PGUP: code = KeyCode::Key_PageUp; break;
+        case KEY_PGDN: code = KeyCode::Key_PageDown; break;
+        case KEY_DELETE: code = KeyCode::Key_Delete; break;
+        case KEY_INSERT: code = KeyCode::Key_Insert; break;
         case '\n':
         case '\r': code = KeyCode::Key_Return; code_point = '\r'; break;
         case 8: code = KeyCode::Key_Backspace; break;
@@ -507,6 +553,7 @@ private:
     RefPtr<Core::Timer> m_event_timer;
     ByteString m_address;
     bool m_editing { false };
+    bool m_all_selected { false };
     bool m_loading { false };
     bool m_dragging_page { false };
     Web::UIEvents::MouseButton m_buttons { Web::UIEvents::MouseButton::None };
@@ -515,6 +562,33 @@ private:
 
 Application::Application() = default;
 Application::~Application() = default;
+
+Web::Clipboard::SystemClipboardItem Application::clipboard_item() const
+{
+    return Web::Clipboard::SystemClipboardItem {
+        .system_clipboard_representations = { { .name = "text/plain"_string, .data = clipboard_get() } },
+    };
+}
+
+void Application::insert_clipboard_item(Web::Clipboard::SystemClipboardItem item)
+{
+    for (auto const& representation : item.system_clipboard_representations) {
+        if (representation.name == "text/plain"sv) {
+            if (auto const* data = representation.data.get_pointer<ByteString>())
+                clipboard_set(*data);
+        }
+    }
+}
+
+Utf16String Application::clipboard_text(ClipboardType) const
+{
+    return Utf16String::from_utf8(clipboard_get());
+}
+
+void Application::set_clipboard_text(String text, ClipboardType)
+{
+    clipboard_set(text.bytes_as_string_view());
+}
 
 ErrorOr<void> Application::open_window()
 {

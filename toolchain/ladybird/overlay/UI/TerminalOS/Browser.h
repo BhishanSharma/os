@@ -31,6 +31,12 @@ private:
     virtual bool should_coordinate_browser_process() const override { return false; }
     virtual Optional<ByteString> ask_user_for_download_path(ByteString const& file) const override;
 
+    // The OS's clipboard (shared with every program), not one of the browser's own.
+    virtual Web::Clipboard::SystemClipboardItem clipboard_item() const override;
+    virtual void insert_clipboard_item(Web::Clipboard::SystemClipboardItem) override;
+    virtual Utf16String clipboard_text(ClipboardType) const override;
+    virtual void set_clipboard_text(String, ClipboardType) override;
+
     OwnPtr<BrowserWindow> m_window;
 };
 

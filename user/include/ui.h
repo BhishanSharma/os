@@ -156,6 +156,8 @@ void ui_focus_ring(ui_canvas *c, int x, int y, int w, int h, int r, int scale);
 void ui_button_ex(ui_canvas *c, int x, int y, int w, int h, const char *label, int scale, int flags);
 void ui_button(ui_canvas *c, int x, int y, int w, int h, const char *label, int scale, int pressed);
 void ui_textfield(ui_canvas *c, int x, int y, int w, int h, const char *text, int scale, int focused);
+/* The same with the caret before byte `caret` of text (the text scrolls to keep it in view). */
+void ui_textfield_at(ui_canvas *c, int x, int y, int w, int h, const char *text, int scale, int focused, int caret);
 void ui_list(ui_canvas *c, int x, int y, int w, int h, const char *const *items, int count,
              int selected, int first, int scale);
 void ui_list_icons(ui_canvas *c, int x, int y, int w, int h, const char *const *items,

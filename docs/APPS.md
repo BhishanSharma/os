@@ -147,7 +147,7 @@ int main(void) {
 | `WS_EV_WHEEL`  | scrolled                                  | `key`: steps, + down / - up    |
 | `WS_EV_KEY`    | a key                                     | `key`: `'a'`, `'\n'`, `'\b'`, `27` (Esc), `KEYCODE_UP`/`DOWN`/`LEFT`/`RIGHT`, Ctrl+letter = 1-26 |
 | `WS_EV_RESIZE` | the window has a new size                 | `x`, `y` = width, height (already in `win.c`) |
-| `WS_EV_CLOSE`  | the red button or Ctrl+W                  | -                              |
+| `WS_EV_CLOSE`  | the red button or Windows+W                  | -                              |
 | `WS_EV_PREFS`  | Dark / Increase Contrast changed          | - (redraw: `ui_color` is already current) |
 
 `ui_wait(&win, &e, ms)` waits up to `ms` (0: no limit) and returns 0 on a

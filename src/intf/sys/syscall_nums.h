@@ -246,11 +246,24 @@ struct os_wifi {
 #define THEME_BAD      3
 #define THEME_WARN     4
 
-/* Key codes from getkey()/read() beyond plain ASCII */
+/* Key codes from getkey()/read() beyond plain ASCII. The navigation keys
+ * come with KEYMOD_SHIFT and KEYMOD_CTRL or-ed on when those are held
+ * (Shift+Up/Down stay the console's scrolling); KEYCODE_BASE() strips them. */
 #define KEYCODE_UP     0x101
 #define KEYCODE_DOWN   0x102
 #define KEYCODE_LEFT   0x103
 #define KEYCODE_RIGHT  0x104
+#define KEYCODE_HOME   0x105
+#define KEYCODE_END    0x106
+#define KEYCODE_PGUP   0x107
+#define KEYCODE_PGDN   0x108
+#define KEYCODE_DELETE 0x109
+#define KEYCODE_INSERT 0x10A
+#define KEYCODE_SUPER  0x10B   /* the Windows key alone (the desktop: the Launcher) */
+#define KEYMOD_SHIFT   0x1000
+#define KEYMOD_CTRL    0x2000
+#define KEYMOD_SUPER   0x4000  /* + a letter: the Windows key held with it (the desktop's shortcuts) */
+#define KEYCODE_BASE(k) ((k) & ~(KEYMOD_SHIFT | KEYMOD_CTRL))
 
 /* Errors */
 #define SYSERR_BADCALL  -1   /* unknown system call */

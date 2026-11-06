@@ -28,6 +28,7 @@ static view_t *make(view_t *parent, int kind) {
     v->bg = -1;
     v->color = UI_C_LABEL;
     v->scale = 1;
+    v->caret = -1;                                     /* (a field's cursor: at the end) */
     v->selected = -1;
     v->dirty = 1;
     if (parent) {
@@ -154,6 +155,7 @@ void v_dirty(view_t *v) {
 void v_set_text(view_t *v, const char *text) {
     if (!v || !text || !strcmp(v->text, text)) return;   /* the same: nothing to draw */
     snprintf(v->text, sizeof(v->text), "%s", text);
+    v->caret = -1;                                     /* (the cursor to the end) */
     v->dirty = 1;
     if (v->kind == V_LABEL || v->kind == V_TEXT || v->kind == V_BUTTON) relayout = 1;   /* (its size) */
 }
@@ -444,7 +446,8 @@ static void draw_view(view_t *v) {
         } else {
             snprintf(shown, sizeof(shown), "%s", v->text);
         }
-        ui_textfield(c, v->x, v->y, v->w, v->h, shown, S, v == focus);
+        int at = v->caret < 0 || v->caret > n ? n : v->caret;
+        ui_textfield_at(c, v->x, v->y, v->w, v->h, shown, S, v == focus, at);
         if (!n && v->hint[0] && v != focus)
             ui_text(c, v->x + 8 * S, v->y + (v->h - 16 * S) / 2, v->hint, ui_color(UI_C_TERTIARY), S);
         break;
@@ -569,8 +572,44 @@ static void whole_chars(char *s, int n) {
     s[n] = 0;
 }
 
+static int prev_at(const char *s, int i) {
+    if (i > 0) i--;
+    while (i > 0 && ((unsigned char)s[i] & 0xC0) == 0x80) i--;
+    return i;
+}
+static int next_at(const char *s, int n, int i) {
+    if (i < n) i++;
+    while (i < n && ((unsigned char)s[i] & 0xC0) == 0x80) i++;
+    return i;
+}
+
 static int field_key(view_t *f, int key) {
     int n = (int)strlen(f->text);
+    int at = f->caret < 0 || f->caret > n ? n : f->caret;
+    int base = KEYCODE_BASE(key), ctrl = key & KEYMOD_CTRL;
+    if (base == KEYCODE_LEFT || base == KEYCODE_RIGHT || base == KEYCODE_HOME || base == KEYCODE_END) {
+        if (base == KEYCODE_HOME) at = 0;
+        else if (base == KEYCODE_END) at = n;
+        else if (base == KEYCODE_LEFT) {
+            at = prev_at(f->text, at);
+            while (ctrl && at > 0 && f->text[at - 1] != ' ') at = prev_at(f->text, at);
+        } else {
+            at = next_at(f->text, n, at);
+            while (ctrl && at < n && f->text[at] != ' ') at = next_at(f->text, n, at);
+        }
+        f->caret = at;
+        f->dirty = 1;
+        return 1;
+    }
+    if (base == KEYCODE_DELETE) {                      /* forward */
+        if (at >= n) return 1;
+        int to = next_at(f->text, n, at);
+        memmove(f->text + at, f->text + to, (size_t)(n - to + 1));
+        f->caret = at;
+        f->dirty = 1;
+        if (f->on_change) f->on_change(f);
+        return 1;
+    }
     if (key == '\n' || key == '\r') {
         if (!f->on_enter) return 0;
         f->on_enter(f);
@@ -581,29 +620,38 @@ static int field_key(view_t *f, int key) {
         ui_clip_set(f->text, n);
         if (key == 3) return 1;
         f->text[0] = 0;
-    } else if (key == 22) {                            /* Ctrl+V: the clipboard's first line */
-        char clip[sizeof(f->text)];
-        int m = ui_clip_get(clip, sizeof(clip));
-        for (int i = 0; i < m && n < (int)sizeof(f->text) - 1; i++) {
+        at = 0;
+    } else if (key == 22) {                            /* Ctrl+V: the clipboard's first line, at the cursor */
+        char clip[sizeof(f->text)], ins[sizeof(f->text)];
+        int m = ui_clip_get(clip, sizeof(clip)), k = 0;
+        for (int i = 0; i < m && n + k < (int)sizeof(f->text) - 1; i++) {
             unsigned char ch = (unsigned char)clip[i];
             if (ch == '\n' || ch == '\r') break;
             if (ch < ' ' && ch != '\t') continue;
-            f->text[n++] = ch == '\t' ? ' ' : (char)ch;
+            ins[k++] = ch == '\t' ? ' ' : (char)ch;
         }
-        whole_chars(f->text, n);
+        while (k > 0 && ((unsigned char)ins[k - 1] & 0xC0) == 0x80) k--;   /* (no half character) */
+        if (k > 0 && ((unsigned char)ins[k - 1] & 0xC0) == 0xC0) k--;
+        memmove(f->text + at + k, f->text + at, (size_t)(n - at + 1));
+        memcpy(f->text + at, ins, (size_t)k);
+        at += k;
+        whole_chars(f->text, (int)strlen(f->text));
     } else if (key == 21) {                            /* Ctrl+U: empty it */
         f->text[0] = 0;
+        at = 0;
     } else if (key == '\b') {
-        if (!n) return 1;
-        do n--; while (n > 0 && ((unsigned char)f->text[n] & 0xC0) == 0x80);   /* a whole character */
-        f->text[n] = 0;
+        if (!at) return 1;
+        int from = prev_at(f->text, at);               /* a whole character */
+        memmove(f->text + from, f->text + at, (size_t)(n - at + 1));
+        at = from;
     } else if (key >= ' ' && key < 127) {
         if (n >= (int)sizeof(f->text) - 1) return 1;
-        f->text[n] = (char)key;
-        f->text[n + 1] = 0;
+        memmove(f->text + at + 1, f->text + at, (size_t)(n - at + 1));
+        f->text[at++] = (char)key;
     } else {
         return 0;                                      /* not for a field: let others have it */
     }
+    f->caret = at >= (int)strlen(f->text) ? -1 : at;
     f->dirty = 1;
     if (f->on_change) f->on_change(f);
     return 1;

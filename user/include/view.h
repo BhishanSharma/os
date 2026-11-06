@@ -78,6 +78,7 @@ struct view {
     int recheck;                               /* compare the rows on the next pass */
     /* the toolkit's */
     int dirty, hot, pressed;
+    int caret;                                 /* fields: the cursor, a byte offset into text (-1: at the end) */
 };
 
 /* Building the tree (parent 0: a root). Each returns the new view. */

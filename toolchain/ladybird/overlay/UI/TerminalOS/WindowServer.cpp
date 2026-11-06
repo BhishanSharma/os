@@ -6,6 +6,7 @@
 
 #include <AK/StringView.h>
 #include <UI/TerminalOS/WindowServer.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -52,6 +53,61 @@ static unsigned long surface_size(int w, int h) { return HEADER + (unsigned long
 // Terminal OS system calls (the kernel's sys/syscall_nums.h).
 static constexpr long SYS_SHMMAP = 42, SYS_PORT_CREATE = 48, SYS_PORT_SEND = 49, SYS_PORT_RECEIVE = 50,
                       SYS_PORT_LOOKUP = 52, SYS_PORT_CLOSE = 53;
+
+static long syscall5(long n, long a, long b, long c, long d, long e);
+
+// The clipboard: "ws.clip.<uid>" (user/include/ws.h: struct ws_clipboard).
+struct Clipboard {
+    unsigned volatile seq, len;
+    int volatile lock;
+    char text[64 * 1024];
+};
+
+static Clipboard* clipboard()
+{
+    static Clipboard* clip;
+    if (!clip) {
+        char name[32];
+        snprintf(name, sizeof(name), "ws.clip.%u", (unsigned)getuid());
+        long r = syscall5(SYS_SHMMAP, (long)name, (long)sizeof(Clipboard), 0, 0, 0);
+        if (r > 0 || r < -4096)
+            clip = reinterpret_cast<Clipboard*>(r);
+    }
+    return clip;
+}
+
+static void clip_lock(Clipboard* c)
+{
+    for (int i = 0; __atomic_exchange_n(&c->lock, 1, __ATOMIC_ACQUIRE); i++) {
+        if (i > 2000000)                                // held by a program that ended: take it
+            break;
+    }
+}
+
+ByteString clipboard_get()
+{
+    auto* c = clipboard();
+    if (!c)
+        return {};
+    clip_lock(c);
+    size_t n = c->len < sizeof(c->text) ? c->len : sizeof(c->text);
+    ByteString text(c->text, n);
+    __atomic_store_n(&c->lock, 0, __ATOMIC_RELEASE);
+    return text;
+}
+
+void clipboard_set(StringView text)
+{
+    auto* c = clipboard();
+    if (!c)
+        return;
+    size_t n = text.length() < sizeof(c->text) ? text.length() : sizeof(c->text);
+    clip_lock(c);
+    memcpy(c->text, text.characters_without_null_termination(), n);
+    c->len = (unsigned)n;
+    c->seq = c->seq + 1;
+    __atomic_store_n(&c->lock, 0, __ATOMIC_RELEASE);
+}
 
 static long syscall5(long n, long a, long b, long c, long d, long e)
 {

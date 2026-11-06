@@ -41,6 +41,7 @@ void print_clear(void);
 void print_char(char character);
 /* tap(c) -> 1: it took the character (a kernel command in a Terminal window). */
 void print_set_tap(int (*tap)(char));
+int print_tapped(void);              /* is the output going to a program's pipe or terminal? */
 /* The system log from byte *from on (counted since power-on): up to max
  * bytes; *from moves past them (and forward, if they were overwritten). */
 uint32_t print_log_read(uint64_t *from, char *buf, uint32_t max);

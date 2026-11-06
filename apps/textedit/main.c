@@ -1,6 +1,8 @@
 // textedit [file] - TextEdit: write and edit text files (UTF-8).
 //
-// Arrows move, clicking places the cursor and dragging selects. Ctrl+A
+// Arrows, Home, End, Page Up and Page Down move (with Shift they select;
+// Ctrl+Left/Right go a word, Ctrl+Home/End to the start or the end), Delete
+// deletes forward; clicking places the cursor and dragging selects. Ctrl+A
 // selects everything; Ctrl+C, Ctrl+X and Ctrl+V copy, cut and paste (the
 // clipboard every program shares); Ctrl+Z undoes and Ctrl+Y redoes; Ctrl+F
 // goes to the Find field and Ctrl+G finds the next match; Ctrl+S saves. The
@@ -176,6 +178,22 @@ static int offset_of(int line, int col) {
     return i;
 }
 
+static int is_word(int i) {
+    unsigned char c = (unsigned char)text[i];
+    return c >= 0x80 || c == '_' || (c >= '0' && c <= '9') || ((c | 0x20) >= 'a' && (c | 0x20) <= 'z');
+}
+static int word_left(int i) {
+    while (i > 0 && !is_word(prev_char(i))) i = prev_char(i);
+    while (i > 0 && is_word(prev_char(i))) i = prev_char(i);
+    return i;
+}
+static int word_right(int i) {
+    while (i < len && !is_word(i)) i = next_char(i);
+    while (i < len && is_word(i)) i = next_char(i);
+    return i;
+}
+static int editor_rows(void);
+
 static void delete_range(int lo, int hi) {
     memmove(text + lo, text + hi, (size_t)(len - hi));
     len -= hi - lo;
@@ -256,6 +274,11 @@ static void find_next(void) {
     show_status();
 }
 
+static int editor_rows(void) {
+    int rows = editor && CH ? (editor->h - 8 * S) / CH : 10;
+    return rows > 1 ? rows - 1 : 1;
+}
+
 static void draw_text(view_t *v, ui_canvas *c) {
     ui_fill(c, v->x, v->y, v->w, v->h, ui_color(UI_C_CONTENT));
     int rows = (v->h - 8 * S) / CH, line, col;
@@ -307,15 +330,27 @@ static int text_event(view_t *v, const struct ws_event *e) {
         int k = e->key;
         status[0] = 0;
         where(cur, &line, &col);
-        int moves = k == KEYCODE_LEFT || k == KEYCODE_RIGHT || k == KEYCODE_UP || k == KEYCODE_DOWN;
-        if (moves) {
-            int had = has_sel(), lo = sel_lo(), hi = sel_hi();
-            anchor = -1;
+        int base = KEYCODE_BASE(k), shift = k & KEYMOD_SHIFT, ctrl = k & KEYMOD_CTRL;
+        if (base >= KEYCODE_UP && base <= KEYCODE_PGDN) {
+            int had = has_sel(), lo = sel_lo(), hi = sel_hi(), rows = editor_rows();
+            if (shift && anchor < 0) anchor = cur;              /* Shift: the selection grows */
             last_kind = 0;
-            if (k == KEYCODE_LEFT) cur = had ? lo : prev_char(cur);
-            else if (k == KEYCODE_RIGHT) cur = had ? hi : next_char(cur);
-            else if (k == KEYCODE_UP) { if (line) cur = offset_of(line - 1, col); }
-            else cur = offset_of(line + 1, col);
+            if (base == KEYCODE_LEFT) cur = had && !shift ? lo : ctrl ? word_left(cur) : prev_char(cur);
+            else if (base == KEYCODE_RIGHT) cur = had && !shift ? hi : ctrl ? word_right(cur) : next_char(cur);
+            else if (base == KEYCODE_UP) cur = line ? offset_of(line - 1, col) : 0;
+            else if (base == KEYCODE_DOWN) cur = offset_of(line + 1, col);
+            else if (base == KEYCODE_HOME) cur = ctrl ? 0 : offset_of(line, 0);
+            else if (base == KEYCODE_END) cur = ctrl ? len : offset_of(line, MAX_TEXT);
+            else if (base == KEYCODE_PGUP) cur = offset_of(line > rows ? line - rows : 0, col);
+            else cur = offset_of(line + rows, col);
+            if (!shift) anchor = -1;
+        }
+        else if (base == KEYCODE_DELETE) {                       /* forward: the selection, or the next character */
+            if (has_sel()) erase();
+            else if (cur < len) {
+                cur = next_char(cur);
+                erase();
+            }
         }
         else if (k == KEY_SAVE) save();
         else if (k == KEY_SELECT_ALL) { anchor = 0; cur = len; }

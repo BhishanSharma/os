@@ -24,8 +24,10 @@
 //   * motion (tokens: micro 120 ms, standard 200 ms, major 260 ms; ease-out
 //     in, faster out, no bounce); Reduce Motion keeps only fades.
 //
-// Clicking an app starts it (or brings its window back). Ctrl+L opens the
-// Launcher, Ctrl+W closes the front window, Ctrl+Q leaves.
+// Clicking an app starts it (or brings its window back). The Windows key
+// opens the Launcher; Windows+W closes the front window, Windows+L locks the
+// screen, Windows+Q logs out. (Ctrl+ letters are the apps': Ctrl+W deletes a
+// word in bash and searches in nano.)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,10 +38,11 @@
 
 #define MAX_WINDOWS 16
 #define MAX_DAMAGE 32
-#define KEY_QUIT 17                    /* Ctrl+Q */
+#define KEY_QUIT (KEYMOD_SUPER | 'q')   /* Windows+Q */
+#define KEY_LOCK (KEYMOD_SUPER | 'l')   /* Windows+L */
 #define KEY_SCREENSHOT 1003            /* Print Screen (the keyboard driver) */
-#define KEY_CLOSE 23                   /* Ctrl+W */
-#define KEY_LAUNCH 12                  /* Ctrl+L */
+#define KEY_CLOSE (KEYMOD_SUPER | 'w')  /* Windows+W */
+#define KEY_LAUNCH KEYCODE_SUPER        /* the Windows key alone */
 
 /* ---- Design tokens ---------------------------------------------------------
  * Sizes are in points; multiply by S (1, or 2 on a large screen) to draw.
@@ -1224,15 +1227,15 @@ static void build_menu(int kind) {
         add_item("Restart...", 0, M_RESTART, 0);
         add_item("Shut Down...", 0, M_SHUTDOWN, 0);
         add_sep();
-        add_item("Lock Screen", 0, M_LOCK, 0);
-        add_item("Log Out", "Ctrl+Q", M_LOGOUT, 0);
+        add_item("Lock Screen", "Win+L", M_LOCK, 0);
+        add_item("Log Out", "Win+Q", M_LOGOUT, 0);
     } else if (kind == 2) {
-        add_item("Lock Screen", 0, M_LOCK, 0);
+        add_item("Lock Screen", "Win+L", M_LOCK, 0);
         add_item("Sleep", 0, M_SLEEP, 0);
         add_item("Restart...", 0, M_RESTART, 0);
         add_item("Shut Down...", 0, M_SHUTDOWN, 0);
         add_sep();
-        add_item("Log Out", "Ctrl+Q", M_LOGOUT, 0);
+        add_item("Log Out", "Win+Q", M_LOGOUT, 0);
     } else {
         add_item("Notifications", 0, 0, MI_OFF);
         add_sep();
@@ -2801,7 +2804,7 @@ static void draw_lock(painter_t *p) {
         int mw = ui_text_width(lock_msg, S);
         ui_text(c, (W - mw) / 2, cy + 16 * S + fh + 14 * S, lock_msg, 0xFFD0D0, S);
     }
-    const char *out = "Ctrl+Q logs out (what is not saved is lost)";
+    const char *out = "Windows+Q logs out (what is not saved is lost)";
     int ow = ui_text_width(out, S);
     ui_text(c, (W - ow) / 2, H - 48 * S, out, 0xC8C8D0, S);
 }
@@ -3772,7 +3775,7 @@ int main(int argc, char **argv) {
         int key;
         while ((key = getkey()) != 0) {
             if (locked) {                              /* every key is the password's, */
-                if (key == KEY_QUIT) quit();           /* but Ctrl+Q: log out (no way in without it) */
+                if (key == KEY_QUIT) quit();           /* but Windows+Q: log out (no way in without it) */
                 lock_key(key);
                 continue;
             }
@@ -3786,6 +3789,11 @@ int main(int argc, char **argv) {
                 panel_toggle(PM_APPS);
                 continue;
             }
+            if (key == KEY_LOCK) {
+                lock_screen();
+                continue;
+            }
+            if (key & KEYMOD_SUPER && key != KEY_CLOSE) continue;   /* (other Windows+ keys: nobody's) */
             if (menu_open) {
                 menu_key(key);
                 continue;

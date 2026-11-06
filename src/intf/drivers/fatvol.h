@@ -76,5 +76,8 @@ int fatvol_create(fatvol_t *v, uint32_t dir, const char *name, int is_dir, faten
 int fatvol_write(fatvol_t *v, fatent_t *f, const uint8_t *data, uint32_t size);
 /* Remove a file, or an empty folder. */
 int fatvol_delete(fatvol_t *v, fatent_t *f);
+/* `f` (in folder `from`) gets `name` in folder `to` (the same volume). */
+int fatvol_rename(fatvol_t *v, uint32_t from, fatent_t *f, uint32_t to, const char *name);
+uint64_t fatvol_free_bytes(fatvol_t *v);
 
 #endif

@@ -11,6 +11,16 @@
 #define KEY_DOWN_ARROW  0x102
 #define KEY_LEFT_ARROW  0x103
 #define KEY_RIGHT_ARROW 0x104
+#define KEY_HOME        0x105
+#define KEY_END         0x106
+#define KEY_PAGE_UP     0x107
+#define KEY_PAGE_DOWN   0x108
+#define KEY_DELETE      0x109
+#define KEY_INSERT      0x10A
+#define KEY_SUPER       0x10B    /* the Windows key, pressed and let go alone */
+#define KEYMOD_SHIFT    0x1000   /* or-ed onto the navigation keys above */
+#define KEYMOD_CTRL     0x2000
+#define KEYMOD_SUPER    0x4000   /* or-ed onto a letter: the Windows key held with it */
 #define KEY_CTRL_Q  17
 #define KEY_CTRL_S  19
 #define KEY_CTRL_N  14

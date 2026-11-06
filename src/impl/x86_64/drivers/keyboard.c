@@ -20,6 +20,7 @@ static int caps_lock = 0;
 static int key_buffer[256];
 static int buffer_index = 0;
 static int extended_scancode = 0;
+static int super_pressed, super_used;   /* the Windows key: alone, the launcher; with a letter, a desktop shortcut */
 volatile int keyboard_ctrl_c = 0;   // set on every Ctrl+C; whoever cares clears it
 
 // Command history
@@ -67,8 +68,17 @@ void keyboard_scancode(uint8_t scancode) {
 
     // Handle key releases
     if (scancode & 0x80) {
+        int was_extended = extended_scancode;
         scancode &= 0x7F;  // Remove release bit
         extended_scancode = 0;  // E0-prefixed releases (arrows) end here too
+        if (was_extended && (scancode == 0x5B || scancode == 0x5C)) {   /* the Windows key comes up */
+            if (super_pressed && !super_used && buffer_index < (int)(sizeof(key_buffer) / sizeof(key_buffer[0])) - 2) {
+                key_buffer[buffer_index++] = KEY_SUPER;
+                key_buffer[buffer_index] = 0;
+            }
+            super_pressed = 0;
+            return;
+        }
 
         // Track modifier key releases
         if (scancode == 0x1D) ctrl_pressed = 0;   // Left or right Ctrl
@@ -84,6 +94,13 @@ void keyboard_scancode(uint8_t scancode) {
 
     // Handle key presses
     if (extended_scancode) {
+        if (scancode == 0x5B || scancode == 0x5C) {         /* the Windows key goes down */
+            if (!super_pressed) super_used = 0;
+            super_pressed = 1;
+            extended_scancode = 0;
+            return;
+        }
+        if (super_pressed) super_used = 1;
         // Arrow keys
         switch (scancode) {
             case 0x1D: ctrl_pressed = 1; break;   // Right Ctrl (E0 1D)
@@ -91,17 +108,26 @@ void keyboard_scancode(uint8_t scancode) {
                 if (shift_pressed)
                     key_buffer[buffer_index++] = SHIFT_UP_COMBO;
                 else
-                    key_buffer[buffer_index++] = KEY_UP_ARROW;
+                    key_buffer[buffer_index++] = KEY_UP_ARROW | (ctrl_pressed ? KEYMOD_CTRL : 0);
                 break;
             case 0x50:
                 if (shift_pressed)
                     key_buffer[buffer_index++] = SHIFT_DOWN_COMBO;
                 else
-                    key_buffer[buffer_index++] = KEY_DOWN_ARROW;
+                    key_buffer[buffer_index++] = KEY_DOWN_ARROW | (ctrl_pressed ? KEYMOD_CTRL : 0);
                 break;
-            case 0x4B: key_buffer[buffer_index++] = KEY_LEFT_ARROW; break;
-            case 0x4D: key_buffer[buffer_index++] = KEY_RIGHT_ARROW; break;
             case 0x37: key_buffer[buffer_index++] = KEY_SCREENSHOT; break;   // Print Screen (E0 2A E0 37)
+            default: {
+                /* The other navigation keys, with Shift and Ctrl as flags
+                 * (Shift+Left selects, Ctrl+Right jumps a word, ...). */
+                int nav = scancode == 0x4B ? KEY_LEFT_ARROW : scancode == 0x4D ? KEY_RIGHT_ARROW :
+                          scancode == 0x47 ? KEY_HOME : scancode == 0x4F ? KEY_END :
+                          scancode == 0x49 ? KEY_PAGE_UP : scancode == 0x51 ? KEY_PAGE_DOWN :
+                          scancode == 0x53 ? KEY_DELETE : scancode == 0x52 ? KEY_INSERT : 0;
+                if (nav)
+                    key_buffer[buffer_index++] = nav | (shift_pressed ? KEYMOD_SHIFT : 0) | (ctrl_pressed ? KEYMOD_CTRL : 0);
+                break;
+            }
         }
         extended_scancode = 0;
     } else {
@@ -119,6 +145,13 @@ void keyboard_scancode(uint8_t scancode) {
             return;
         }
         
+        if (super_pressed) {                                /* Windows key + a letter: the desktop's */
+            char c = kbdus[scancode];
+            super_used = 1;
+            if (c >= 'a' && c <= 'z') key_buffer[buffer_index++] = KEYMOD_SUPER | c;
+            key_buffer[buffer_index] = '\0';
+            return;
+        }
         // Handle Ctrl combinations
         if (ctrl_pressed) {
             switch (scancode) {

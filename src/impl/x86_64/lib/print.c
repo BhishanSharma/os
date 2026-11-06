@@ -295,6 +295,7 @@ void print_newLine() {
 
 static int (*print_tap)(char);
 void print_set_tap(int (*tap)(char)) { print_tap = tap; }
+int print_tapped(void) { return print_tap != 0; }
 
 /* The system log: everything printed since power-on (the kernel's messages,
  * programs' console output), each line after the seconds since the timer

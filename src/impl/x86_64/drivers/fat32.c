@@ -491,6 +491,72 @@ out:
     return r;
 }
 
+/* Write entry `e` (all but its name) into folder `dir` under `name`: its
+ * long-name pieces and its 8.3 alias. `out` gets where it went. */
+static int put_entry(fatvol_t *v, uint32_t dir, const char *name, fat32_dir_entry_t e, fatent_t *out) {
+    uint8_t fn[11];
+    int flags = short_only(name, fn);
+    size_t len = strlen(name);
+    uint32_t pieces = flags >= 0 ? 0 : (uint32_t)((len + LFN_CHARS - 1) / LFN_CHARS);
+    if (flags < 0) {
+        int r = make_alias(v, dir, name, fn);
+        if (r) return r;
+    }
+    memcpy(e.name, fn, 11);
+    e.reserved = flags > 0 ? (uint8_t)flags : 0;
+    uint32_t c = 0, i = 0;
+    int r = free_run(v, dir, pieces + 1, &c, &i);
+    uint32_t first_c = c, first_i = i;
+    uint8_t sum = lfn_checksum(fn);
+    for (uint32_t ord = pieces; !r && ord >= 1; ord--) {   /* the long name, last piece first */
+        uint8_t raw[32];
+        memset(raw, 0, sizeof(raw));
+        raw[0] = (uint8_t)(ord | (ord == pieces ? 0x40 : 0));
+        raw[11] = ATTR_LFN;
+        raw[13] = sum;
+        for (int k = 0; k < LFN_CHARS; k++) {
+            size_t at = (ord - 1) * LFN_CHARS + (size_t)k;
+            uint16_t ch = at < len ? (uint8_t)name[at] : at == len ? 0 : 0xFFFF;
+            raw[lfn_offsets[k]] = (uint8_t)ch;
+            raw[lfn_offsets[k] + 1] = (uint8_t)(ch >> 8);
+        }
+        r = slot_store(v, c, i, raw);
+        if (!r && !next_slot(v, &c, &i)) r = FATV_IO;
+    }
+    if (!r) r = slot_store(v, c, i, &e);
+    if (r) return r;
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        out->e = e;
+        out->slot_cluster = c;
+        out->slot_index = i;
+        out->lfn_cluster = first_c;
+        out->lfn_index = first_i;
+        out->lfn_count = pieces;
+        kstrncpy(out->name, name, sizeof(out->name));
+    }
+    return 0;
+}
+
+/* Its folder entries (the long name's too) marked free. */
+static int drop_entry(fatvol_t *v, fatent_t *f) {
+    uint32_t lc = f->lfn_cluster, li = f->lfn_index;
+    for (uint32_t k = 0; k < f->lfn_count; k++) {
+        uint8_t raw[32];
+        uint8_t *buf = kmalloc(v->bpc);
+        if (!buf) return FATV_IO;
+        int r = read_cluster(v, lc, buf);
+        if (!r) memcpy(raw, buf + li * 32, 32);
+        kfree(buf);
+        if (r) return r;
+        raw[0] = 0xE5;
+        if ((r = slot_store(v, lc, li, raw)) != 0) return r;
+        if (!next_slot(v, &lc, &li)) break;
+    }
+    f->e.name[0] = 0xE5;
+    return entry_store(v, f);
+}
+
 int fatvol_create(fatvol_t *v, uint32_t dir, const char *name, int is_dir, fatent_t *out) {
     if (!fatvol_valid_name(name)) return FATV_BAD_NAME;
     if (!v->dev.writable) return FATV_READ_ONLY;
@@ -501,18 +567,10 @@ int fatvol_create(fatvol_t *v, uint32_t dir, const char *name, int is_dir, faten
     if (found == 0) return FATV_EXISTS;
 
     uint8_t fn[11];
-    int flags = short_only(name, fn);
-    size_t len = strlen(name);
-    uint32_t pieces = flags >= 0 ? 0 : (uint32_t)((len + LFN_CHARS - 1) / LFN_CHARS);
-    if (flags < 0) {
-        int r = make_alias(v, dir, name, fn);
-        if (r) return r;
-    }
-
+    short_only(name, fn);
     fat32_dir_entry_t e;
     memset(&e, 0, sizeof(e));
     memcpy(e.name, fn, 11);
-    e.reserved = flags > 0 ? (uint8_t)flags : 0;
     e.attributes = is_dir ? FAT_ATTR_DIRECTORY : FAT_ATTR_ARCHIVE;
     stamp(&e, 1);
     uint8_t *buf = kmalloc(v->bpc);
@@ -547,41 +605,58 @@ int fatvol_create(fatvol_t *v, uint32_t dir, const char *name, int is_dir, faten
     }
     kfree(buf);
 
-    uint32_t c = 0, i = 0;
-    int r = free_run(v, dir, pieces + 1, &c, &i);
-    uint32_t first_c = c, first_i = i;
-    uint8_t sum = lfn_checksum(fn);
-    for (uint32_t ord = pieces; !r && ord >= 1; ord--) {   /* the long name, last piece first */
-        uint8_t raw[32];
-        memset(raw, 0, sizeof(raw));
-        raw[0] = (uint8_t)(ord | (ord == pieces ? 0x40 : 0));
-        raw[11] = ATTR_LFN;
-        raw[13] = sum;
-        for (int k = 0; k < LFN_CHARS; k++) {
-            size_t at = (ord - 1) * LFN_CHARS + (size_t)k;
-            uint16_t ch = at < len ? (uint8_t)name[at] : at == len ? 0 : 0xFFFF;
-            raw[lfn_offsets[k]] = (uint8_t)ch;
-            raw[lfn_offsets[k] + 1] = (uint8_t)(ch >> 8);
+    int r = put_entry(v, dir, name, e, out);
+    if (r && sub) fat_set(v, sub, 0);
+    return r;
+}
+
+/* Rename `f` (found in `from`) to `name` in folder `to`: a new entry for the
+ * same clusters, then the old one goes (a crash in between leaves both:
+ * nothing is lost). A folder that changes parent gets its ".." fixed. */
+int fatvol_rename(fatvol_t *v, uint32_t from, fatent_t *f, uint32_t to, const char *name) {
+    if (!fatvol_valid_name(name)) return FATV_BAD_NAME;
+    if (!v->dev.writable) return FATV_READ_ONLY;
+    fatent_t *other = kmalloc(sizeof(*other));
+    if (!other) return FATV_IO;
+    int found = fatvol_lookup(v, to, name, other);
+    int same = found == 0 && other->slot_cluster == f->slot_cluster && other->slot_index == f->slot_index;
+    kfree(other);
+    if (found == 0 && !same) return FATV_EXISTS;           /* (only its case changes: fine) */
+    fatent_t *neu = kmalloc(sizeof(*neu));
+    if (!neu) return FATV_IO;
+    fat32_dir_entry_t e = f->e;
+    int r = put_entry(v, to, name, e, neu);                /* the new entry first, then the old goes */
+    if (!r) r = drop_entry(v, f);
+    if (!r) *f = *neu;
+    kfree(neu);
+    if (r) return r;
+    uint32_t c = fatent_cluster(f);
+    if ((e.attributes & FAT_ATTR_DIRECTORY) && from != to && valid_cluster(v, c)) {
+        uint8_t *buf = kmalloc(v->bpc);
+        if (!buf) return FATV_IO;
+        if ((r = read_cluster(v, c, buf)) == 0) {
+            fat32_dir_entry_t *d = (fat32_dir_entry_t *)buf;
+            uint32_t parent = to == v->root ? 0 : to;
+            if (d[1].name[0] == '.' && d[1].name[1] == '.') {
+                d[1].first_cluster_high = (uint16_t)(parent >> 16);
+                d[1].first_cluster_low = (uint16_t)parent;
+                r = write_cluster(v, c, buf);
+            }
         }
-        r = slot_store(v, c, i, raw);
-        if (!r && !next_slot(v, &c, &i)) r = FATV_IO;
+        kfree(buf);
     }
-    if (!r) r = slot_store(v, c, i, &e);
-    if (r) {
-        if (sub) fat_set(v, sub, 0);
-        return r;
-    }
-    if (out) {
-        memset(out, 0, sizeof(*out));
-        out->e = e;
-        out->slot_cluster = c;
-        out->slot_index = i;
-        out->lfn_cluster = first_c;
-        out->lfn_index = first_i;
-        out->lfn_count = pieces;
-        kstrncpy(out->name, name, sizeof(out->name));
-    }
-    return 0;
+    return r;
+}
+
+/* Free space: the clusters no file uses, counted in the FAT. */
+uint64_t fatvol_free_bytes(fatvol_t *v) {
+    uint32_t n = 0;
+    v->defer = 1;
+    for (uint32_t c = 2; c < v->clusters + 2; c++)
+        if (fat_get(v, c) == 0) n++;
+    v->defer = 0;
+    fat_flush(v);
+    return (uint64_t)n * v->bpc;
 }
 
 /* ---- Files ------------------------------------------------------------------------ */
@@ -685,21 +760,7 @@ int fatvol_delete(fatvol_t *v, fatent_t *f) {
         v->defer = 0;
         if (fat_flush(v) != 0) return FATV_IO;
     }
-    uint32_t lc = f->lfn_cluster, li = f->lfn_index;      /* its long name goes too */
-    for (uint32_t k = 0; k < f->lfn_count; k++) {
-        uint8_t raw[32];
-        uint8_t *buf = kmalloc(v->bpc);
-        if (!buf) return FATV_IO;
-        int r = read_cluster(v, lc, buf);
-        if (!r) memcpy(raw, buf + li * 32, 32);
-        kfree(buf);
-        if (r) return r;
-        raw[0] = 0xE5;
-        if ((r = slot_store(v, lc, li, raw)) != 0) return r;
-        if (!next_slot(v, &lc, &li)) break;
-    }
-    f->e.name[0] = 0xE5;
-    return entry_store(v, f);
+    return drop_entry(v, f);                               /* (its long name too) */
 }
 
 /* ---- Formatting ----------------------------------------------------------------- */

@@ -593,12 +593,17 @@ static void set_line(const char *s) {
 
 /* A key for a program in raw mode: as a terminal sends it. */
 static void raw_key(int k) {
-    char s[4] = { 0 };
-    if (k == KEYCODE_UP || k == KEYCODE_DOWN || k == KEYCODE_RIGHT || k == KEYCODE_LEFT) {
-        s[0] = 0x1b;
-        s[1] = app_keys ? 'O' : '[';
-        s[2] = "ABCD"[k - KEYCODE_UP];
-        write(master, s, 3);
+    char s[16] = { 0 };
+    int base = KEYCODE_BASE(k), mods = k & (KEYMOD_SHIFT | KEYMOD_CTRL);
+    int xmod = 1 + (mods & KEYMOD_SHIFT ? 1 : 0) + (mods & KEYMOD_CTRL ? 4 : 0);   /* xterm: 2 Shift, 5 Ctrl */
+    if (base >= KEYCODE_UP && base <= KEYCODE_END && base != KEYCODE_PGUP && base != KEYCODE_PGDN) {
+        char c = base == KEYCODE_HOME ? 'H' : base == KEYCODE_END ? 'F' : "ABCD"[base - KEYCODE_UP];
+        int n = mods ? snprintf(s, sizeof(s), "\x1b[1;%d%c", xmod, c) : snprintf(s, sizeof(s), "\x1b%c%c", app_keys ? 'O' : '[', c);
+        write(master, s, (size_t)n);
+    } else if (base == KEYCODE_PGUP || base == KEYCODE_PGDN || base == KEYCODE_DELETE || base == KEYCODE_INSERT) {
+        int code = base == KEYCODE_PGUP ? 5 : base == KEYCODE_PGDN ? 6 : base == KEYCODE_DELETE ? 3 : 2;
+        int n = mods ? snprintf(s, sizeof(s), "\x1b[%d;%d~", code, xmod) : snprintf(s, sizeof(s), "\x1b[%d~", code);
+        write(master, s, (size_t)n);
     } else if (k == '\n' || k == '\r') {
         write(master, "\r", 1);
     } else if (k == '\b') {
@@ -674,6 +679,23 @@ static void key(int k) {
         if (cur > 0) cur--;
     } else if (k == KEYCODE_RIGHT) {
         if (cur < line_len) cur++;
+    } else if (k == (KEYCODE_LEFT | KEYMOD_CTRL)) {      /* a word back */
+        while (cur > 0 && line[cur - 1] == ' ') cur--;
+        while (cur > 0 && line[cur - 1] != ' ') cur--;
+    } else if (k == (KEYCODE_RIGHT | KEYMOD_CTRL)) {     /* a word on */
+        while (cur < line_len && line[cur] == ' ') cur++;
+        while (cur < line_len && line[cur] != ' ') cur++;
+    } else if (KEYCODE_BASE(k) == KEYCODE_HOME || k == 1) {   /* (Ctrl+A, as in bash) */
+        cur = 0;
+    } else if (KEYCODE_BASE(k) == KEYCODE_END || k == 5) {    /* (Ctrl+E) */
+        cur = line_len;
+    } else if (KEYCODE_BASE(k) == KEYCODE_DELETE) {
+        if (cur < line_len) {
+            memmove(line + cur, line + cur + 1, (size_t)(line_len - cur - 1));
+            line_len--;
+        }
+    } else if (k == 21) {                               /* Ctrl+U: the whole line */
+        line_len = cur = 0;
     } else if (k == '\b') {
         if (cur > 0) {
             memmove(line + cur - 1, line + cur, (size_t)(line_len - cur));

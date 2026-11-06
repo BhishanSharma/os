@@ -1,7 +1,6 @@
 // mv <from> <to> - rename a file or folder, or move it into a folder
 //
-// Within one volume; a file already called <to> is replaced. FAT32 volumes
-// (/SYS, /USB) cannot rename yet.
+// Within one volume; a file already called <to> is replaced (a folder is not).
 #include <stdio.h>
 #include <string.h>
 #include <os.h>

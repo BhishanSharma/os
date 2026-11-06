@@ -53,6 +53,10 @@
 #define PAGE_UP(x)       (((x) + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1))
 #define PAGE_DOWN(x)     ((x) & ~(uint64_t)(PAGE_SIZE - 1))
 
+_Static_assert(KEYCODE_SUPER == KEY_SUPER && KEYMOD_SUPER == (int)0x4000 && KEYMOD_CTRL == 0x2000, "the Windows key");
+_Static_assert(KEYCODE_HOME == KEY_HOME && KEYCODE_DELETE == KEY_DELETE && KEYCODE_INSERT == KEY_INSERT &&
+               KEYCODE_PGUP == KEY_PAGE_UP && KEYCODE_PGDN == KEY_PAGE_DOWN && KEYCODE_END == KEY_END,
+               "the navigation key codes");
 _Static_assert(KEYCODE_UP == KEY_UP_ARROW && KEYCODE_DOWN == KEY_DOWN_ARROW &&
                KEYCODE_LEFT == KEY_LEFT_ARROW && KEYCODE_RIGHT == KEY_RIGHT_ARROW,
                "user key codes must match the keyboard driver");

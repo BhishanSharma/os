@@ -245,10 +245,12 @@ static void cmd_help(void)
     print_str("\n=== Memory and Disk (debug) ===\n");
     print_str("meminfo            - kernel heap and program memory\n");
     print_str("alloc              - allocate a physical frame\n");
-    print_str("malloc <bytes>     - allocate heap memory (test)\n");
-    print_str("free               - free last test allocation\n");
-    print_str("freeidx <n>        - free n-th test allocation\n");
-    print_str("listptr            - list test allocations\n");
+    print_str("free               - memory: total, used, free\n");
+    print_str("df                 - each mounted volume: size, used, free\n");
+    print_str("kmalloc <bytes>    - allocate kernel heap memory (test)\n");
+    print_str("kfree              - free the last test allocation\n");
+    print_str("kfreeidx <n>       - free the n-th test allocation\n");
+    print_str("klistptr           - list the test allocations\n");
     print_str("mount [ram|ata|nvme n|sata n|disk d n] [dir] - mount a volume (no arguments: list mounts)\n");
     print_str("umount <dir>       - unmount a volume\n");
     print_str("disks              - the NVMe and SATA drives and their partitions (also `nvme`)\n");
@@ -494,7 +496,8 @@ static int kernel_command(const char *line, int run_programs) {
     }
     else if (strcmp(line, "clear") == 0)
     {
-        print_clear();
+        if (print_tapped()) print_str("\x1b[H\x1b[2J\x1b[3J");   /* a terminal window's screen (kcommand) */
+        else print_clear();
     }
     else if (users_command(line))
     {
@@ -605,9 +608,9 @@ static int kernel_command(const char *line, int run_programs) {
             print_str("Out of memory!\n");
         }
     }
-    else if (strncmp(line, "malloc ", 7) == 0)
+    else if (strncmp(line, "kmalloc ", 8) == 0)
     {
-        uint32_t size = kstr_to_uint32(line + 7);
+        uint32_t size = kstr_to_uint32(line + 8);
         if (size == 0)
         {
             print_str("Invalid size\n");
@@ -633,7 +636,18 @@ static int kernel_command(const char *line, int run_programs) {
             }
         }
     }
-    else if (strcmp(line, "free") == 0)
+    else if (strcmp(line, "free") == 0 || strcmp(line, "free -h") == 0 || strcmp(line, "free -m") == 0)
+    {
+        uint64_t used = heap_get_used() + physmem_used(), all = heap_get_total() + physmem_total();
+        kprintf("             total        used        free\n");
+        kprintf("Mem:   %8u MiB %7u MiB %7u MiB\n", (uint32_t)(all >> 20), (uint32_t)(used >> 20),
+                (uint32_t)((all - used) >> 20));
+    }
+    else if (strcmp(line, "df") == 0 || strcmp(line, "df -h") == 0)
+    {
+        vfs_print_df();
+    }
+    else if (strcmp(line, "kfree") == 0)
     {
         if (test_alloc_count == 0)
         {
@@ -648,9 +662,9 @@ static int kernel_command(const char *line, int run_programs) {
             test_allocs[test_alloc_count] = 0;
         }
     }
-    else if (strncmp(line, "freeidx ", 8) == 0)
+    else if (strncmp(line, "kfreeidx ", 9) == 0)
     {
-        uint32_t idx = kstr_to_uint32(line + 8);
+        uint32_t idx = kstr_to_uint32(line + 9);
         if (idx >= (uint32_t)test_alloc_count)
         {
             print_str("Invalid index\n");
@@ -666,7 +680,7 @@ static int kernel_command(const char *line, int run_programs) {
             test_allocs[idx] = 0;
         }
     }
-    else if (strcmp(line, "listptr") == 0)
+    else if (strcmp(line, "klistptr") == 0)
     {
         print_str("Test allocations:\n");
         for (int i = 0; i < test_alloc_count; i++)

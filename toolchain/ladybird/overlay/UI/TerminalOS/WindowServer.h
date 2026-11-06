@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include <AK/ByteString.h>
 #include <AK/Error.h>
 #include <AK/Optional.h>
 #include <AK/StringView.h>
@@ -30,9 +31,14 @@ struct WindowEvent {
     };
     int type;
     int x, y;              // in the content; Resize: the new size
-    int key;               // Key: the key code (ASCII, or 0x101-0x104 for the arrows); Wheel: steps
+    int key;               // Key: the key code (ASCII; 0x101-0x10A arrows, Home, End, PgUp, PgDn, Delete, Insert,
+                           // with 0x1000 Shift and 0x2000 Ctrl); Wheel: steps
     int buttons;
 };
+
+// The clipboard every program of the user shares (the OS's user/lib/ui.c).
+ByteString clipboard_get();
+void clipboard_set(StringView);
 
 class TOSWindow {
 public:

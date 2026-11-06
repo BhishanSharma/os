@@ -55,11 +55,18 @@ disk the accounts last until reboot.
 ### Files
 | Command                    | Description                                              |
 | -------------------------- | -------------------------------------------------------- |
-| `ls`                       | List the current directory                               |
-| `cat <file>`               | Print a file (max 1 MB; Shift+Up/Down scrolls back)       |
+| `ls [-l] [-a] [dir]...`    | List folders (flags combine: `ls -la`; a name with spaces needs no quotes) |
+| `cat [file]...`            | Print files as they are (no files: what comes in, `echo hi \| cat`) |
+| `cp [-r] <from>... <to>`   | Copy files (into `<to>` if it is a folder); `-r` folders too |
+| `head` / `tail [-n N]`     | The first / last N lines (10) of files or of what comes in |
+| `grep [-i] [-n] [-v] [-c] [-r] <pattern> [file]...` | The lines that match (`^ $ . *` in the pattern) |
+| `sort [-r] [-n] [-u]`      | Lines in order                                            |
+| `uname [-a]`               | The system's name, the computer's, the version, x86_64   |
+| `free`                     | Memory: total, used, free                                 |
+| `df`                       | Each mounted volume: size, used, free                     |
 | `write <file> <text>`      | Write `<text>` to a file (creates or overwrites)         |
 | `touch <file>`             | Create an empty file                                     |
-| `rm <file>`                | Delete a file                                            |
+| `rm [-r] [-f] <file>...`   | Delete files; `-r` folders with what is in them           |
 | `mkdir <dir>`              | Create a directory                                       |
 | `cd <dir>` / `pwd`         | Change / print the working directory                     |
 | `tree`                     | List the current directory (one level, no recursion yet) |
@@ -99,9 +106,9 @@ disk the accounts last until reboot.
 | `status`                   | Uptime and test-allocation count                         |
 | `meminfo`                  | Heap statistics                                          |
 | `alloc`                    | Allocate one physical frame and print its address (test) |
-| `malloc <bytes>`           | Allocate heap memory in a test slot                      |
-| `free` / `freeidx <n>`     | Free the last / the n-th test allocation                 |
-| `listptr`                  | List test allocations                                    |
+| `kmalloc <bytes>`          | Allocate kernel heap memory in a test slot               |
+| `kfree` / `kfreeidx <n>`   | Free the last / the n-th test allocation                 |
+| `klistptr`                 | List test allocations                                    |
 | `mount [ram\|ata\|nvme n\|sata n\|disk d n] [dir]` | List the mounted volumes, or mount one at a folder (default /RAM, /ATA, /NVME, /SATA, /DISKd); FAT32 or ext2/3 |
 | `umount <dir>`             | (root) Unmount a volume (not /)                          |
 | `disks` (or `nvme`)        | Every NVMe and SATA drive: model, size, partitions (TERMINALOS is the read-write one) |

@@ -925,16 +925,37 @@ void ui_button(ui_canvas *c, int x, int y, int w, int h, const char *label, int 
 }
 
 void ui_textfield(ui_canvas *c, int x, int y, int w, int h, const char *text, int scale, int focused) {
+    ui_textfield_at(c, x, y, w, h, text, scale, focused, (int)strlen(text));
+}
+
+/* Bytes [from, to) of s, as wide as drawn. */
+static int width_of(const char *s, int from, int to, int scale) {
+    char part[256];
+    int n = to - from;
+    if (n <= 0) return 0;
+    if (n > 255) n = 255;
+    memcpy(part, s + from, (size_t)n);
+    part[n] = 0;
+    return ui_text_width(part, scale);
+}
+
+void ui_textfield_at(ui_canvas *c, int x, int y, int w, int h, const char *text, int scale, int focused, int caret) {
     int r = UI_R_MEDIUM * scale;                                           /* radius.medium: inputs */
     if (focused) ui_focus_ring(c, x, y, w, h, r, scale);
     ui_round(c, x, y, w, h, r, focused ? UI_ACCENT : ui_color(UI_C_CONTROL_EDGE));
     ui_round(c, x + 1, y + 1, w - 2, h - 2, r - 1, ui_color(UI_C_FIELD));
-    int room = w - 16 * scale;
-    const char *shown = text;                           /* the end stays in view */
-    while (*shown && ui_text_width(shown, scale) > room) shown++;
+    int n = (int)strlen(text), room = w - 16 * scale;
+    if (caret < 0 || caret > n) caret = n;
+    int from = 0;                                       /* the caret stays in view */
+    while (from < caret && width_of(text, from, caret, scale) > room) {
+        from++;
+        while (from < caret && ((unsigned char)text[from] & 0xC0) == 0x80) from++;
+    }
     int tx = x + 8 * scale, ty = y + (h - 16 * scale) / 2;
-    tx += ui_text(c, tx, ty, shown, UI_TEXT, scale);
-    if (focused) ui_fill(c, tx + scale, ty + scale, scale, 14 * scale, UI_ACCENT);
+    ui_clip(c, x + 4 * scale, y, w - 8 * scale, h);
+    ui_text(c, tx, ty, text + from, UI_TEXT, scale);
+    ui_noclip(c);
+    if (focused) ui_fill(c, tx + width_of(text, from, caret, scale) + scale, ty + scale, scale, 14 * scale, UI_ACCENT);
 }
 
 static int row_height(int scale) { return 24 * scale; }

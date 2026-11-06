@@ -1,4 +1,8 @@
-// ls [-l] [folder] - list a folder: folders first, then files with their sizes
+// ls [-l] [-a] [folder]... - list folders: folders first, then files with their sizes
+//
+// Flags may be combined (-la); -a, -h and -1 are taken (the list always has
+// every name, sizes readable, one a line). A folder name with spaces works
+// without quotes.
 //
 // -l also shows each one's permissions, owner and when it last changed (on
 // FAT32 volumes, which keep no owners: rwxr-xr-x folders, rw-r--r-- files, root).
@@ -86,10 +90,36 @@ static int local_offset(void) {
     return d + (l.hour - u.hour) * 60 + (l.minute - u.minute);
 }
 
+static int list(const char *path, int longer, int offset);
+
 int main(int argc, char **argv) {
+    int longer = 0, i = 1;
+    for (; i < argc && argv[i][0] == '-' && argv[i][1]; i++)
+        for (const char *f = argv[i] + 1; *f; f++)
+            if (*f == 'l') longer = 1;
+    int offset = longer ? local_offset() : 0;
     char path[256];
-    int longer = argc > 1 && !strcmp(argv[1], "-l"), offset = longer ? local_offset() : 0;
-    args_join(path, sizeof(path), argc, argv, 1 + longer);   /* ls My Folder */
+    struct os_stat st;
+    args_join(path, sizeof(path), argc, argv, i);           /* ls My Folder */
+    if (argc - i <= 1 || stat(path, &st) == 0) return list(path, longer, offset);
+    int status = 0;                                          /* several folders */
+    for (; i < argc; i++) {
+        printf("%s:\n", argv[i]);
+        status |= list(argv[i], longer, offset);
+        if (i + 1 < argc) printf("\n");
+    }
+    return status;
+}
+
+static int list(const char *path, int longer, int offset) {
+    struct os_stat st;
+    if (path[0] && stat(path, &st) == 0 && !st.is_dir) {    /* a file: just it */
+        char size[16];
+        format_size(size, sizeof(size), st.size);
+        if (longer) long_info("", path, offset);
+        printf("  %s  %s\n", path, size);
+        return 0;
+    }
     struct os_dirent *e = malloc(MAX_ENTRIES * sizeof(*e));
     if (!e) {
         printf("ls: out of memory\n");
@@ -106,6 +136,7 @@ int main(int argc, char **argv) {
     n = kept;
     if (n == 0) {
         printf("(empty)\n");
+        free(e);
         return 0;
     }
     sort(e, n);
@@ -139,5 +170,6 @@ int main(int argc, char **argv) {
     format_size(size, sizeof(size), total);
     printf("\n  %d file%s, %d director%s, %s\n", files, files == 1 ? "" : "s",
            dirs, dirs == 1 ? "y" : "ies", size);
+    free(e);
     return 0;
 }
