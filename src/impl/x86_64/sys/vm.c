@@ -77,7 +77,10 @@ static void drop_page(uint64_t phys) {
     else free_frame(phys_to_virt(phys));
 }
 
+int vm_out_of_memory;
+
 int vm_fault(uint64_t root, vm_space_t *s, uint64_t addr, int write) {
+    vm_out_of_memory = 0;
     uint64_t page = addr & ~(uint64_t)(PAGE_SIZE - 1);
     uint64_t *pte = paging_user_pte(root, page, 0);
     if (pte && (*pte & PAGE_PRESENT)) {
@@ -88,7 +91,7 @@ int vm_fault(uint64_t root, vm_space_t *s, uint64_t addr, int write) {
             *pte = (*pte | PAGE_RW) & ~(uint64_t)PAGE_COW;
         } else {
             uint64_t copy = new_page(0);
-            if (!copy) return -1;
+            if (!copy) return vm_out_of_memory = 1, -1;
             memcpy(phys_to_virt(copy), phys_to_virt(phys), PAGE_SIZE);
             *pte = copy | PAGE_PRESENT | PAGE_RW | PAGE_USER;
             __asm__ volatile("invlpg (%0)" :: "r"(page) : "memory");
@@ -105,11 +108,11 @@ int vm_fault(uint64_t root, vm_space_t *s, uint64_t addr, int write) {
     if (r->kind == VM_SHM) {
         uint64_t i = (r->offset + page - r->start) / PAGE_SIZE;
         if (i >= r->obj->size / PAGE_SIZE) return -1;
-        if (!r->obj->pages[i] && !(r->obj->pages[i] = new_page(1))) return -1;
+        if (!r->obj->pages[i] && !(r->obj->pages[i] = new_page(1))) return vm_out_of_memory = 1, -1;
         phys = r->obj->pages[i];
         page_ref(phys);                                       /* the object keeps its own */
     } else {
-        if (!(phys = new_page(0))) return -1;
+        if (!(phys = new_page(0))) return vm_out_of_memory = 1, -1;
         if (r->kind == VM_FILE) {
             uint64_t off = r->offset + page - r->start;
             uint64_t end = r->limit && r->limit < r->obj->size ? r->limit : r->obj->size;

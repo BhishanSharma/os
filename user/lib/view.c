@@ -17,6 +17,9 @@ static view_t *the_root;                          /* v_run's */
 static int S = 1, quit_code = -1, relayout = 1;
 static view_t *hot, *pressed, *focus, *grab;      /* under the pointer, button held, keys, dragged */
 static unsigned long last_click_ms;
+static int (*close_hook)(void);                    /* v_on_close: 0 keeps the window open */
+
+void v_on_close(int (*may_close)(void)) { close_hook = may_close; }
 static int last_click_row = -1;
 
 /* ---- Building ------------------------------------------------------------ */
@@ -704,7 +707,7 @@ static void handle(view_t *root, const struct ws_event *e) {
     view_t *v = hit(root, e->x, e->y);
     switch (e->type) {
     case WS_EV_CLOSE:
-        quit_code = 0;
+        if (!close_hook || close_hook()) quit_code = 0;   /* (the program may say: not yet) */
         break;
     case WS_EV_RESIZE:                                 /* a new canvas: everything again */
         relayout = 1;

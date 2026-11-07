@@ -40,6 +40,8 @@ vm_region_t *vm_find(vm_space_t *s, uint64_t addr);
 /* Make `addr` accessible (for writing if `write`): map the page if its region
  * has none yet, or resolve copy-on-write. 0 on success, -1: not allowed
  * (a real segmentation fault). */
+/* 1 after a vm_fault that failed for want of a free page (the memory is full). */
+extern int vm_out_of_memory;
 int vm_fault(uint64_t root, vm_space_t *s, uint64_t addr, int write);
 
 /* A fresh writable page at `addr`, whatever was there: lets kernel code that

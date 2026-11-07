@@ -396,6 +396,19 @@ static int window_key(view_t *v, int k) {             /* Ctrl+S, Ctrl+G from the
     return 1;
 }
 
+/* Closing with changes not saved: the first time it says so (Ctrl+S saves);
+ * closed again within 5 seconds, the changes go. */
+static int may_close(void) {
+    static unsigned long warned;
+    unsigned long now = uptime_ms();
+    if (!changed || (warned && now - warned < 5000)) return 1;
+    warned = now;
+    snprintf(status, sizeof(status), "Not saved: Ctrl+S saves it; close again to throw the changes away");
+    show_status();
+    v_dirty(info);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     S = ui_scale();
     CW = 8 * S;
@@ -432,5 +445,6 @@ int main(int argc, char **argv) {
 
     load();
     v_focus(editor);
+    v_on_close(may_close);
     return v_run(&win, root, 0, 0);
 }

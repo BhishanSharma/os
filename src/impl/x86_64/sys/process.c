@@ -703,7 +703,10 @@ void process_fault(uint64_t vector, const char *name, uint64_t rip, uint64_t add
     char msg[200];
     process_t *p = t->process;
     int overflow = p && address < p->stack_lo && address + (1u << 20) >= p->stack_lo;
-    if (vector == 14)
+    if (vector == 14 && vm_out_of_memory)
+        k_snprintf(msg, sizeof(msg), "%s (pid %d): out of memory (the computer's memory is full) - program terminated",
+                   t->name, t->pid);
+    else if (vector == 14)
         k_snprintf(msg, sizeof(msg), "%s (pid %d): %s at address 0x%lx (rip 0x%lx) - program terminated",
                    t->name, t->pid,
                    overflow ? "Stack overflow (more than 8 MiB of stack)"

@@ -59,7 +59,9 @@ KEYS = {' ': 'spc', '/': 'slash', ':': 'shift-semicolon', '.': 'dot', '-': 'minu
         '&': 'shift-7', '$': 'shift-4', '?': 'shift-slash', ';': 'semicolon', '"': 'shift-apostrophe',
         '~': 'shift-grave_accent', '>': 'shift-dot', '<': 'shift-comma', '=': 'equal', '|': 'shift-backslash',
         "'": 'apostrophe', '*': 'shift-8', ',': 'comma', '!': 'shift-1', '@': 'shift-2', '#': 'shift-3',
-        '(': 'shift-9', ')': 'shift-0', '+': 'shift-equal'}
+        '(': 'shift-9', ')': 'shift-0', '+': 'shift-equal', '[': 'bracket_left', ']': 'bracket_right',
+        '{': 'shift-bracket_left', '}': 'shift-bracket_right', '\\': 'backslash', '^': 'shift-6', '%': 'shift-5',
+        '`': 'grave_accent'}
 
 
 _symbols = None

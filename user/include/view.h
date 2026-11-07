@@ -111,6 +111,9 @@ void v_dirty(view_t *v);                        /* redraw it (and what is inside
  * v_quit is called; -> the exit code. */
 int v_run(ui_window *w, view_t *root, int tick_ms, void (*tick)(void));
 void v_quit(int code);
+/* Before the window closes (its close button, Windows+W): `may_close` says
+ * whether it may (0: it stays open; e.g. there are changes not saved). */
+void v_on_close(int (*may_close)(void));
 void v_layout(ui_window *w, view_t *root);      /* now (to know where views are before v_run) */
 void v_update(void);                            /* draw what changed now (before something slow) */
 
